@@ -1,0 +1,45 @@
+# ROS / colcon
+/build/
+/install/
+/log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ROS logs / bags
+*.bag
+*.db3
+metadata.yaml
+
+# Temporary files
+*.swp
+*.swo
+*~
+*.bak
+
+# Secrets
+.env
+*.pem
+*.key
+*.token
+credentials*
+secrets*
+
+# Gazebo runtime
+.gazebo/
+
+# External repositories restored with vcs
+/src/elephant_myagv_ros2/
+/src/elephant_mycobot_ros2/
+*.bak*

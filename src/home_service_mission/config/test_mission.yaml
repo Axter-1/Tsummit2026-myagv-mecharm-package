@@ -1,0 +1,73 @@
+mission:
+
+  name: nav_aruco_nav_test
+
+  # 0 = repetir indefinidamente
+  # N > 0 = ejecutar exactamente N veces
+  repeat: 5
+
+  # Si cualquier paso falla, detener toda la misión.
+  stop_on_failure: true
+
+  steps:
+
+    # ------------------------------------------------------------
+    # PASO 1
+    # Nav2 lleva al robot cerca del ArUco.
+    #
+    # CAMBIA ESTAS COORDENADAS según tu mapa.
+    # ------------------------------------------------------------
+
+    - type: navigate
+
+      name: go_near_aruco_3
+
+      x: 0.30
+      y: 0.00
+
+      # Orientación final en grados.
+      yaw_deg: 0.0
+
+      frame_id: map
+
+      retries: 1
+
+
+    # ------------------------------------------------------------
+    # PASO 2
+    # ArUco + LiDAR toma el control.
+    # ------------------------------------------------------------
+
+    - type: aruco
+
+      name: approach_aruco_3
+
+      id: 3
+
+      stop_distance: 0.12
+
+      # 0.0 = sin timeout.
+      timeout_sec: 0.0
+
+      retries: 1
+
+
+    # ------------------------------------------------------------
+    # PASO 3
+    # Cuando ArUco termina, Nav2 recupera el control.
+    #
+    # CAMBIA también estas coordenadas.
+    # ------------------------------------------------------------
+
+    - type: navigate
+
+      name: go_final
+
+      x: 0.00
+      y: 0.00
+
+      yaw_deg: 0.0
+
+      frame_id: map
+
+      retries: 1

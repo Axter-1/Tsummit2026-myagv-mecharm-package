@@ -1,0 +1,620 @@
+#!/usr/bin/env python3
+
+import math
+
+import cv2
+import numpy as np
+
+import rclpy
+from rclpy.node import Node
+
+from cv_bridge import CvBridge
+
+from geometry_msgs.msg import TransformStamped
+from sensor_msgs.msg import CameraInfo, Image
+
+from tf2_ros import TransformBroadcaster
+
+from home_service_interfaces.msg import (
+    ArucoDetection,
+    ArucoDetectionArray,
+)
+
+
+class ArucoDetector(Node):
+
+    def __init__(self):
+        super().__init__('aruco_detector')
+
+        # ----------------------------------------------------------
+        # Parameters
+        # ----------------------------------------------------------
+
+        self.declare_parameter(
+            'image_topic',
+            '/camera/image_raw'
+        )
+
+        self.declare_parameter(
+            'camera_info_topic',
+            '/camera/camera_info'
+        )
+
+        self.declare_parameter(
+            'detections_topic',
+            '/aruco/detections'
+        )
+
+        self.declare_parameter(
+            'annotated_image_topic',
+            '/aruco/image_annotated'
+        )
+
+        self.declare_parameter(
+            'marker_size',
+            0.05
+        )
+
+        self.image_topic = (
+            self.get_parameter('image_topic')
+            .get_parameter_value()
+            .string_value
+        )
+
+        self.camera_info_topic = (
+            self.get_parameter('camera_info_topic')
+            .get_parameter_value()
+            .string_value
+        )
+
+        self.detections_topic = (
+            self.get_parameter('detections_topic')
+            .get_parameter_value()
+            .string_value
+        )
+
+        self.annotated_image_topic = (
+            self.get_parameter('annotated_image_topic')
+            .get_parameter_value()
+            .string_value
+        )
+
+        self.marker_size = (
+            self.get_parameter('marker_size')
+            .get_parameter_value()
+            .double_value
+        )
+
+        # ----------------------------------------------------------
+        # Camera calibration
+        # ----------------------------------------------------------
+
+        self.camera_matrix = None
+        self.dist_coeffs = None
+
+        # ----------------------------------------------------------
+        # OpenCV / ROS
+        # ----------------------------------------------------------
+
+        self.bridge = CvBridge()
+
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        # ----------------------------------------------------------
+        # ArUco dictionaries
+        #
+        # 6x6 -> nuestros marcadores
+        # 5x5 -> Home Service Challenge
+        # ----------------------------------------------------------
+
+        self.dictionary_6x6 = cv2.aruco.getPredefinedDictionary(
+            cv2.aruco.DICT_6X6_250
+        )
+
+        self.dictionary_5x5 = cv2.aruco.getPredefinedDictionary(
+            cv2.aruco.DICT_5X5_1000
+        )
+
+        self.detector_parameters = (
+            cv2.aruco.DetectorParameters_create()
+        )
+
+        # ----------------------------------------------------------
+        # Subscribers
+        # ----------------------------------------------------------
+
+        self.camera_info_sub = self.create_subscription(
+            CameraInfo,
+            self.camera_info_topic,
+            self.camera_info_callback,
+            10
+        )
+
+        self.image_sub = self.create_subscription(
+            Image,
+            self.image_topic,
+            self.image_callback,
+            10
+        )
+
+        # ----------------------------------------------------------
+        # Publishers
+        # ----------------------------------------------------------
+
+        self.detections_pub = self.create_publisher(
+            ArucoDetectionArray,
+            self.detections_topic,
+            10
+        )
+
+        self.annotated_pub = self.create_publisher(
+            Image,
+            self.annotated_image_topic,
+            10
+        )
+
+        self.get_logger().info(
+            'Aruco detector started'
+        )
+
+        self.get_logger().info(
+            f'Image topic: {self.image_topic}'
+        )
+
+        self.get_logger().info(
+            f'Camera info topic: {self.camera_info_topic}'
+        )
+
+        self.get_logger().info(
+            f'Marker size: {self.marker_size:.3f} m'
+        )
+
+        self.get_logger().info(
+            'Enabled dictionaries: '
+            'DICT_6X6_250 + DICT_5X5_1000'
+        )
+
+    # ==============================================================
+    # Camera info
+    # ==============================================================
+
+    def camera_info_callback(self, msg):
+
+        self.camera_matrix = np.array(
+            msg.k,
+            dtype=np.float64
+        ).reshape(3, 3)
+
+        self.dist_coeffs = np.array(
+            msg.d,
+            dtype=np.float64
+        )
+
+    # ==============================================================
+    # Rotation matrix -> quaternion
+    # ==============================================================
+
+    def rotation_matrix_to_quaternion(self, matrix):
+
+        m00 = matrix[0, 0]
+        m01 = matrix[0, 1]
+        m02 = matrix[0, 2]
+
+        m10 = matrix[1, 0]
+        m11 = matrix[1, 1]
+        m12 = matrix[1, 2]
+
+        m20 = matrix[2, 0]
+        m21 = matrix[2, 1]
+        m22 = matrix[2, 2]
+
+        trace = m00 + m11 + m22
+
+        if trace > 0.0:
+
+            s = math.sqrt(trace + 1.0) * 2.0
+
+            qw = 0.25 * s
+            qx = (m21 - m12) / s
+            qy = (m02 - m20) / s
+            qz = (m10 - m01) / s
+
+        elif m00 > m11 and m00 > m22:
+
+            s = math.sqrt(
+                1.0 + m00 - m11 - m22
+            ) * 2.0
+
+            qw = (m21 - m12) / s
+            qx = 0.25 * s
+            qy = (m01 + m10) / s
+            qz = (m02 + m20) / s
+
+        elif m11 > m22:
+
+            s = math.sqrt(
+                1.0 + m11 - m00 - m22
+            ) * 2.0
+
+            qw = (m02 - m20) / s
+            qx = (m01 + m10) / s
+            qy = 0.25 * s
+            qz = (m12 + m21) / s
+
+        else:
+
+            s = math.sqrt(
+                1.0 + m22 - m00 - m11
+            ) * 2.0
+
+            qw = (m10 - m01) / s
+            qx = (m02 + m20) / s
+            qy = (m12 + m21) / s
+            qz = 0.25 * s
+
+        norm = math.sqrt(
+            qx * qx +
+            qy * qy +
+            qz * qz +
+            qw * qw
+        )
+
+        if norm > 0.0:
+            qx /= norm
+            qy /= norm
+            qz /= norm
+            qw /= norm
+
+        return qx, qy, qz, qw
+
+    # ==============================================================
+    # Detect one dictionary
+    # ==============================================================
+
+    def detect_dictionary(
+        self,
+        gray,
+        dictionary,
+        dictionary_name
+    ):
+
+        corners, ids, _ = cv2.aruco.detectMarkers(
+            gray,
+            dictionary,
+            parameters=self.detector_parameters
+        )
+
+        detections = []
+
+        if ids is None:
+            return detections
+
+        for i, marker_id in enumerate(ids.flatten()):
+
+            detections.append({
+                'id': int(marker_id),
+                'corners': corners[i],
+                'dictionary': dictionary_name,
+            })
+
+        return detections
+
+    # ==============================================================
+    # Image callback
+    # ==============================================================
+
+    def image_callback(self, msg):
+
+        if self.camera_matrix is None:
+            self.get_logger().warn(
+                'Waiting for camera_info...',
+                throttle_duration_sec=2.0
+            )
+            return
+
+        try:
+
+            image = self.bridge.imgmsg_to_cv2(
+                msg,
+                desired_encoding='bgr8'
+            )
+
+        except Exception as exc:
+
+            self.get_logger().error(
+                f'cv_bridge error: {exc}'
+            )
+
+            return
+
+        gray = cv2.cvtColor(
+            image,
+            cv2.COLOR_BGR2GRAY
+        )
+
+        # ----------------------------------------------------------
+        # Detect BOTH dictionaries
+        # ----------------------------------------------------------
+
+        detections_raw = []
+
+        detections_raw.extend(
+            self.detect_dictionary(
+                gray,
+                self.dictionary_6x6,
+                '6X6_250'
+            )
+        )
+
+        detections_raw.extend(
+            self.detect_dictionary(
+                gray,
+                self.dictionary_5x5,
+                '5X5_1000'
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Detection array
+        # ----------------------------------------------------------
+
+        detection_array = ArucoDetectionArray()
+
+        detection_array.header = msg.header
+        detection_array.detections = []
+
+        image_height, image_width = image.shape[:2]
+
+        # ----------------------------------------------------------
+        # Process every marker
+        # ----------------------------------------------------------
+
+        for detection_raw in detections_raw:
+
+            marker_id = detection_raw['id']
+            marker_corners = detection_raw['corners']
+            dictionary_name = detection_raw['dictionary']
+
+            # ------------------------------------------------------
+            # Pose estimation
+            # ------------------------------------------------------
+
+            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                [marker_corners],
+                self.marker_size,
+                self.camera_matrix,
+                self.dist_coeffs
+            )
+
+            if rvecs is None or tvecs is None:
+                continue
+
+            rvec = rvecs[0][0]
+            tvec = tvecs[0][0]
+
+            # ------------------------------------------------------
+            # Marker center
+            # ------------------------------------------------------
+
+            points = marker_corners.reshape(
+                4,
+                2
+            )
+
+            center_x = float(
+                np.mean(points[:, 0])
+            )
+
+            center_y = float(
+                np.mean(points[:, 1])
+            )
+
+            center_x_normalized = (
+                center_x -
+                (image_width / 2.0)
+            ) / (
+                image_width / 2.0
+            )
+
+            # ------------------------------------------------------
+            # Orientation
+            # ------------------------------------------------------
+
+            rotation_matrix, _ = cv2.Rodrigues(
+                rvec
+            )
+
+            qx, qy, qz, qw = (
+                self.rotation_matrix_to_quaternion(
+                    rotation_matrix
+                )
+            )
+
+            # ------------------------------------------------------
+            # ArucoDetection message
+            # ------------------------------------------------------
+
+            detection = ArucoDetection()
+
+            detection.header = msg.header
+            detection.id = marker_id
+
+            detection.pose.position.x = float(
+                tvec[0]
+            )
+
+            detection.pose.position.y = float(
+                tvec[1]
+            )
+
+            detection.pose.position.z = float(
+                tvec[2]
+            )
+
+            detection.pose.orientation.x = qx
+            detection.pose.orientation.y = qy
+            detection.pose.orientation.z = qz
+            detection.pose.orientation.w = qw
+
+            detection.center_x_px = center_x
+            detection.center_x_normalized = (
+                center_x_normalized
+            )
+
+            detection.distance_z = float(
+                tvec[2]
+            )
+
+            detection.marker_size = float(
+                self.marker_size
+            )
+
+            detection_array.detections.append(
+                detection
+            )
+
+            # ------------------------------------------------------
+            # TF
+            #
+            # IMPORTANTE:
+            # mantenemos aruco_<id> para que siga funcionando
+            # ArucoApproach sin tocarlo todavía.
+            # ------------------------------------------------------
+
+            tf_msg = TransformStamped()
+
+            tf_msg.header = msg.header
+
+            tf_msg.child_frame_id = (
+                f'aruco_{marker_id}'
+            )
+
+            tf_msg.transform.translation.x = float(
+                tvec[0]
+            )
+
+            tf_msg.transform.translation.y = float(
+                tvec[1]
+            )
+
+            tf_msg.transform.translation.z = float(
+                tvec[2]
+            )
+
+            tf_msg.transform.rotation.x = qx
+            tf_msg.transform.rotation.y = qy
+            tf_msg.transform.rotation.z = qz
+            tf_msg.transform.rotation.w = qw
+
+            self.tf_broadcaster.sendTransform(
+                tf_msg
+            )
+
+            # ------------------------------------------------------
+            # Draw marker
+            # ------------------------------------------------------
+
+            corners_to_draw = [
+                marker_corners
+            ]
+
+            ids_to_draw = np.array(
+                [[marker_id]],
+                dtype=np.int32
+            )
+
+            cv2.aruco.drawDetectedMarkers(
+                image,
+                corners_to_draw,
+                ids_to_draw
+            )
+
+            cv2.drawFrameAxes(
+                image,
+                self.camera_matrix,
+                self.dist_coeffs,
+                rvec,
+                tvec,
+                self.marker_size * 0.5
+            )
+
+            # ------------------------------------------------------
+            # Annotation
+            # ------------------------------------------------------
+
+            label = (
+                f'{dictionary_name} '
+                f'ID={marker_id} '
+                f'z={tvec[2]:.2f}m'
+            )
+
+            text_x = int(center_x) - 70
+            text_y = int(center_y) - 20
+
+            cv2.putText(
+                image,
+                label,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA
+            )
+
+        # ----------------------------------------------------------
+        # Publish detections
+        # ----------------------------------------------------------
+
+        self.detections_pub.publish(
+            detection_array
+        )
+
+        # ----------------------------------------------------------
+        # Publish annotated image
+        # ----------------------------------------------------------
+
+        try:
+
+            annotated_msg = (
+                self.bridge.cv2_to_imgmsg(
+                    image,
+                    encoding='bgr8'
+                )
+            )
+
+            annotated_msg.header = msg.header
+
+            self.annotated_pub.publish(
+                annotated_msg
+            )
+
+        except Exception as exc:
+
+            self.get_logger().error(
+                f'Annotated image publish error: {exc}'
+            )
+
+
+def main(args=None):
+
+    rclpy.init(args=args)
+
+    node = ArucoDetector()
+
+    try:
+
+        rclpy.spin(node)
+
+    except KeyboardInterrupt:
+
+        pass
+
+    finally:
+
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

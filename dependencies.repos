@@ -1,0 +1,9 @@
+repositories:
+  elephant_myagv_ros2:
+    type: git
+    url: https://github.com/elephantrobotics/myagv_ros2.git
+    version: afb054bbb54423c09291622956e950062c193ec9
+  elephant_mycobot_ros2:
+    type: git
+    url: https://github.com/elephantrobotics/mycobot_ros2.git
+    version: 3999e2cda7460d61f4fd2ffaa31049f000eae7a8

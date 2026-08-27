@@ -1,0 +1,49 @@
+# ============================================================
+# GOAL
+# ============================================================
+
+int32 target_id
+float64 stop_distance
+
+# <= 0.0 = sin límite de tiempo
+# > 0.0  = timeout explícito en segundos
+float64 timeout_sec
+
+---
+# ============================================================
+# RESULT
+# ============================================================
+
+bool success
+
+# SUCCEEDED
+# TARGET_NOT_FOUND
+# TARGET_LOST
+# TIMEOUT
+# CANCELED
+string status
+
+string message
+
+float64 final_distance
+
+---
+# ============================================================
+# FEEDBACK
+# ============================================================
+
+# SEARCHING
+# ALIGNING
+# APPROACHING
+# REACQUIRING
+# REACHED
+string state
+
+float64 distance
+
+# 0.0 = perfectamente centrado
+# positivo = ArUco a la izquierda
+# negativo = ArUco a la derecha
+float64 center_error
+
+float64 elapsed_sec

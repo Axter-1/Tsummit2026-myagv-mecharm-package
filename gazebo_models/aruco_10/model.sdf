@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+
+  <model name="aruco_10">
+
+    <static>true</static>
+
+    <link name="aruco_link">
+
+      <!--
+        Caja fina para dar presencia física al marcador.
+        X = espesor
+        Y = ancho
+        Z = alto
+      -->
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>0.002 0.064 0.064</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <!--
+        El plano se orienta verticalmente.
+
+        Normal hacia -X, de modo que si el marcador
+        está delante del robot (+X), mira hacia el robot.
+      -->
+      <visual name="aruco_visual">
+
+        <pose>
+          -0.001 0 0
+          1.57079632679 0 -1.57079632679
+        </pose>
+
+        <cast_shadows>false</cast_shadows>
+
+        <geometry>
+          <plane>
+            <normal>0 0 1</normal>
+            <size>0.064 0.064</size>
+          </plane>
+        </geometry>
+
+        <material>
+          <script>
+
+            <uri>
+              model://aruco_10/materials/scripts
+            </uri>
+
+            <uri>
+              model://aruco_10/materials/textures
+            </uri>
+
+            <name>
+              Aruco10/Marker
+            </name>
+
+          </script>
+        </material>
+
+      </visual>
+
+    </link>
+
+  </model>
+
+</sdf>

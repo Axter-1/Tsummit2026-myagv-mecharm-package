@@ -1,0 +1,14 @@
+twist_mux:
+  ros__parameters:
+
+    topics:
+
+      navigation:
+        topic: /cmd_vel
+        timeout: 0.5
+        priority: 50
+
+      aruco:
+        topic: /cmd_vel_aruco
+        timeout: 0.5
+        priority: 100

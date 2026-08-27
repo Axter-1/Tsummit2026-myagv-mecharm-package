@@ -1,0 +1,75 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    mecanum_drive_controller:
+      type: mecanum_drive_controller/MecanumDriveController
+
+    mecharm_arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+mecharm_arm_controller:
+  ros__parameters:
+
+    joints:
+      - joint1_to_base
+      - joint2_to_joint1
+      - joint3_to_joint2
+      - joint4_to_joint3
+      - joint5_to_joint4
+      - joint6_to_joint5
+
+    command_interfaces:
+      - position
+
+    state_interfaces:
+      - position
+      - velocity
+
+    state_publish_rate: 50.0
+
+    action_monitor_rate: 20.0
+
+    allow_partial_joints_goal: false
+
+    open_loop_control: false
+
+    constraints:
+
+      stopped_velocity_tolerance: 0.02
+
+      goal_time: 1.0
+
+mecanum_drive_controller:
+  ros__parameters:
+    reference_timeout: 0.5
+
+    front_left_wheel_command_joint_name: "wheel_fl_joint"
+    front_right_wheel_command_joint_name: "wheel_fr_joint"
+    rear_left_wheel_command_joint_name: "wheel_rl_joint"
+    rear_right_wheel_command_joint_name: "wheel_rr_joint"
+
+    kinematics:
+      base_frame_offset:
+        x: 0.007
+        y: 0.0
+        theta: 0.0
+
+      wheels_radius: 0.04
+      sum_of_robot_center_projection_on_X_Y_axis: 0.198
+
+    use_stamped_vel: false
+
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+
+    enable_odom_tf: false
+
+    pose_covariance_diagonal:
+      [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
+
+    twist_covariance_diagonal:
+      [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
