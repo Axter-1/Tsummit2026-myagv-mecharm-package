@@ -67,15 +67,17 @@ else
 
 fi
 
-docker run \
-    --rm \
-    -it \
-    --name "${CONTAINER}" \
-    --network host \
-    -e DISPLAY="${DISPLAY}" \
-    -e QT_X11_NO_MITSHM=1 \
-    -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
-    -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-    -v "${ROOT}:/repo:ro" \
-    "${GPU_ARGS[@]}" \
-    "${IMAGE}"
+docker run -it \
+  --gpus all \
+  --device=/dev/dxg \
+  -v /usr/lib/wsl:/usr/lib/wsl \
+  -v /mnt/wslg:/mnt/wslg \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -e DISPLAY=$DISPLAY \
+  -e WAYLAND_DISPLAY=$WAYLAND_DISPLAY \
+  -e XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR \
+  -e PULSE_SERVER=$PULSE_SERVER \
+  -e LD_LIBRARY_PATH=/usr/lib/wsl/lib \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  myagv-home-service:galactic-sim
