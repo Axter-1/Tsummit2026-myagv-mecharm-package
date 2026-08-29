@@ -1,0 +1,43 @@
+Aquí tienes todos los comandos extraídos de la imagen image_edbd40.jpg, organizados por las secciones en las que aparecen para que te sea más fácil copiarlos y ejecutarlos en tus entornos de simulación y desarrollo:
+
+Panel Izquierdo (Windows PowerShell)
+Estos comandos son para vincular y adjuntar el dispositivo USB (probablemente un controlador o adaptador serial) a tu distribución WSL:
+
+PowerShell
+usbipd list
+usbipd bind --busid 1-1
+usbipd attach --wsl --busid 1-1
+usbipd list
+Detección y movimiento hacia un aruco
+Secuencia de comandos de ROS 2 para lanzar el entorno de Gazebo, los nodos de percepción y los comportamientos para la aproximación:
+
+Bash
+ros2 launch mobile_manipulator_sim gazebo_hsc.launch.py
+
+ros2 launch home_service_perception aruco_detector.launch.py
+
+ros2 run twist_mux twist_mux --ros-args --params-file $HOME/myagv_home_service_ws/src/mobile_manipulator_sim/config/twist_mux.yaml -r cmd_vel_out:=/mecanum_drive_controller/reference_unstamped
+
+ros2 launch home_service_behaviors aruco_lidar_approach.launch.py
+
+ros2 launch nav2_bringup bringup_launch.py map:=$HOME/myagv_home_service_ws/maps/home_service_challenge_myagv.yaml use_sim_time:=true params_file:=$HOME/myagv_home_service_ws/src/mobile_manipulator_sim/config/nav2_sim.yaml autostart:=true use_composition:=False
+
+ros2 launch home_service_behaviors aruco_approach.launch.py
+
+ros2 action send_goal /aruco_lidar_approach home_service_interfaces/action/ArucoApproach "{target_id: 3, stop_distance: 0.12, timeout_sec: 0.0}" --feedback
+Movimiento autónomo Lidar
+Lanzadores para la navegación autónoma y la visualización en RViz:
+
+Bash
+ros2 launch mobile_manipulator_sim gazebo_hsc.launch.py
+
+ros2 launch nav2_bringup bringup_launch.py map:=$HOME/myagv_home_service_ws/maps/home_service_challenge_myagv.yaml use_sim_time:=true params_file:=$HOME/myagv_home_service_ws/src/mobile_manipulator_sim/config/nav2_sim.yaml autostart:=true use_composition:=False
+
+ros2 launch nav2_bringup rviz_launch.py
+
+ros2 run twist_mux twist_mux --ros-args --params-file $HOME/myagv_home_service_ws/src/mobile_manipulator_sim/config/twist_mux.yaml -r cmd_vel_out:=/mecanum_drive_controller/reference_unstamped
+Misión - movimiento autonomo lidar + detección aruco
+En el texto de las instrucciones se hace referencia a no volver a ejecutar ros2 action send_goal ni ros2 launch nav2_bringup rviz_launch.py, y en la terminal inferior se muestra el lanzamiento de la misión final:
+
+Bash
+ros2 launch home_service_mission mission.launch.py

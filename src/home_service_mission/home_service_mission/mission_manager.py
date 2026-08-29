@@ -32,38 +32,6 @@ class MissionManager(Node):
             ''
         )
 
-        self.stop_on_failure = bool(
-            self.mission.get(
-                'stop_on_failure',
-                True
-            )
-        )
-
-        self.repeat_count = int(
-            self.mission.get(
-                'repeat',
-                1
-            )
-        )
-
-        if self.repeat_count == 0:
-
-            self.get_logger().info(
-                'Mission repetitions: INFINITE'
-            )
-
-        else:
-
-            self.get_logger().info(
-                f'Mission repetitions: '
-                f'{self.repeat_count}'
-            )
-
-        self.get_logger().info(
-            f'Mission repetitions: '
-            f'{self.repeat_count}'
-        )
-
         mission_file = self.get_parameter(
             'mission_file'
         ).value
@@ -124,21 +92,25 @@ class MissionManager(Node):
             {}
         )
 
-        self.steps = self.mission.get(
-            'steps',
-            []
-        )
-
-        if not self.steps:
+        if not self.mission:
             raise RuntimeError(
-                'Mission contains no steps.'
+                'Mission YAML does not contain a "mission" section.'
             )
+
+        # ---------------------------------------------------------
+        # Mission configuration
+        # ---------------------------------------------------------
 
         self.mission_name = (
             self.mission.get(
                 'name',
                 'unnamed_mission'
             )
+        )
+
+        self.steps = self.mission.get(
+            'steps',
+            []
         )
 
         self.stop_on_failure = bool(
@@ -148,6 +120,22 @@ class MissionManager(Node):
             )
         )
 
+        self.repeat_count = int(
+            self.mission.get(
+                'repeat',
+                1
+            )
+        )
+
+        if not self.steps:
+            raise RuntimeError(
+                'Mission contains no steps.'
+            )
+
+        # ---------------------------------------------------------
+        # Mission information
+        # ---------------------------------------------------------
+
         self.get_logger().info(
             f'Mission loaded: '
             f'{self.mission_name}'
@@ -156,6 +144,24 @@ class MissionManager(Node):
         self.get_logger().info(
             f'Number of steps: '
             f'{len(self.steps)}'
+        )
+
+        if self.repeat_count == 0:
+
+            self.get_logger().info(
+                'Mission repetitions: INFINITE'
+            )
+
+        else:
+
+            self.get_logger().info(
+                f'Mission repetitions: '
+                f'{self.repeat_count}'
+            )
+
+        self.get_logger().info(
+            f'Stop on failure: '
+            f'{self.stop_on_failure}'
         )
 
     # =============================================================

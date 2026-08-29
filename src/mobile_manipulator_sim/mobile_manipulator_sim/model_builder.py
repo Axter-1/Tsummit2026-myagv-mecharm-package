@@ -1890,7 +1890,7 @@ def add_sim_lidar(robot):
         horizontal,
         "samples"
     )
-    samples.text = "720"
+    samples.text = "360"
 
     resolution = ET.SubElement(
         horizontal,
@@ -1986,18 +1986,18 @@ def add_sim_lidar(robot):
         "ros"
     )
 
-    namespace = ET.SubElement(
-        ros,
-        "namespace"
-    )
-    namespace.text = "/"
+    # namespace = ET.SubElement(
+    #     ros,
+    #     "namespace"
+    # )
+    # namespace.text = "/"
 
     remapping = ET.SubElement(
         ros,
         "remapping"
     )
 
-    remapping.text = "~/out:=/scan"
+    remapping.text = "~/out:=scan"
 
     output_type = ET.SubElement(
         plugin,
