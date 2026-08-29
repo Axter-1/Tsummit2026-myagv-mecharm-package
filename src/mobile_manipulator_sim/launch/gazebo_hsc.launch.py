@@ -81,25 +81,23 @@ def generate_launch_description():
     # Gazebo Classic Server
     # ========================================================
 
+
     gzserver = IncludeLaunchDescription(
 
         PythonLaunchDescriptionSource(
 
             os.path.join(
-                get_package_share_directory("gazebo_ros"),
+                gazebo_ros_share,
                 "launch",
-                "gazebo.launch.py"
+                "gzserver.launch.py"
             )
         ),
 
         launch_arguments={
 
             "world": world_file,
-
             "verbose": "true",
-
             "pause": "false",
-
             "physics": "ode",
 
         }.items()
