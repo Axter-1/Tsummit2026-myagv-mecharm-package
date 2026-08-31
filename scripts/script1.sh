@@ -4,7 +4,14 @@
 lanzar_terminal() {
     local titulo="$1"
     local comando="$2"
-    gnome-terminal --title="$titulo" -- bash -i -c "$comando; exec bash"
+		xterm \
+      -T "$titulo" \
+			-e bash -lc "
+         source /opt/ros/galactic/setup.bash
+         source ~/myagv_home_service_ws/install/setup.bash
+         $comando
+         exec bash
+			" &
 }
 
 # Comandos base almacenados en variables para no repetir código
@@ -43,6 +50,13 @@ case $OPCION in
         lanzar_terminal "Aruco Approach" "$CMD_ARUCO_APPROACH"
         sleep 2
         lanzar_terminal "Send Goal (Manual)" "$CMD_SEND_GOAL"
+
+				echo
+				echo "Todos los nodos fueron Lanzados"
+				echo "Presiona ENTER para cerrar todas las terminales..."
+				read
+
+				pkill -f xterm
         ;;
     2)
         echo "Iniciando Movimiento autónomo Lidar..."
@@ -52,30 +66,44 @@ case $OPCION in
         sleep 4
         lanzar_terminal "RViz" "$CMD_RVIZ"
         lanzar_terminal "Twist Mux" "$CMD_TWIST_MUX"
+
+				echo
+				echo "Todos los nodos fueron Lanzados"
+				echo "Presiona ENTER para cerrar todas las terminales..."
+				read
+
+				pkill -f xterm
         ;;
     3)
         echo "Iniciando Misión Completa..."
         lanzar_terminal "Gazebo" "$CMD_GAZEBO"
-        sleep 5
+        sleep 15
         
         # Nodos de Navegación
         lanzar_terminal "Nav2 Bringup" "$CMD_NAV2"
-        sleep 4
+        sleep 5
         lanzar_terminal "RViz" "$CMD_RVIZ"
         
         # Nodos de Percepción y Aruco (Se excluye el send_goal manual)
         lanzar_terminal "Aruco Detector" "$CMD_ARUCO_DETECTOR"
-        lanzar_terminal "Aruco Lidar Approach" "$CMD_ARUCO_LIDAR"
-        lanzar_terminal "Aruco Approach" "$CMD_ARUCO_APPROACH"
-        sleep 2
+        sleep 5
+				lanzar_terminal "Aruco Lidar Approach" "$CMD_ARUCO_LIDAR"
+        sleep 5
+				lanzar_terminal "Aruco Approach" "$CMD_ARUCO_APPROACH"
+        sleep 5
         
         # Twist Mux ejecutado una sola vez
         lanzar_terminal "Twist Mux" "$CMD_TWIST_MUX"
-        sleep 2
+        sleep 5
         
         # Lanzamiento final de la Misión
         lanzar_terminal "Mission Node" "$CMD_MISSION"
         echo "¡Todos los nodos para la misión han sido lanzados!"
+
+        echo
+        echo "Todos los nodos fueron Lanzados"
+        echo "Presiona ENTER para cerrar todas las terminales..."
+        read
         ;;
     4)
         echo "Saliendo..."
