@@ -1,0 +1,48 @@
+# Parametros de teleoperacion con mando Xbox Series por Bluetooth.
+#
+#   ros2 run myagv_teleop_joy bluetooth_gamepad_teleop \
+#       --ros-args --params-file <ruta>/xbox_series.yaml
+
+/bluetooth_gamepad_teleop:
+  ros__parameters:
+
+    # --- Dispositivo -----------------------------------------------
+    # Deja device_path vacio para autodeteccion por nombre.
+    # Averigua el nombre exacto con:  ros2 run myagv_teleop_joy ... (ver logs)
+    # o con:  cat /proc/bus/input/devices | grep -i xbox
+    device_path: ""
+    device_name: "Xbox Wireless Controller"
+    reconnect_period: 2.0
+
+    # --- Salida --------------------------------------------------
+    # En el robot real el driver base escucha /cmd_vel.
+    # En este workspace hay twist_mux: usa un topic propio y anadelo
+    # a mobile_manipulator_sim/config/twist_mux.yaml con prioridad alta.
+    cmd_vel_topic: "/cmd_vel"
+    publish_rate: 20.0
+    publish_zero_when_idle: true
+
+    # --- Limites de velocidad (myAGV: ~0.8 m/s max de fabrica) ----
+    max_linear_x: 0.4
+    max_linear_y: 0.4
+    max_angular_z: 1.2
+
+    # --- Respuesta ----------------------------------------------
+    stick_deadzone: 0.12
+    trigger_deadzone: 0.05
+    slew_rate: 2.0          # limita la aceleracion (rango/s); 0 = desactivado
+    controller_timeout: 1.0 # s sin eventos -> frena
+
+    invert_linear_x: false
+    invert_linear_y: false
+    invert_angular_z: false
+
+    # --- Codigos evdev (solo si tu mando difiere del xpad estandar) ---
+    code.axis_stick_x: "ABS_X"
+    code.axis_stick_y: "ABS_Y"
+    code.axis_trigger_lt: "ABS_Z"
+    code.axis_trigger_rt: "ABS_RZ"
+    code.axis_dpad_x: "ABS_HAT0X"
+    code.axis_dpad_y: "ABS_HAT0Y"
+    code.button_lb: "BTN_TL"
+    code.button_rb: "BTN_TR"
