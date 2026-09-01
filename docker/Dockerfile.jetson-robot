@@ -1,0 +1,80 @@
+# =====================================================================
+#  Imagen para el ROBOT REAL (Jetson Nano del myAGV)
+# ---------------------------------------------------------------------
+#  - Base ros:humble-ros-base (multi-arch: se resuelve a arm64/v8 en
+#    la Jetson, o al construir con --platform linux/arm64).
+#  - SIN Gazebo ni herramientas de escritorio: solo runtime + drivers.
+#  - El workspace se monta como volumen y se compila dentro del
+#    contenedor (ver scripts/... y docker/run_jetson_robot.sh).
+#
+#  Construir en la propia Jetson:
+#     docker build -f docker/Dockerfile.jetson-robot \
+#         -t myagv-home-service:jetson-robot .
+#
+#  O cross-build desde el PC de desarrollo (x86_64) y exportar:
+#     docker buildx build --platform linux/arm64 \
+#         -f docker/Dockerfile.jetson-robot \
+#         -t myagv-home-service:jetson-robot --load .
+#     docker save myagv-home-service:jetson-robot | \
+#         ssh jetson 'docker load'
+# =====================================================================
+FROM ros:humble-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=humble
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y \
+    sudo git curl wget nano less \
+    procps iproute2 iputils-ping net-tools \
+    udev usbutils \
+    build-essential cmake \
+    python3-pip \
+    python3-serial \
+    python3-evdev \
+    python3-yaml \
+    python3-rosdep \
+    python3-vcstool \
+    python3-colcon-common-extensions \
+    ros-humble-ros2-control \
+    ros-humble-ros2-controllers \
+    ros-humble-controller-manager \
+    ros-humble-joint-state-broadcaster \
+    ros-humble-joint-state-publisher \
+    ros-humble-robot-state-publisher \
+    ros-humble-xacro \
+    ros-humble-tf2-tools \
+    ros-humble-tf2-ros \
+    ros-humble-nav2-bringup \
+    ros-humble-navigation2 \
+    ros-humble-slam-toolbox \
+    ros-humble-twist-mux \
+    ros-humble-robot-localization \
+    ros-humble-cv-bridge \
+    ros-humble-image-transport \
+    ros-humble-camera-info-manager \
+    ros-humble-v4l2-camera \
+    ros-humble-rmw-cyclonedds-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------
+#  YDLidar SDK (necesario para compilar ydlidar_ros2_driver desde
+#  fuentes; no hay paquete binario para Humble).
+# ---------------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/YDLIDAR/YDLidar-SDK.git /tmp/YDLidar-SDK && \
+    cmake -S /tmp/YDLidar-SDK -B /tmp/YDLidar-SDK/build && \
+    cmake --build /tmp/YDLidar-SDK/build --target install -j2 && \
+    ldconfig && \
+    rm -rf /tmp/YDLidar-SDK
+
+RUN if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then rosdep init; fi && \
+    rosdep update
+
+# CycloneDDS suele dar menos problemas que Fast-DDS en redes Wi-Fi / host.
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+WORKDIR /workspace
+COPY docker/robot-entrypoint.sh /usr/local/bin/robot-entrypoint.sh
+RUN chmod +x /usr/local/bin/robot-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/robot-entrypoint.sh"]
+CMD ["bash"]
