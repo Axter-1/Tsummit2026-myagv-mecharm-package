@@ -1,0 +1,53 @@
+# ============================================================
+# GOAL
+#
+# Mueve el MechArm 270 a un objetivo. Se debe rellenar
+# EXACTAMENTE UNA de las tres formas siguientes:
+#
+#   pose_name     -> pose con nombre definida en poses.yaml
+#   joint_angles  -> [J1..J6] en grados
+#   coords        -> [X, Y, Z, RX, RY, RZ] en mm / grados
+# ============================================================
+
+string pose_name
+
+float64[] joint_angles
+
+float64[] coords
+
+# Solo para 'coords':
+#   0 = trayectoria libre
+#   1 = linea recta
+int32 move_mode 0
+
+# 0..100. <= 0 -> usa la velocidad por defecto del nodo.
+float64 speed_percent 0.0
+
+---
+# ============================================================
+# RESULT
+# ============================================================
+
+bool success
+
+# OK
+# INVALID_GOAL
+# ARM_FAULT
+# TIMEOUT
+# CANCELED
+string status
+
+string message
+
+float64[] final_joint_angles
+
+---
+# ============================================================
+# FEEDBACK
+# ============================================================
+
+# MOVING
+# SETTLING
+string state
+
+float64[] current_joint_angles

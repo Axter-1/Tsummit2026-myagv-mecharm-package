@@ -50,9 +50,27 @@ class ArucoDetector(Node):
             '/aruco/image_annotated'
         )
 
+        # Tamano real del lado impreso del marcador, en metros.
+        # En esta competencia los ArUco se imprimen a 8 cm.
+        self.declare_parameter(
+            'marker_length',
+            0.08
+        )
+
+        # Alias obsoleto: si es > 0 tiene prioridad sobre marker_length.
         self.declare_parameter(
             'marker_size',
-            0.05
+            0.0
+        )
+
+        self.declare_parameter(
+            'equalize_hist',
+            True
+        )
+
+        self.declare_parameter(
+            'publish_tf',
+            True
         )
 
         self.image_topic = (
@@ -79,10 +97,35 @@ class ArucoDetector(Node):
             .string_value
         )
 
-        self.marker_size = (
+        marker_length = (
+            self.get_parameter('marker_length')
+            .get_parameter_value()
+            .double_value
+        )
+
+        marker_size_alias = (
             self.get_parameter('marker_size')
             .get_parameter_value()
             .double_value
+        )
+
+        # marker_size (obsoleto) gana solo si se fijo explicitamente > 0.
+        self.marker_length = (
+            marker_size_alias
+            if marker_size_alias > 0.0
+            else marker_length
+        )
+
+        self.equalize_hist = bool(
+            self.get_parameter('equalize_hist')
+            .get_parameter_value()
+            .bool_value
+        )
+
+        self.publish_tf = bool(
+            self.get_parameter('publish_tf')
+            .get_parameter_value()
+            .bool_value
         )
 
         # ----------------------------------------------------------
@@ -166,7 +209,7 @@ class ArucoDetector(Node):
         )
 
         self.get_logger().info(
-            f'Marker size: {self.marker_size:.3f} m'
+            f'Marker size: {self.marker_length:.3f} m'
         )
 
         self.get_logger().info(
@@ -332,6 +375,11 @@ class ArucoDetector(Node):
             cv2.COLOR_BGR2GRAY
         )
 
+        # Realza el contraste: mejora la deteccion con luz irregular
+        # (recomendado por la guia de camara del myAGV).
+        if self.equalize_hist:
+            gray = cv2.equalizeHist(gray)
+
         # ----------------------------------------------------------
         # Detect BOTH dictionaries
         # ----------------------------------------------------------
@@ -381,7 +429,7 @@ class ArucoDetector(Node):
 
             rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
                 [marker_corners],
-                self.marker_size,
+                self.marker_length,
                 self.camera_matrix,
                 self.dist_coeffs
             )
@@ -466,7 +514,7 @@ class ArucoDetector(Node):
             )
 
             detection.marker_size = float(
-                self.marker_size
+                self.marker_length
             )
 
             detection_array.detections.append(
@@ -506,9 +554,10 @@ class ArucoDetector(Node):
             tf_msg.transform.rotation.z = qz
             tf_msg.transform.rotation.w = qw
 
-            self.tf_broadcaster.sendTransform(
-                tf_msg
-            )
+            if self.publish_tf:
+                self.tf_broadcaster.sendTransform(
+                    tf_msg
+                )
 
             # ------------------------------------------------------
             # Draw marker
@@ -535,7 +584,7 @@ class ArucoDetector(Node):
                 self.dist_coeffs,
                 rvec,
                 tvec,
-                self.marker_size * 0.5
+                self.marker_length * 0.5
             )
 
             # ------------------------------------------------------

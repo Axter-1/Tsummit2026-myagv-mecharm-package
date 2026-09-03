@@ -1,8 +1,17 @@
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
+
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='true',
+        description='true en simulacion, false en el robot real.'
+    )
 
     lidar_approach = Node(
         package='home_service_behaviors',
@@ -10,7 +19,10 @@ def generate_launch_description():
         name='aruco_lidar_approach_server',
         output='screen',
         parameters=[{
-        'use_sim_time': True,
+        'use_sim_time': ParameterValue(
+            LaunchConfiguration('use_sim_time'),
+            value_type=bool,
+        ),
 
         'detections_topic': '/aruco/detections',
         'scan_topic': '/scan',
@@ -48,5 +60,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        use_sim_time_arg,
         lidar_approach
     ])

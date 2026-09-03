@@ -1,0 +1,25 @@
+# Poses con nombre del MechArm 270 M5.
+#
+# Cada pose es una lista de 6 angulos articulares [J1..J6] en grados.
+#
+# COMO CALIBRAR una pose:
+#   1. Con el brazo alimentado, muevelo a mano (modo libre) o con jog.
+#   2. Lee los angulos:
+#        ros2 topic echo /mecharm/joint_states        (si publish_joint_states)
+#      o desde una consola de Python:
+#        from pymycobot.mecharm270 import MechArm270
+#        mc = MechArm270('/dev/ttyACM0', 115200); print(mc.get_angles())
+#   3. Pega los 6 numeros aqui.
+#
+# Los valores de abajo son PLACEHOLDERS seguros (cercanos a cero).
+# Sustituyelos por poses reales del escenario antes de competir.
+
+poses:
+  # Reposo / plegado para navegar.
+  home:    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  # Mirando al frente-abajo para observar un ArUco/pieza.
+  observe: [0.0, -30.0, -30.0, 0.0, 60.0, 0.0]
+
+  # Pose de transporte con pieza sujeta (brazo recogido y estable).
+  carry:   [0.0, -20.0, -20.0, 0.0, 40.0, 0.0]

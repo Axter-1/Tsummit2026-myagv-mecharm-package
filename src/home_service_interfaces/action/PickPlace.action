@@ -1,0 +1,67 @@
+# ============================================================
+# GOAL
+#
+# Primitiva de toma ('pick') o colocacion ('place') ejecutada
+# SOLO con el brazo + gripper.
+#
+# El posicionamiento de la base movil (Nav2 + aproximacion
+# ArUco) es responsabilidad de quien invoca esta accion.
+#
+# El objetivo del agarre/soltado se indica de UNA de estas
+# dos formas (en el frame base del brazo):
+#
+#   target_pose_name -> pose con nombre (poses.yaml)
+#   target_coords    -> [X, Y, Z, RX, RY, RZ] mm / grados
+# ============================================================
+
+# "pick" | "place"
+string operation
+
+string target_pose_name
+
+float64[] target_coords
+
+# Holgura vertical (mm) para los waypoints de aproximacion y
+# retirada, por encima del objetivo.
+float64 approach_height 60.0
+
+# Valores de apertura del gripper (0..100, dependientes del
+# hardware). <= 0 -> usa los valores por defecto del nodo.
+int32 gripper_open_value 0
+int32 gripper_closed_value 0
+
+# 0..100. <= 0 -> velocidades por defecto del nodo.
+float64 speed_percent 0.0
+float64 gripper_speed_percent 0.0
+
+# Pose de retirada opcional al terminar ("" = no ir a ninguna).
+string retreat_pose_name
+
+---
+# ============================================================
+# RESULT
+# ============================================================
+
+bool success
+
+# OK
+# INVALID_GOAL
+# GRASP_FAILED
+# ARM_FAULT
+# TIMEOUT
+# CANCELED
+string status
+
+string message
+
+---
+# ============================================================
+# FEEDBACK
+# ============================================================
+
+# APPROACH
+# DESCEND
+# GRIP
+# LIFT
+# RETREAT
+string state

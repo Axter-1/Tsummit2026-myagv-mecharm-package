@@ -5,7 +5,7 @@ from glob import glob
 from setuptools import find_packages, setup
 
 
-package_name = "myagv_mecharm_service"
+package_name = "myagv_camera"
 
 
 setup(
@@ -34,13 +34,12 @@ setup(
     zip_safe=True,
     maintainer="alex",
     maintainer_email="alex@example.com",
-    description="MechArm 270 M5 driver (MoveArm / PickPlace actions)",
+    description="Front CSI camera publisher for the myAGV",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "mecharm_driver_node = "
-            "myagv_mecharm_service.mecharm_driver_node:main",
+            "csi_camera_node = myagv_camera.csi_camera_node:main",
         ],
     },
 )

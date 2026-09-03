@@ -1,12 +1,12 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>myagv_mecharm_service</name>
+  <name>myagv_camera</name>
   <version>0.0.1</version>
   <description>
-    Driver ROS 2 del brazo MechArm 270 M5 del myAGV. Expone las acciones
-    MoveArm (mover a pose/angulos/coordenadas) y PickPlace (primitiva de
-    toma/colocacion con gripper) usando pymycobot.
+    Publicador de la camara frontal CSI (IMX219) del myAGV hacia ROS 2.
+    Abre la camara mediante GStreamer (nvarguscamerasrc en la Jetson) o
+    v4l2, y publica sensor_msgs/Image + sensor_msgs/CameraInfo.
   </description>
   <maintainer email="alex@example.com">alex</maintainer>
   <license>Apache-2.0</license>
@@ -14,12 +14,10 @@
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
-  <depend>home_service_interfaces</depend>
-
-  <!--
-    pymycobot no tiene clave rosdep: se instala con pip
-    (ver docker/Dockerfile.jetson-robot: pip3 install pymycobot).
-  -->
+  <depend>cv_bridge</depend>
+  <depend>python3-opencv</depend>
+  <depend>python3-numpy</depend>
+  <depend>python3-yaml</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

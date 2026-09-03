@@ -10,6 +10,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ArucoDetection.msg"
   "msg/ArucoDetectionArray.msg"
   "action/ArucoApproach.action"
+  "action/MoveArm.action"
+  "action/PickPlace.action"
 
   DEPENDENCIES
   std_msgs
