@@ -21,6 +21,20 @@
   <exec_depend>myagv_mecharm_service</exec_depend>
   <exec_depend>home_service_perception</exec_depend>
   <exec_depend>home_service_behaviors</exec_depend>
+  <exec_depend>home_service_navigation</exec_depend>
+
+  <!-- Pila de navegacion (Reto 4: laberinto) -->
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_smoother</exec_depend>
+  <exec_depend>nav2_behaviors</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_velocity_smoother</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
