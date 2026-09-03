@@ -1,0 +1,78 @@
+# ============================================================
+# Mision de EJEMPLO que ejercita los pasos nuevos:
+#   navigate -> aruco -> pick -> navigate -> aruco -> place
+#
+# Estructura equivalente al Reto 1 (Clasificacion):
+#   START -> pieza verde en ArUco 0 -> ArUco 2
+#         -> pieza azul  en ArUco 1 -> ArUco 3 -> FINISH
+#
+# Ajusta TODAS las coordenadas, poses y valores del gripper a tu
+# escenario y a tu calibracion antes de usarla en el robot.
+# ============================================================
+
+mission:
+
+  name: ejemplo_pick_place
+
+  repeat: 1
+  stop_on_failure: true
+
+  steps:
+
+    # ---- Pieza verde: ArUco 0 -> ArUco 2 --------------------
+
+    - type: navigate
+      name: ir_cerca_aruco_0
+      x: 0.60
+      y: 0.20
+      yaw_deg: 0.0
+      frame_id: map
+      retries: 1
+
+    - type: aruco
+      name: aproximar_aruco_0
+      id: 0
+      stop_distance: 0.15
+      timeout_sec: 10.0
+      retries: 0
+      # Reto 2 (Kitting): si no se detecta, no abortar.
+      on_failure: skip
+      skip_message: "Pieza Omitida"
+
+    - type: pick
+      name: tomar_pieza_verde
+      target_pose: grasp_aruco_0     # pose enseñada previamente
+      approach_height: 70.0
+      retreat_pose: carry
+      speed_percent: 30.0
+
+    - type: navigate
+      name: ir_cerca_aruco_2
+      x: 1.20
+      y: 0.20
+      yaw_deg: 0.0
+      frame_id: map
+      retries: 1
+
+    - type: aruco
+      name: aproximar_aruco_2
+      id: 2
+      stop_distance: 0.15
+      timeout_sec: 10.0
+
+    - type: place
+      name: soltar_pieza_verde
+      target_pose: place_aruco_2
+      approach_height: 70.0
+      retreat_pose: home
+      speed_percent: 30.0
+
+    # ---- Volver al FINISH ----------------------------------
+
+    - type: navigate
+      name: ir_a_finish
+      x: 0.0
+      y: 0.0
+      yaw_deg: 0.0
+      frame_id: map
+      retries: 1

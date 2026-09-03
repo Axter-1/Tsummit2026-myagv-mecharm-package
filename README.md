@@ -237,6 +237,51 @@ La versión real necesitará además los drivers físicos correspondientes para:
 
 La simulación y el bringup del hardware se mantendrán separados de la lógica de misión.
 
+### Infraestructura del robot real
+
+Paquetes específicos de hardware:
+
+| Paquete | Función |
+|---------|---------|
+| `myagv_camera` | Publica la cámara CSI (IMX219) mediante GStreamer (`nvarguscamerasrc`) o v4l2: `/camera/image_raw` + `/camera/camera_info`. Calibración de referencia en `config/csi_camera_960x540.yaml`. |
+| `myagv_mecharm_service` | Driver del MechArm 270 (`pymycobot`). Acciones `/mecharm/move_arm` (MoveArm) y `/mecharm/pick_place` (PickPlace, gripper). Poses con nombre en `config/poses.yaml`. |
+| `home_service_bringup` | `robot.launch.py` (cámara + ArUco + aproximación + brazo + `twist_mux`) y `nav2.launch.py` (Nav2 con salida remapeada a `/cmd_vel_nav`). |
+
+Enrutado de velocidad en el robot real (`twist_mux` → `/cmd_vel`):
+
+| Fuente | Topic | Prioridad |
+|--------|-------|-----------|
+| Nav2 | `/cmd_vel_nav` | 50 |
+| Aproximación ArUco | `/cmd_vel_aruco` | 100 |
+| Teleop (mando) | `/cmd_vel_joy` | 200 |
+
+Puesta en marcha dentro del contenedor `jetson-robot`:
+
+    # 1. Base + LiDAR + cámara + ArUco + brazo + twist_mux
+    bash docker/run_all_robot_nodes.sh          # START_TELEOP=1 para el mando
+
+    # 2. Nav2 (en otra shell del contenedor)
+    ./scripts/myagv_commands.sh nav2
+
+    # 3. Misión
+    ros2 launch home_service_mission mission.launch.py \
+        mission_file:=<ruta.yaml> use_sim_time:=false
+
+`marker_length` del detector de ArUco: **0.08 m** en el robot real (marcadores impresos a 8 cm),
+0.05 m en simulación.
+
+### Pasos de misión
+
+| Tipo | Acción | Campos |
+|------|--------|--------|
+| `navigate` | Nav2 `NavigateToPose` | `x`, `y`, `yaw_deg`, `frame_id` |
+| `aruco` | `ArucoApproach` (ArUco + LiDAR) | `id`, `stop_distance`, `timeout_sec` |
+| `arm_pose` | `MoveArm` | `pose` \| `joint_angles` \| `coords`, `speed_percent` |
+| `pick` / `place` | `PickPlace` | `target_pose` \| `target_coords`, `approach_height`, `gripper_*`, `retreat_pose` |
+
+Manejo de fallo por paso (`on_failure`): `abort` (por defecto si `stop_on_failure`), `skip`
+(registra `skip_message` y continúa — p. ej. *"Pieza Omitida"* del reto 2) o `continue`.
+
 ## Versión
 
 La versión actual del proyecto se encuentra en:

@@ -1,0 +1,21 @@
+twist_mux:
+  ros__parameters:
+
+    # En el robot real la salida va directa a /cmd_vel (lo consume
+    # myagv_odometry). Se remapea cmd_vel_out en el launch.
+    topics:
+
+      navigation:
+        topic: /cmd_vel_nav
+        timeout: 0.5
+        priority: 50
+
+      aruco:
+        topic: /cmd_vel_aruco
+        timeout: 0.5
+        priority: 100
+
+      teleop:
+        topic: /cmd_vel_joy
+        timeout: 0.5
+        priority: 200

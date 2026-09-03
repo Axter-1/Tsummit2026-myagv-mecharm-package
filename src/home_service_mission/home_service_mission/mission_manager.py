@@ -14,7 +14,11 @@ from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
 
-from home_service_interfaces.action import ArucoApproach
+from home_service_interfaces.action import (
+    ArucoApproach,
+    MoveArm,
+    PickPlace,
+)
 
 
 class MissionManager(Node):
@@ -65,6 +69,18 @@ class MissionManager(Node):
             self,
             ArucoApproach,
             '/aruco_lidar_approach'
+        )
+
+        self.move_arm_client = ActionClient(
+            self,
+            MoveArm,
+            '/mecharm/move_arm'
+        )
+
+        self.pick_place_client = ActionClient(
+            self,
+            PickPlace,
+            '/mecharm/pick_place'
         )
 
         # Used only to avoid printing the same ArUco state at 20 Hz.
@@ -132,6 +148,13 @@ class MissionManager(Node):
                 'Mission contains no steps.'
             )
 
+        # Tipos de paso presentes en la mision. Solo se espera por los
+        # servidores de accion que la mision realmente usa.
+        self.step_types = {
+            str(step.get('type', '')).strip().lower()
+            for step in self.steps
+        }
+
         # ---------------------------------------------------------
         # Mission information
         # ---------------------------------------------------------
@@ -168,48 +191,50 @@ class MissionManager(Node):
     # Wait for servers
     # =============================================================
 
+    def _wait_for_one_server(self, client, label):
+
+        self.get_logger().info(
+            f'Waiting for {label} action server...'
+        )
+
+        while rclpy.ok():
+
+            if client.wait_for_server(timeout_sec=2.0):
+                break
+
+            self.get_logger().warn(
+                f'Still waiting for {label}...'
+            )
+
+        self.get_logger().info(
+            f'{label} action server available.'
+        )
+
     def wait_for_action_servers(self):
 
-        self.get_logger().info(
-            'Waiting for Nav2 action server...'
-        )
-
-        while rclpy.ok():
-
-            if self.nav_client.wait_for_server(
-                timeout_sec=2.0
-            ):
-                break
-
-            self.get_logger().warn(
-                'Still waiting for '
-                '/navigate_to_pose...'
+        if 'navigate' in self.step_types:
+            self._wait_for_one_server(
+                self.nav_client,
+                '/navigate_to_pose'
             )
 
-        self.get_logger().info(
-            'Nav2 action server available.'
-        )
-
-        self.get_logger().info(
-            'Waiting for ArUco LiDAR '
-            'action server...'
-        )
-
-        while rclpy.ok():
-
-            if self.aruco_client.wait_for_server(
-                timeout_sec=2.0
-            ):
-                break
-
-            self.get_logger().warn(
-                'Still waiting for '
-                '/aruco_lidar_approach...'
+        if 'aruco' in self.step_types:
+            self._wait_for_one_server(
+                self.aruco_client,
+                '/aruco_lidar_approach'
             )
 
-        self.get_logger().info(
-            'ArUco LiDAR action server available.'
-        )
+        if 'arm_pose' in self.step_types:
+            self._wait_for_one_server(
+                self.move_arm_client,
+                '/mecharm/move_arm'
+            )
+
+        if self.step_types & {'pick', 'place'}:
+            self._wait_for_one_server(
+                self.pick_place_client,
+                '/mecharm/pick_place'
+            )
 
     # =============================================================
     # Navigation
@@ -578,6 +603,180 @@ class MissionManager(Node):
         return False
 
     # =============================================================
+    # Brazo: helper generico de envio de goal
+    # =============================================================
+
+    def _send_arm_goal(
+        self,
+        client,
+        goal,
+        label
+    ):
+        """Envia un goal de accion y espera el resultado.
+
+        Devuelve (ok: bool, result) donde result puede ser None.
+        """
+
+        send_future = client.send_goal_async(goal)
+
+        rclpy.spin_until_future_complete(
+            self,
+            send_future
+        )
+
+        goal_handle = send_future.result()
+
+        if goal_handle is None:
+            self.get_logger().error(
+                f'{label}: sin goal handle.'
+            )
+            return False, None
+
+        if not goal_handle.accepted:
+            self.get_logger().error(
+                f'{label}: goal rechazado.'
+            )
+            return False, None
+
+        result_future = goal_handle.get_result_async()
+
+        rclpy.spin_until_future_complete(
+            self,
+            result_future
+        )
+
+        response = result_future.result()
+
+        if response is None:
+            self.get_logger().error(
+                f'{label}: sin resultado.'
+            )
+            return False, None
+
+        ok = (
+            response.status == GoalStatus.STATUS_SUCCEEDED
+            and getattr(response.result, 'success', False)
+        )
+
+        return ok, response.result
+
+    # =============================================================
+    # Paso: arm_pose
+    # =============================================================
+
+    def execute_arm_pose(
+        self,
+        step
+    ):
+
+        name = step.get('name', 'arm_pose')
+
+        goal = MoveArm.Goal()
+        goal.pose_name = str(step.get('pose', ''))
+        goal.joint_angles = [
+            float(v) for v in step.get('joint_angles', [])
+        ]
+        goal.coords = [
+            float(v) for v in step.get('coords', [])
+        ]
+        goal.move_mode = int(step.get('move_mode', 0))
+        goal.speed_percent = float(step.get('speed_percent', 0.0))
+
+        self.get_logger().info(
+            '--------------------------------'
+        )
+        self.get_logger().info(
+            f'ARM POSE: {name} '
+            f'(pose="{goal.pose_name}")'
+        )
+
+        ok, result = self._send_arm_goal(
+            self.move_arm_client,
+            goal,
+            f'arm_pose:{name}'
+        )
+
+        if ok:
+            self.get_logger().info(
+                f'Arm pose completada: {name}'
+            )
+            return True
+
+        if result is not None:
+            self.get_logger().error(
+                f'Arm pose fallo: '
+                f'status={result.status}, '
+                f'message="{result.message}"'
+            )
+
+        return False
+
+    # =============================================================
+    # Paso: pick / place
+    # =============================================================
+
+    def execute_pick_place(
+        self,
+        step,
+        operation
+    ):
+
+        name = step.get('name', operation)
+
+        goal = PickPlace.Goal()
+        goal.operation = operation
+        goal.target_pose_name = str(step.get('target_pose', ''))
+        goal.target_coords = [
+            float(v) for v in step.get('target_coords', [])
+        ]
+        goal.approach_height = float(
+            step.get('approach_height', 60.0)
+        )
+        goal.gripper_open_value = int(
+            step.get('gripper_open_value', 0)
+        )
+        goal.gripper_closed_value = int(
+            step.get('gripper_closed_value', 0)
+        )
+        goal.speed_percent = float(
+            step.get('speed_percent', 0.0)
+        )
+        goal.gripper_speed_percent = float(
+            step.get('gripper_speed_percent', 0.0)
+        )
+        goal.retreat_pose_name = str(
+            step.get('retreat_pose', '')
+        )
+
+        self.get_logger().info(
+            '--------------------------------'
+        )
+        self.get_logger().info(
+            f'{operation.upper()}: {name}'
+        )
+
+        ok, result = self._send_arm_goal(
+            self.pick_place_client,
+            goal,
+            f'{operation}:{name}'
+        )
+
+        if ok:
+            self.get_logger().info(
+                f'{operation} completado: {name}'
+            )
+            return True
+
+        if result is not None:
+            self.get_logger().error(
+                f'{operation} fallo: '
+                f'status={result.status}, '
+                f'message="{result.message}"'
+            )
+
+        return False
+
+    # =============================================================
     # Execute generic step
     # =============================================================
 
@@ -607,6 +806,26 @@ class MissionManager(Node):
 
             return self.execute_aruco(
                 step
+            )
+
+        if step_type == 'arm_pose':
+
+            return self.execute_arm_pose(
+                step
+            )
+
+        if step_type == 'pick':
+
+            return self.execute_pick_place(
+                step,
+                'pick'
+            )
+
+        if step_type == 'place':
+
+            return self.execute_pick_place(
+                step,
+                'place'
             )
 
         self.get_logger().error(
@@ -771,7 +990,22 @@ class MissionManager(Node):
                         f'{name}'
                     )
 
-                    if self.stop_on_failure:
+                    # on_failure por paso:
+                    #   'abort' | 'skip' | 'continue'
+                    # Si no se indica, se usa el comportamiento global
+                    # stop_on_failure (abort si True).
+                    on_failure = str(
+                        step.get('on_failure', '')
+                    ).strip().lower()
+
+                    if not on_failure:
+                        on_failure = (
+                            'abort'
+                            if self.stop_on_failure
+                            else 'continue'
+                        )
+
+                    if on_failure == 'abort':
 
                         self.get_logger().error(
                             'MISSION ABORTED'
@@ -779,10 +1013,23 @@ class MissionManager(Node):
 
                         return False
 
-                    self.get_logger().warn(
-                        'Continuing mission '
-                        'despite failure.'
-                    )
+                    if on_failure == 'skip':
+
+                        skip_message = str(
+                            step.get(
+                                'skip_message',
+                                'Paso omitido'
+                            )
+                        )
+
+                        self.get_logger().warn(skip_message)
+
+                    else:
+
+                        self.get_logger().warn(
+                            'Continuing mission '
+                            'despite failure.'
+                        )
 
             # =========================================================
             # Whole loop completed
@@ -822,6 +1069,7 @@ class MissionManager(Node):
             return True
 
         return False
+
 
 def main(args=None):
 
