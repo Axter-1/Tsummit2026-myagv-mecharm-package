@@ -1,25 +1,56 @@
-# Poses con nombre del MechArm 270 M5.
+# =====================================================================
+#  Poses con nombre del MechArm 270 M5.
+#  Cada pose es [J1, J2, J3, J4, J5, J6] en GRADOS.
+# ---------------------------------------------------------------------
+#  !!! LOS VALORES DE ABAJO SON PLACEHOLDERS !!!
 #
-# Cada pose es una lista de 6 angulos articulares [J1..J6] en grados.
+#  Son poses conservadoras cercanas al cero, seguras de ejecutar pero
+#  SIN NINGUNA RELACION con la geometria real del escenario. Hay que
+#  sustituirlas por poses ensenadas sobre la pista antes de competir.
 #
-# COMO CALIBRAR una pose:
-#   1. Con el brazo alimentado, muevelo a mano (modo libre) o con jog.
-#   2. Lee los angulos:
-#        ros2 topic echo /mecharm/joint_states        (si publish_joint_states)
-#      o desde una consola de Python:
-#        from pymycobot.mecharm270 import MechArm270
-#        mc = MechArm270('/dev/ttyACM0', 115200); print(mc.get_angles())
-#   3. Pega los 6 numeros aqui.
+#  COMO ENSENAR UNA POSE
+#  =====================
+#      pkill -f mecharm_driver_node          # libera /dev/ttyACM0
+#      python3 /workspace/scripts/mecharm_console.py
 #
-# Los valores de abajo son PLACEHOLDERS seguros (cercanos a cero).
-# Sustituyelos por poses reales del escenario antes de competir.
+#      mecharm> free              # libera los servos (SUJETA EL BRAZO)
+#      (mueve el brazo a mano hasta la posicion deseada)
+#      mecharm> save pick_table   # guarda y reescribe este archivo
+#      mecharm> lock              # vuelve a alimentar los servos
+#
+#  Ver docs/GUIA_PRUEBAS_GARRA.md para el procedimiento completo.
+#
+#  LIMITES ARTICULARES (hoja de datos MechArm 270 M5)
+#      J1 -160..+160   J2 -85..+90   J3 -180..+45
+#      J4 -160..+160   J5 -100..+100 J6 -180..+180
+#  Alcance util: radio 270 mm desde la base del brazo.
+# =====================================================================
 
 poses:
-  # Reposo / plegado para navegar.
-  home:    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-  # Mirando al frente-abajo para observar un ArUco/pieza.
-  observe: [0.0, -30.0, -30.0, 0.0, 60.0, 0.0]
+  # -------------------------------------------------------------
+  # Poses de navegacion
+  # -------------------------------------------------------------
 
-  # Pose de transporte con pieza sujeta (brazo recogido y estable).
-  carry:   [0.0, -20.0, -20.0, 0.0, 40.0, 0.0]
+  # Brazo plegado. Se usa siempre que el robot navega, y es
+  # imprescindible en el laberinto (pasillos de 60 cm).
+  home:        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  # Sujetando una pieza durante el traslado: recogido y estable, para
+  # que la pieza no se salga ni sobresalga del contorno del robot.
+  carry:       [0.0, -20.0, -20.0, 0.0, 40.0, 0.0]
+
+  # -------------------------------------------------------------
+  # Poses de manipulacion (retos 1, 2 y 3)
+  # -------------------------------------------------------------
+
+  # Mirando la zona de trabajo desde arriba, antes de bajar a agarrar.
+  observe:     [0.0, -30.0, -30.0, 0.0, 60.0, 0.0]
+
+  # Agarre sobre la plataforma de CARGA (altura maxima 10 cm).
+  # Se alcanza despues de que el paso 'aruco' deje el robot a
+  # stop_distance del marcador, asi que es repetible.
+  pick_table:  [0.0, -30.0, -30.0, 0.0, 60.0, 0.0]
+
+  # Soltado sobre la plataforma de DESTINO.
+  place_table: [0.0, -30.0, -30.0, 0.0, 60.0, 0.0]

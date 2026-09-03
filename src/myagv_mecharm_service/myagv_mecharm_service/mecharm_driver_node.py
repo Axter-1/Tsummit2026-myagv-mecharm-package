@@ -28,9 +28,12 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import JointState
 
+from std_srvs.srv import SetBool
+
 import yaml
 
 from home_service_interfaces.action import MoveArm, PickPlace
+from home_service_interfaces.srv import SetGripper
 
 try:
     from pymycobot.mecharm270 import MechArm270
@@ -66,6 +69,23 @@ class MechArmDriver(Node):
         self.declare_parameter("move_timeout_sec", 20.0)
         self.declare_parameter("gripper_timeout_sec", 5.0)
         self.declare_parameter("settle_time_sec", 0.4)
+        # Tiempo extra tras cerrar/abrir la pinza para que asiente.
+        self.declare_parameter("gripper_settle_sec", 0.6)
+
+        # --- Criterio de llegada (convergencia de posicion) ---
+        # La repetibilidad del MechArm 270 es +-0.5 mm, pero la lectura
+        # por serie tiene mas ruido: 2 grados / 6 mm son realistas.
+        self.declare_parameter("angle_tolerance_deg", 2.0)
+        self.declare_parameter("coord_tolerance_mm", 6.0)
+        # Lecturas consecutivas dentro de tolerancia para dar por
+        # alcanzado el objetivo.
+        self.declare_parameter("arrival_stable_samples", 3)
+        # Lecturas de posicion fallidas seguidas antes de dar el brazo
+        # por perdido (get_angles/get_coords devuelven None a menudo).
+        self.declare_parameter("max_read_failures", 25)
+        # Si el error deja de reducirse durante este tiempo, se aborta:
+        # obstruccion, limite articular o pose fuera del alcance.
+        self.declare_parameter("stall_timeout_sec", 4.0)
 
         self.declare_parameter(
             "joint_limits_min",
@@ -124,6 +144,24 @@ class MechArmDriver(Node):
         )
         self.settle_time = float(
             self.get_parameter("settle_time_sec").value
+        )
+        self.gripper_settle = float(
+            self.get_parameter("gripper_settle_sec").value
+        )
+        self.angle_tolerance = float(
+            self.get_parameter("angle_tolerance_deg").value
+        )
+        self.coord_tolerance = float(
+            self.get_parameter("coord_tolerance_mm").value
+        )
+        self.arrival_stable_samples = int(
+            self.get_parameter("arrival_stable_samples").value
+        )
+        self.max_read_failures = int(
+            self.get_parameter("max_read_failures").value
+        )
+        self.stall_timeout = float(
+            self.get_parameter("stall_timeout_sec").value
         )
 
         self.joint_min = [
@@ -209,6 +247,23 @@ class MechArmDriver(Node):
         # Un unico goal activo a la vez (el brazo es un recurso unico).
         self._busy_lock = threading.Lock()
         self._busy = False
+
+        # -----------------------------------------------------------------
+        # Servicios de prueba / calibracion
+        # -----------------------------------------------------------------
+        self.create_service(
+            SetGripper,
+            "/mecharm/set_gripper",
+            self._srv_set_gripper,
+            callback_group=self.cb_group,
+        )
+
+        self.create_service(
+            SetBool,
+            "/mecharm/free_move",
+            self._srv_free_move,
+            callback_group=self.cb_group,
+        )
 
         self.get_logger().info(
             "mecharm_driver_node listo. Acciones: /mecharm/move_arm, "
@@ -357,48 +412,112 @@ class MechArmDriver(Node):
             time.sleep(delay)
         return None
 
-    def _wait_until_idle(self, goal_handle, timeout):
-        """Espera a que el brazo termine de moverse. Devuelve
-        ('ok'|'timeout'|'canceled'|'fault').
+    def _wait_for_arrival(self, goal_handle, target, kind, timeout):
+        """Espera a que el brazo LLEGUE al objetivo.
+
+        Devuelve ('ok'|'timeout'|'canceled'|'fault').
+
+        Por que no basta con is_moving():
+          * is_moving() devuelve -1 de forma intermitente cuando la
+            lectura por serie falla. Tratarlo como fallo aborta
+            movimientos que en realidad iban bien.
+          * is_moving() puede devolver 0 antes de que el brazo arranque,
+            dando por terminado un movimiento que no ha empezado.
+
+        Aqui el criterio principal es la CONVERGENCIA DE POSICION: se
+        lee la posicion real y se compara con el objetivo. is_moving()
+        se usa solo como senal secundaria. Las lecturas fallidas se
+        toleran hasta 'max_read_failures' seguidas.
         """
+        if kind == "angles":
+            tolerance = self.angle_tolerance
+            reader = self._read_angles
+            components = 6
+        else:
+            tolerance = self.coord_tolerance
+            reader = self._read_coords
+            # Solo se comprueba X, Y, Z: la orientacion del efector
+            # converge mas despacio y no condiciona el agarre.
+            components = 3
+
         deadline = time.monotonic() + timeout
-        # Pequena espera para que is_moving pase a 1.
-        time.sleep(0.2)
+        # Margen para que el brazo arranque antes de evaluar nada.
+        time.sleep(0.3)
+
+        stable = 0
+        read_failures = 0
+        last_error = None
+        last_progress_time = time.monotonic()
 
         while time.monotonic() < deadline:
-            if goal_handle.is_cancel_requested:
+            if goal_handle is not None and goal_handle.is_cancel_requested:
                 return "canceled"
 
-            try:
-                moving = self._arm("is_moving")
-            except RuntimeError:
-                return "fault"
+            current = reader(retries=1, delay=0.0)
 
-            if moving == -1:
-                return "fault"
-            if moving == 0:
-                time.sleep(self.settle_time)
-                return "ok"
+            if current is None:
+                read_failures += 1
+                if read_failures >= self.max_read_failures:
+                    self.get_logger().error(
+                        f"{read_failures} lecturas de posicion fallidas "
+                        f"seguidas: se da el brazo por perdido."
+                    )
+                    return "fault"
+                time.sleep(0.1)
+                continue
+
+            read_failures = 0
+
+            error = max(
+                abs(current[i] - target[i]) for i in range(components)
+            )
+
+            if error <= tolerance:
+                stable += 1
+                if stable >= self.arrival_stable_samples:
+                    time.sleep(self.settle_time)
+                    return "ok"
+            else:
+                stable = 0
+
+            # Deteccion de atasco: si el error deja de reducirse durante
+            # mucho tiempo, el brazo no va a llegar (obstruccion, limite
+            # articular, objetivo fuera del alcance de 270 mm).
+            if last_error is None or error < last_error - tolerance * 0.25:
+                last_error = error
+                last_progress_time = time.monotonic()
+            elif time.monotonic() - last_progress_time > self.stall_timeout:
+                self.get_logger().warn(
+                    f"El brazo dejo de acercarse al objetivo "
+                    f"(error {error:.2f}, tolerancia {tolerance:.2f}). "
+                    f"Posible obstruccion o pose inalcanzable."
+                )
+                return "timeout"
 
             time.sleep(0.1)
 
         return "timeout"
 
     def _wait_gripper_idle(self, timeout):
+        """Espera a que el gripper deje de moverse.
+
+        is_gripper_moving() es poco fiable en muchas pinzas: si no da una
+        respuesta clara se asume que termino tras el timeout. Nunca se
+        devuelve 'fault' por esto, para no abortar un agarre correcto.
+        """
         deadline = time.monotonic() + timeout
         time.sleep(0.2)
         while time.monotonic() < deadline:
             try:
                 moving = self._arm("is_gripper_moving")
             except RuntimeError:
-                return "fault"
-            if moving == -1:
-                return "fault"
-            if moving == 0:
                 return "ok"
+            if moving == 0:
+                break
             time.sleep(0.1)
-        # Muchos grippers no reportan is_gripper_moving fiable: no es
-        # fatal, damos por hecho que termino.
+
+        # Tiempo extra para que la pinza asiente sobre la pieza.
+        time.sleep(self.gripper_settle)
         return "ok"
 
     # =====================================================================
@@ -424,25 +543,147 @@ class MechArmDriver(Node):
         except RuntimeError as exc:
             self._drop_connection(str(exc))
             return "fault"
-        return self._wait_until_idle(goal_handle, self.move_timeout)
+        return self._wait_for_arrival(
+            goal_handle, angles, "angles", self.move_timeout
+        )
 
     def _move_coords(self, goal_handle, coords, speed, mode):
+        coords = [float(c) for c in coords]
+        # pymycobot: mode 0 = angular (trayectoria libre),
+        #            mode 1 = lineal (linea recta).
         try:
-            self._arm("send_coords", [float(c) for c in coords], speed, int(mode))
+            self._arm("send_coords", coords, speed, int(mode))
         except RuntimeError as exc:
             self._drop_connection(str(exc))
             return "fault"
-        return self._wait_until_idle(goal_handle, self.move_timeout)
+        return self._wait_for_arrival(
+            goal_handle, coords, "coords", self.move_timeout
+        )
 
     def _set_gripper(self, value, speed):
+        """Mueve la pinza a una apertura 0..100 (0 cerrada, 100 abierta).
+
+        Se usa set_gripper_value porque es inequivoco. Si esa via falla
+        se recurre a set_gripper_state, cuyo flag es 0 = abrir y
+        1 = cerrar (ojo: es al reves de lo que suele suponerse).
+        """
         value = int(round(clamp(value, 0.0, 100.0)))
         speed = int(round(clamp(speed, 1.0, 100.0)))
+
         try:
             self._arm("set_gripper_value", value, speed)
         except RuntimeError as exc:
             self._drop_connection(str(exc))
             return "fault"
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(
+                f"set_gripper_value fallo ({exc}); se prueba "
+                f"set_gripper_state."
+            )
+            try:
+                flag = 0 if value >= 50 else 1
+                self._arm("set_gripper_state", flag, speed)
+            except Exception as exc2:  # noqa: BLE001
+                self.get_logger().error(f"set_gripper_state fallo: {exc2}")
+                return "fault"
+
         return self._wait_gripper_idle(self.gripper_timeout)
+
+    # =====================================================================
+    # Servicios de prueba / calibracion
+    # =====================================================================
+
+    def _srv_set_gripper(self, request, response):
+        """Mueve la pinza directamente. Util para calibrar los valores
+        de apertura/cierre antes de tocar una mision.
+        """
+        response.current_value = -1
+
+        if self.mc is None:
+            response.success = False
+            response.message = "Brazo no conectado."
+            return response
+
+        if not self._acquire_busy():
+            response.success = False
+            response.message = "El brazo esta ocupado con otro objetivo."
+            return response
+
+        try:
+            speed = (
+                request.speed_percent
+                if request.speed_percent and request.speed_percent > 0.0
+                else self.default_gripper_speed
+            )
+            value = int(round(clamp(float(request.value), 0.0, 100.0)))
+
+            outcome = self._set_gripper(value, speed)
+
+            try:
+                read = self._arm("get_gripper_value")
+                if isinstance(read, (int, float)) and read >= 0:
+                    response.current_value = int(read)
+            except Exception:  # noqa: BLE001
+                pass
+
+            if outcome == "fault":
+                response.success = False
+                response.message = "Fallo al mover la pinza."
+            else:
+                response.success = True
+                response.message = (
+                    f"Pinza a {value} "
+                    f"(lectura: {response.current_value})."
+                )
+            return response
+
+        finally:
+            self._release_busy()
+
+    def _srv_free_move(self, request, response):
+        """Libera (True) o vuelve a alimentar (False) los servos.
+
+        Con los servos liberados el brazo se puede mover A MANO, que es
+        como se ensenan las poses de poses.yaml.
+
+        CUIDADO: al liberar, el brazo CAE por su propio peso. Sujetalo
+        antes de llamar a este servicio.
+        """
+        if self.mc is None:
+            response.success = False
+            response.message = "Brazo no conectado."
+            return response
+
+        if not self._acquire_busy():
+            response.success = False
+            response.message = "El brazo esta ocupado con otro objetivo."
+            return response
+
+        try:
+            if request.data:
+                self.get_logger().warn(
+                    "LIBERANDO SERVOS: sujeta el brazo, va a caer por su "
+                    "propio peso."
+                )
+                self._arm("release_all_servos")
+                response.success = True
+                response.message = (
+                    "Servos liberados: mueve el brazo a mano y lee la "
+                    "pose en /mecharm/joint_states."
+                )
+            else:
+                self._arm("power_on")
+                response.success = True
+                response.message = "Servos alimentados de nuevo."
+            return response
+
+        except Exception as exc:  # noqa: BLE001
+            response.success = False
+            response.message = f"Error: {exc}"
+            return response
+
+        finally:
+            self._release_busy()
 
     # =====================================================================
     # Goal / cancel comunes

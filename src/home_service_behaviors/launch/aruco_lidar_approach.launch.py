@@ -13,6 +13,13 @@ def generate_launch_description():
         description='true en simulacion, false en el robot real.'
     )
 
+    scan_topic_arg = DeclareLaunchArgument(
+        'scan_topic',
+        default_value='/scan',
+        description='En el robot real conviene /scan_filtered '
+                    '(salida del scan_sanitizer).'
+    )
+
     lidar_approach = Node(
         package='home_service_behaviors',
         executable='aruco_lidar_approach_server',
@@ -25,7 +32,7 @@ def generate_launch_description():
         ),
 
         'detections_topic': '/aruco/detections',
-        'scan_topic': '/scan',
+        'scan_topic': LaunchConfiguration('scan_topic'),
         'odom_topic': '/odom',
         'cmd_vel_topic': '/cmd_vel_aruco',
         'action_name': '/aruco_lidar_approach',
@@ -61,5 +68,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         use_sim_time_arg,
+        scan_topic_arg,
         lidar_approach
     ])

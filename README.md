@@ -270,6 +270,19 @@ Puesta en marcha dentro del contenedor `jetson-robot`:
 `marker_length` del detector de ArUco: **0.08 m** en el robot real (marcadores impresos a 8 cm),
 0.05 m en simulación.
 
+### Guías
+
+- `docs/GUIA_PRUEBAS_GARRA.md` — verificación del MechArm 270, calibración de
+  la garra y enseñanza de las poses de `poses.yaml`.
+
+### Scripts de lanzamiento
+
+    ./scripts/run_classification.sh run       # Reto 1 — Clasificación
+    ./scripts/run_classification.sh kitting   # Reto 2 — Kitting
+    ./scripts/run_classification.sh stack     # pila sin misión (calibrar)
+    ./scripts/run_classification.sh teach     # consola del brazo
+    ./scripts/run_maze.sh run                 # Reto 4 — Laberinto
+
 ### Pasos de misión
 
 | Tipo | Acción | Campos |

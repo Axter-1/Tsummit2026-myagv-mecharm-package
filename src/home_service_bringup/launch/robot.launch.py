@@ -20,6 +20,8 @@ Enrutado de velocidad en el robot real:
 
 import os
 
+from typing import List
+
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
@@ -28,6 +30,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -51,6 +54,14 @@ def generate_launch_description():
         DeclareLaunchArgument("start_aruco_approach", default_value="true"),
         DeclareLaunchArgument("start_arm", default_value="true"),
         DeclareLaunchArgument("start_twist_mux", default_value="true"),
+        DeclareLaunchArgument("start_scan_sanitizer", default_value="true"),
+        DeclareLaunchArgument("scan_topic", default_value="/scan"),
+        DeclareLaunchArgument(
+            "scan_filtered_topic", default_value="/scan_filtered"
+        ),
+        DeclareLaunchArgument(
+            "blind_sectors_deg", default_value="[-50.0, 50.0]"
+        ),
     ]
 
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -92,6 +103,36 @@ def generate_launch_description():
     )
 
     # -----------------------------------------------------------------
+    # Saneador del LaserScan
+    #
+    # Convierte los haces sin eco (0.0) en +inf para que Nav2 pueda
+    # limpiar el costmap, y descarta auto-impactos y motas. Tambien
+    # mejora la medida de distancia de la aproximacion ArUco.
+    # -----------------------------------------------------------------
+    scan_sanitizer = Node(
+        package="home_service_navigation",
+        executable="scan_sanitizer_node",
+        name="scan_sanitizer",
+        output="screen",
+        parameters=[{
+            "use_sim_time": use_sim_time,
+            "input_topic": LaunchConfiguration("scan_topic"),
+            "output_topic": LaunchConfiguration("scan_filtered_topic"),
+            "range_min": 0.16,
+            "range_max": 5.0,
+            "blind_sectors_deg": ParameterValue(
+                LaunchConfiguration("blind_sectors_deg"),
+                value_type=List[float],
+            ),
+            "zeros_to_inf": True,
+            "speckle_filter": True,
+        }],
+        condition=IfCondition(
+            LaunchConfiguration("start_scan_sanitizer")
+        ),
+    )
+
+    # -----------------------------------------------------------------
     # Aproximacion ArUco + LiDAR
     # -----------------------------------------------------------------
     aruco_approach = IncludeLaunchDescription(
@@ -102,7 +143,10 @@ def generate_launch_description():
                 "aruco_lidar_approach.launch.py",
             )
         ),
-        launch_arguments={"use_sim_time": use_sim_time}.items(),
+        launch_arguments={
+            "use_sim_time": use_sim_time,
+            "scan_topic": LaunchConfiguration("scan_filtered_topic"),
+        }.items(),
         condition=IfCondition(LaunchConfiguration("start_aruco_approach")),
     )
 
@@ -142,5 +186,6 @@ def generate_launch_description():
 
     return LaunchDescription(
         args
-        + [camera, aruco_detector, aruco_approach, mecharm, twist_mux]
+        + [camera, scan_sanitizer, aruco_detector, aruco_approach,
+           mecharm, twist_mux]
     )

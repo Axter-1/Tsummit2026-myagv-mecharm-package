@@ -1,0 +1,25 @@
+# ============================================================
+# REQUEST
+#
+# Control directo de la pinza del MechArm 270.
+# Pensado sobre todo para pruebas y calibracion.
+# ============================================================
+
+# Apertura: 0 = cerrada del todo, 100 = abierta del todo.
+int32 value
+
+# 0..100. <= 0 -> usa la velocidad por defecto del nodo.
+float64 speed_percent
+
+---
+# ============================================================
+# RESPONSE
+# ============================================================
+
+bool success
+
+string message
+
+# Lectura de la pinza tras el movimiento. -1 si el hardware no
+# devuelve una lectura valida.
+int32 current_value

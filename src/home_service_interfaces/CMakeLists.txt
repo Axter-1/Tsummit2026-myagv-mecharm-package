@@ -12,6 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ArucoApproach.action"
   "action/MoveArm.action"
   "action/PickPlace.action"
+  "srv/SetGripper.srv"
 
   DEPENDENCIES
   std_msgs

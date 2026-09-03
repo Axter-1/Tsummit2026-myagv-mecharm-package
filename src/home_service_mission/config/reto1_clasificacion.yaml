@@ -1,0 +1,201 @@
+# =====================================================================
+#  RETO 1 — ZONA DE CLASIFICACION  (caso de industria: KOSTAL)
+# ---------------------------------------------------------------------
+#  Secuencia OBLIGATORIA (Indicaciones tecnicas T-SUMMIT):
+#
+#     START -> Verde ArUco 0 -> ArUco 2 -> Azul ArUco 1 -> ArUco 3 -> FINISH
+#
+#  No se puede alterar el orden de recogida ni de entrega.
+#
+#  ANTES DE USAR ESTE ARCHIVO HAY QUE HACER DOS COSAS
+#  ==================================================
+#
+#  1) ENSENAR LAS POSES DEL BRAZO
+#     Se necesitan estas cinco en
+#     src/myagv_mecharm_service/config/poses.yaml:
+#
+#        home         brazo plegado para navegar
+#        observe      mirando la pieza, antes de bajar
+#        carry        sujetando la pieza durante el traslado
+#        pick_table   agarre sobre la plataforma de carga
+#        place_table  soltado sobre la plataforma de destino
+#
+#     Se ensenan con:  python3 /workspace/scripts/mecharm_console.py
+#     (ver docs/GUIA_PRUEBAS_GARRA.md)
+#
+#  2) RELLENAR LAS COORDENADAS 'navigate'
+#     Los valores de abajo son PLACEHOLDERS. Con SLAM en vivo el origen
+#     de "map" es la pose inicial del robot, o sea el START.
+#
+#     Forma facil de obtenerlas:
+#        a) lanza la pila sin mision:
+#           ros2 launch home_service_bringup classification.launch.py \
+#               run_mission:=false
+#        b) lleva el robot a cada estacion (mando o "Nav2 Goal" en RViz)
+#        c) lee la pose:
+#           ros2 topic echo /amcl_pose            (modo AMCL)
+#           ros2 run tf2_ros tf2_echo map base_footprint   (modo SLAM)
+#        d) copia x, y y el yaw aqui.
+#
+#     Los pasos 'navigate' solo tienen que dejar al robot CERCA y
+#     mirando hacia el ArUco: el ajuste fino lo hace el paso 'aruco'.
+# =====================================================================
+
+mission:
+
+  name: reto1_clasificacion
+
+  repeat: 1
+
+  # El reto penaliza los errores de secuencia: si algo falla de verdad,
+  # es preferible parar a seguir colocando piezas donde no toca.
+  stop_on_failure: true
+
+  steps:
+
+    # =================================================================
+    # PREPARACION
+    # =================================================================
+
+    - type: arm_pose
+      name: plegar_brazo_para_navegar
+      pose: home
+      speed_percent: 30.0
+      retries: 1
+
+    # =================================================================
+    # PIEZA VERDE:  ArUco 0  ->  ArUco 2
+    # =================================================================
+
+    - type: navigate
+      name: ir_a_carga_verde
+      x: 0.80          # TODO: medir en pista
+      y: 0.00          # TODO
+      yaw_deg: 0.0     # TODO: mirando al ArUco 0
+      frame_id: map
+      retries: 2
+
+    - type: aruco
+      name: aproximar_aruco_0
+      id: 0
+      # Distancia camara -> marcador al terminar. Ajustala al alcance
+      # util del brazo (MechArm 270: radio 270 mm).
+      stop_distance: 0.18
+      timeout_sec: 30.0
+      retries: 1
+
+    - type: arm_pose
+      name: observar_pieza_verde
+      pose: observe
+      speed_percent: 30.0
+      retries: 1
+
+    - type: pick
+      name: tomar_pieza_verde
+      target_pose: pick_table
+      # Altura (mm) de los waypoints de aproximacion y retirada.
+      approach_height: 70.0
+      retreat_pose: carry
+      speed_percent: 25.0
+      gripper_speed_percent: 40.0
+      retries: 1
+
+    - type: navigate
+      name: ir_a_entrega_verde
+      x: 1.60          # TODO
+      y: 0.00          # TODO
+      yaw_deg: 0.0     # TODO: mirando al ArUco 2
+      frame_id: map
+      retries: 2
+
+    - type: aruco
+      name: aproximar_aruco_2
+      id: 2
+      stop_distance: 0.18
+      timeout_sec: 30.0
+      retries: 1
+
+    - type: place
+      name: soltar_pieza_verde
+      target_pose: place_table
+      approach_height: 70.0
+      retreat_pose: home
+      speed_percent: 25.0
+      gripper_speed_percent: 40.0
+      retries: 1
+
+    # =================================================================
+    # PIEZA AZUL:  ArUco 1  ->  ArUco 3
+    # =================================================================
+
+    - type: navigate
+      name: volver_a_carga_azul
+      x: 0.80          # TODO
+      y: 0.50          # TODO
+      yaw_deg: 0.0     # TODO: mirando al ArUco 1
+      frame_id: map
+      retries: 2
+
+    - type: aruco
+      name: aproximar_aruco_1
+      id: 1
+      stop_distance: 0.18
+      timeout_sec: 30.0
+      retries: 1
+
+    - type: arm_pose
+      name: observar_pieza_azul
+      pose: observe
+      speed_percent: 30.0
+      retries: 1
+
+    - type: pick
+      name: tomar_pieza_azul
+      target_pose: pick_table
+      approach_height: 70.0
+      retreat_pose: carry
+      speed_percent: 25.0
+      gripper_speed_percent: 40.0
+      retries: 1
+
+    - type: navigate
+      name: ir_a_entrega_azul
+      x: 1.60          # TODO
+      y: 0.50          # TODO
+      yaw_deg: 0.0     # TODO: mirando al ArUco 3
+      frame_id: map
+      retries: 2
+
+    - type: aruco
+      name: aproximar_aruco_3
+      id: 3
+      stop_distance: 0.18
+      timeout_sec: 30.0
+      retries: 1
+
+    - type: place
+      name: soltar_pieza_azul
+      target_pose: place_table
+      approach_height: 70.0
+      retreat_pose: home
+      speed_percent: 25.0
+      gripper_speed_percent: 40.0
+      retries: 1
+
+    # =================================================================
+    # FINISH
+    # =================================================================
+
+    - type: arm_pose
+      name: plegar_brazo_final
+      pose: home
+      speed_percent: 30.0
+      retries: 1
+
+    - type: navigate
+      name: estacionar_en_finish
+      x: 0.00          # TODO: area de FINISH
+      y: 0.00          # TODO
+      yaw_deg: 0.0     # TODO
+      frame_id: map
+      retries: 2
