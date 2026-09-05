@@ -7,11 +7,12 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 
 from cv_bridge import CvBridge
 
 from geometry_msgs.msg import TransformStamped
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 
 from tf2_ros import TransformBroadcaster
 
@@ -144,19 +145,55 @@ class ArucoDetector(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # ----------------------------------------------------------
-        # ArUco dictionaries
+        # Diccionarios ArUco
         #
-        # 6x6 -> nuestros marcadores
-        # 5x5 -> Home Service Challenge
+        # Detectar un diccionario extra casi DUPLICA el coste del
+        # callback (es lo que tenia la deteccion a ~2.6 Hz en la Nano,
+        # justo en el borde del detection_timeout de la aproximacion).
+        # El T-SUMMIT usa 6x6_250 (ArUcos_6x6_250_ID0-9); el 5x5 era
+        # del Home Service Challenge. Configurable por si acaso.
         # ----------------------------------------------------------
 
-        self.dictionary_6x6 = cv2.aruco.getPredefinedDictionary(
-            cv2.aruco.DICT_6X6_250
+        # Modo distribuido: cuando este nodo corre en un portatil y la
+        # camara en el robot, la imagen viaja comprimida por WiFi (la
+        # cruda serian ~186 Mbit/s). Ver scripts/tsummit_offboard.sh.
+        self.declare_parameter('use_compressed', False)
+        self.use_compressed = bool(
+            self.get_parameter('use_compressed').value
         )
 
-        self.dictionary_5x5 = cv2.aruco.getPredefinedDictionary(
-            cv2.aruco.DICT_5X5_1000
+        self.declare_parameter('use_dict_6x6_250', True)
+        self.declare_parameter('use_dict_5x5_1000', False)
+
+        # Tope de proceso (Hz). La camara puede publicar a 15-20 Hz pero
+        # detectar a mas de ~8 Hz solo sirve para saturar la Nano.
+        self.declare_parameter('max_process_hz', 8.0)
+        self.max_process_hz = float(
+            self.get_parameter('max_process_hz').value
         )
+        self._last_process_t = 0.0
+
+        # Escala a la que se corre detectMarkers (1.0 = resolucion real).
+        # detectMarkers es O(pixeles): a 960x540 tardaba ~250 ms en la
+        # Nano. A 0.6 (~576x324) baja a ~90 ms y un ArUco de 8 cm a 1 m
+        # aun mide ~45 px/lado. Las esquinas se reescalan a resolucion
+        # real antes de estimar la pose, la precision no cambia.
+        self.declare_parameter('detect_scale', 0.6)
+        self.detect_scale = float(
+            self.get_parameter('detect_scale').value
+        )
+
+        self._dictionaries = []
+        if bool(self.get_parameter('use_dict_6x6_250').value):
+            self._dictionaries.append((
+                cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250),
+                '6X6_250',
+            ))
+        if bool(self.get_parameter('use_dict_5x5_1000').value):
+            self._dictionaries.append((
+                cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_1000),
+                '5X5_1000',
+            ))
 
         self.detector_parameters = (
             cv2.aruco.DetectorParameters_create()
@@ -173,12 +210,24 @@ class ArucoDetector(Node):
             10
         )
 
-        self.image_sub = self.create_subscription(
-            Image,
-            self.image_topic,
-            self.image_callback,
-            10
-        )
+        # BEST_EFFORT + KEEP_LAST 1: la camara publica asi (perfil sensor
+        # data). Con RELIABLE aqui no llegaria NI UN frame (QoS
+        # incompatible), y aunque llegara, encolar frames viejos no
+        # sirve para deteccion en vivo: siempre queremos el ultimo.
+        if self.use_compressed:
+            self.image_sub = self.create_subscription(
+                CompressedImage,
+                self.image_topic + '/compressed',
+                self.compressed_callback,
+                qos_profile_sensor_data
+            )
+        else:
+            self.image_sub = self.create_subscription(
+                Image,
+                self.image_topic,
+                self.image_callback,
+                qos_profile_sensor_data
+            )
 
         # ----------------------------------------------------------
         # Publishers
@@ -193,7 +242,7 @@ class ArucoDetector(Node):
         self.annotated_pub = self.create_publisher(
             Image,
             self.annotated_image_topic,
-            10
+            qos_profile_sensor_data
         )
 
         self.get_logger().info(
@@ -213,8 +262,9 @@ class ArucoDetector(Node):
         )
 
         self.get_logger().info(
-            'Enabled dictionaries: '
-            'DICT_6X6_250 + DICT_5X5_1000'
+            'Diccionarios activos: '
+            + (', '.join(name for _, name in self._dictionaries)
+               or 'NINGUNO (revisa use_dict_*)')
         )
 
     # ==============================================================
@@ -346,7 +396,42 @@ class ArucoDetector(Node):
     # Image callback
     # ==============================================================
 
+    def compressed_callback(self, msg):
+        """JPEG -> BGR y de ahi al mismo camino que la imagen cruda."""
+        try:
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            image = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(
+                f'jpeg decode: {exc}', throttle_duration_sec=5.0
+            )
+            return
+
+        if image is None:
+            return
+
+        self._process(msg.header, image)
+
     def image_callback(self, msg):
+        """Imagen cruda -> BGR y de ahi al camino comun."""
+        try:
+            image = self.bridge.imgmsg_to_cv2(
+                msg,
+                desired_encoding='bgr8'
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f'cv_bridge error: {exc}'
+            )
+            return
+
+        self._process(msg.header, image)
+
+    # ==============================================================
+    # Camino comun (lo alimentan image_callback y compressed_callback)
+    # ==============================================================
+
+    def _process(self, header, image):
 
         if self.camera_matrix is None:
             self.get_logger().warn(
@@ -355,20 +440,19 @@ class ArucoDetector(Node):
             )
             return
 
-        try:
+        # Limita el ritmo de PROCESO (no el de la camara): detectar
+        # ArUcos es lo que satura la Nano. A max_process_hz basta y
+        # sobra para la aproximacion (control lento) y deja CPU para
+        # todo lo demas. 0 = sin limite.
+        if self.max_process_hz > 0.0:
+            now = self.get_clock().now().nanoseconds * 1e-9
+            if (now - self._last_process_t) < (1.0 / self.max_process_hz):
+                return
+            self._last_process_t = now
 
-            image = self.bridge.imgmsg_to_cv2(
-                msg,
-                desired_encoding='bgr8'
-            )
-
-        except Exception as exc:
-
-            self.get_logger().error(
-                f'cv_bridge error: {exc}'
-            )
-
-            return
+        # ¿Alguien mira la imagen anotada? Si no, no dibujamos ni la
+        # codificamos: es lo que mas frena el callback en la Nano.
+        draw_annotated = self.annotated_pub.get_subscription_count() > 0
 
         gray = cv2.cvtColor(
             image,
@@ -380,27 +464,35 @@ class ArucoDetector(Node):
         if self.equalize_hist:
             gray = cv2.equalizeHist(gray)
 
+        # Detectar sobre una imagen reducida: detectMarkers es O(pixeles)
+        # y a 960x540 tardaba ~250 ms en la Nano (deteccion a 4 Hz). A
+        # escala 0.6 (576x324) baja a ~90 ms y un ArUco de 8 cm a 1 m
+        # sigue con ~45 px/lado. Las esquinas se reescalan de vuelta
+        # antes de estimar la pose, asi que la precision no cambia.
+        if self.detect_scale < 0.999:
+            small = cv2.resize(
+                gray, None,
+                fx=self.detect_scale, fy=self.detect_scale,
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            small = gray
+
         # ----------------------------------------------------------
-        # Detect BOTH dictionaries
+        # Deteccion (diccionarios activos, ver __init__)
         # ----------------------------------------------------------
 
         detections_raw = []
-
-        detections_raw.extend(
-            self.detect_dictionary(
-                gray,
-                self.dictionary_6x6,
-                '6X6_250'
+        for dictionary, name in self._dictionaries:
+            detections_raw.extend(
+                self.detect_dictionary(small, dictionary, name)
             )
-        )
 
-        detections_raw.extend(
-            self.detect_dictionary(
-                gray,
-                self.dictionary_5x5,
-                '5X5_1000'
-            )
-        )
+        # Esquinas de la imagen reducida -> resolucion real.
+        if self.detect_scale < 0.999:
+            inv = 1.0 / self.detect_scale
+            for d in detections_raw:
+                d['corners'] = d['corners'] * inv
 
         # ----------------------------------------------------------
         # Detection array
@@ -408,7 +500,7 @@ class ArucoDetector(Node):
 
         detection_array = ArucoDetectionArray()
 
-        detection_array.header = msg.header
+        detection_array.header = header
         detection_array.detections = []
 
         image_height, image_width = image.shape[:2]
@@ -484,7 +576,7 @@ class ArucoDetector(Node):
 
             detection = ArucoDetection()
 
-            detection.header = msg.header
+            detection.header = header
             detection.id = marker_id
 
             detection.pose.position.x = float(
@@ -531,7 +623,7 @@ class ArucoDetector(Node):
 
             tf_msg = TransformStamped()
 
-            tf_msg.header = msg.header
+            tf_header = header
 
             tf_msg.child_frame_id = (
                 f'aruco_{marker_id}'
@@ -560,56 +652,42 @@ class ArucoDetector(Node):
                 )
 
             # ------------------------------------------------------
-            # Draw marker
+            # Draw marker (solo si alguien mira /aruco/image_annotated:
+            # dibujar + codificar la imagen entera es lo mas caro del
+            # callback y durante una aproximacion real nadie la mira).
             # ------------------------------------------------------
 
-            corners_to_draw = [
-                marker_corners
-            ]
+            if draw_annotated:
+                cv2.aruco.drawDetectedMarkers(
+                    image,
+                    [marker_corners],
+                    np.array([[marker_id]], dtype=np.int32)
+                )
 
-            ids_to_draw = np.array(
-                [[marker_id]],
-                dtype=np.int32
-            )
+                cv2.drawFrameAxes(
+                    image,
+                    self.camera_matrix,
+                    self.dist_coeffs,
+                    rvec,
+                    tvec,
+                    self.marker_length * 0.5
+                )
 
-            cv2.aruco.drawDetectedMarkers(
-                image,
-                corners_to_draw,
-                ids_to_draw
-            )
-
-            cv2.drawFrameAxes(
-                image,
-                self.camera_matrix,
-                self.dist_coeffs,
-                rvec,
-                tvec,
-                self.marker_length * 0.5
-            )
-
-            # ------------------------------------------------------
-            # Annotation
-            # ------------------------------------------------------
-
-            label = (
-                f'{dictionary_name} '
-                f'ID={marker_id} '
-                f'z={tvec[2]:.2f}m'
-            )
-
-            text_x = int(center_x) - 70
-            text_y = int(center_y) - 20
-
-            cv2.putText(
-                image,
-                label,
-                (text_x, text_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (0, 255, 0),
-                1,
-                cv2.LINE_AA
-            )
+                label = (
+                    f'{dictionary_name} '
+                    f'ID={marker_id} '
+                    f'z={tvec[2]:.2f}m'
+                )
+                cv2.putText(
+                    image,
+                    label,
+                    (int(center_x) - 70, int(center_y) - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 0),
+                    1,
+                    cv2.LINE_AA
+                )
 
         # ----------------------------------------------------------
         # Publish detections
@@ -620,29 +698,22 @@ class ArucoDetector(Node):
         )
 
         # ----------------------------------------------------------
-        # Publish annotated image
+        # Publish annotated image (solo si hay quien la mire)
         # ----------------------------------------------------------
 
-        try:
-
-            annotated_msg = (
-                self.bridge.cv2_to_imgmsg(
+        if draw_annotated:
+            try:
+                annotated_msg = self.bridge.cv2_to_imgmsg(
                     image,
                     encoding='bgr8'
                 )
-            )
+                annotated_header = header
+                self.annotated_pub.publish(annotated_msg)
 
-            annotated_msg.header = msg.header
-
-            self.annotated_pub.publish(
-                annotated_msg
-            )
-
-        except Exception as exc:
-
-            self.get_logger().error(
-                f'Annotated image publish error: {exc}'
-            )
+            except Exception as exc:
+                self.get_logger().error(
+                    f'Annotated image publish error: {exc}'
+                )
 
 
 def main(args=None):
