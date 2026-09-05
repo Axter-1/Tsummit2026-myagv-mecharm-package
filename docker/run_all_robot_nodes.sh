@@ -40,12 +40,33 @@ cleanup() {
 }
 trap cleanup TERM INT EXIT
 
+# La Jetson Nano (4 nucleos + escritorio del host) se satura al mapear y
+# el hilo de lectura serie del LiDAR pierde tramas -> "Checksum error" ->
+# scans corruptos -> el mapa SLAM se desfasa y las paredes se superponen.
+# Solucion sin recrear el contenedor: aislar el laser y la odometria en
+# el ultimo nucleo (taskset, no necesita capabilities) para que ninguna
+# otra carga (slam, rviz) los interrumpa. Verificado: con el laser en un
+# nucleo propio, 3 nucleos al 100% no anaden ni un Checksum error.
+# Si ademas hay CAP_SYS_NICE (run_jetson_robot.sh la anade), tiempo real.
+NCPU="$(nproc)"
+SERIAL_CPU="$(( NCPU > 1 ? NCPU - 1 : 0 ))"
+PRIO=(taskset -c "${SERIAL_CPU}")
+if chrt -r 1 true >/dev/null 2>&1; then
+    PRIO=(taskset -c "${SERIAL_CPU}" chrt -r 20)
+    echo "[bringup] laser/odometria: nucleo ${SERIAL_CPU} aislado + tiempo real"
+else
+    echo "[bringup] laser/odometria: nucleo ${SERIAL_CPU} aislado (sin CAP_SYS_NICE)"
+fi
+# El resto del stack, fuera de ese nucleo.
+OTHER_CPUS="0-$(( SERIAL_CPU > 1 ? SERIAL_CPU - 1 : 0 ))"
+export SLAM_CPU_AFFINITY="${OTHER_CPUS}"
+
 # --- Base + odometria -------------------------------------------------
-ros2 run myagv_odometry myagv_odometry_node &
+"${PRIO[@]}" ros2 run myagv_odometry myagv_odometry_node &
 pids+=("$!")
 
 # --- LiDAR ----------------------------------------------------------
-ros2 launch ydlidar_ros2_driver ydlidar_launch.py \
+"${PRIO[@]}" ros2 launch ydlidar_ros2_driver ydlidar_launch.py \
     params_file:=/workspace/src/elephant_myagv_ros2/ydlidar_ros2_driver/params/X2.yaml &
 pids+=("$!")
 

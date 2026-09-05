@@ -30,9 +30,14 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    HistoryPolicy,
+    DurabilityPolicy,
+)
 
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 
 try:
     import cv2
@@ -111,12 +116,26 @@ class CsiCameraNode(Node):
         self.declare_parameter("device_index", 0)            # solo v4l2
         self.declare_parameter("gst_pipeline", "")           # solo custom
 
-        self.declare_parameter("capture_width", 3264)
-        self.declare_parameter("capture_height", 2464)
+        # Modo de sensor: 3264x2464@21 era la carga que mataba a la Nano
+        # (el ISP + nvvidconv reescalando cada frame desde 8 MP). El
+        # IMX219 tiene un modo 1280x720 nativo mucho mas ligero y sobra
+        # para ArUcos de 8 cm a ~1 m.
+        self.declare_parameter("capture_width", 1280)
+        self.declare_parameter("capture_height", 720)
+        # 960x540: por debajo, un ArUco de 8 cm a 1 m no llega a los
+        # ~60 px/lado que un 6x6 necesita para detectarse fiable.
         self.declare_parameter("output_width", DEFAULT_WIDTH)
         self.declare_parameter("output_height", DEFAULT_HEIGHT)
         self.declare_parameter("framerate", 21)
-        self.declare_parameter("flip_method", 0)
+        # 2 = rot 180: el modulo CSI del myAGV va montado boca abajo.
+        self.declare_parameter("flip_method", 2)
+
+        # Publicacion. En modo distribuido (procesamiento en un
+        # portatil) se apaga 'publish_raw' en el robot y solo viaja el
+        # JPEG por WiFi.
+        self.declare_parameter("publish_raw", True)
+        self.declare_parameter("publish_compressed", True)
+        self.declare_parameter("jpeg_quality", 80)
 
         self.declare_parameter("camera_name", "camera")
         self.declare_parameter("frame_id", "camera_link")
@@ -133,6 +152,12 @@ class CsiCameraNode(Node):
 
         self.capture_width = int(self.get_parameter("capture_width").value)
         self.capture_height = int(self.get_parameter("capture_height").value)
+        self.publish_raw = bool(self.get_parameter("publish_raw").value)
+        self.publish_compressed = bool(
+            self.get_parameter("publish_compressed").value
+        )
+        self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)
+
         self.output_width = int(self.get_parameter("output_width").value)
         self.output_height = int(self.get_parameter("output_height").value)
         self.framerate = int(self.get_parameter("framerate").value)
@@ -157,19 +182,42 @@ class CsiCameraNode(Node):
         # -----------------------------------------------------------------
         self.bridge = CvBridge()
 
-        # QoS fiable con profundidad 10: coincide con el detector de ArUco,
-        # que se suscribe con QoS por defecto.
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+        # Imagen en BEST_EFFORT + KEEP_LAST 1 (perfil "sensor data"): es
+        # lo estandar para video y evita el problema real que teniamos:
+        # con RELIABLE, un suscriptor lento (el detector saturando la
+        # Nano, o Foxglove por red) mete contrapresion y el publicador se
+        # frena -> la imagen "no se publica" o va a tirones. En
+        # BEST_EFFORT cada consumidor coge el ultimo frame y ya.
+        # OJO: el suscriptor tambien debe ser BEST_EFFORT
+        # (aruco_detector_node y foxglove_bridge ya lo hacen).
+        image_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=1,
+        )
+        # camera_info es pequeno y de baja tasa: RELIABLE + latch para que
+        # cualquiera que llegue tarde reciba la calibracion igualmente.
+        info_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
         )
 
         self.image_pub = self.create_publisher(
-            Image, f"{camera_name}/image_raw", qos
+            Image, f"{camera_name}/image_raw", image_qos
         )
         self.info_pub = self.create_publisher(
-            CameraInfo, f"{camera_name}/camera_info", qos
+            CameraInfo, f"{camera_name}/camera_info", info_qos
+        )
+        self.compressed_pub = self.create_publisher(
+            CompressedImage, f"{camera_name}/image_raw/compressed", image_qos
+        )
+
+        self.get_logger().info(
+            f"publicando: raw={self.publish_raw} "
+            f"comprimido={self.publish_compressed} "
+            f"(jpeg q={self.jpeg_quality})"
         )
 
         self.capture = None
@@ -254,13 +302,33 @@ class CsiCameraNode(Node):
             with open(path, "r", encoding="utf-8") as handle:
                 data = yaml.safe_load(handle)
 
+            cal_w = int(data["image_width"])
+            cal_h = int(data["image_height"])
+            k = [float(v) for v in data["camera_matrix"]["data"]]
+            p = [float(v) for v in data["projection_matrix"]["data"]]
+
+            # La calibracion suele estar a otra resolucion que la de
+            # salida (p.ej. .yaml a 960x540, salida a 640x360). fx, fy,
+            # cx, cy escalan lineal con la resolucion; d/r no cambian.
+            sx = self.output_width / float(cal_w)
+            sy = self.output_height / float(cal_h)
+            if abs(sx - 1.0) > 1e-6 or abs(sy - 1.0) > 1e-6:
+                for idx, s in ((0, sx), (2, sx), (4, sy), (5, sy)):
+                    k[idx] *= s
+                for idx, s in ((0, sx), (2, sx), (5, sy), (6, sy)):
+                    p[idx] *= s
+                self.get_logger().info(
+                    f"Calibracion {cal_w}x{cal_h} escalada a "
+                    f"{self.output_width}x{self.output_height}."
+                )
+
             info = CameraInfo()
-            info.width = int(data["image_width"])
-            info.height = int(data["image_height"])
+            info.width = self.output_width
+            info.height = self.output_height
             info.distortion_model = data.get(
                 "distortion_model", "plumb_bob"
             )
-            info.k = [float(v) for v in data["camera_matrix"]["data"]]
+            info.k = k
             info.d = [
                 float(v)
                 for v in data["distortion_coefficients"]["data"]
@@ -269,7 +337,7 @@ class CsiCameraNode(Node):
                 float(v)
                 for v in data["rectification_matrix"]["data"]
             ]
-            info.p = [float(v) for v in data["projection_matrix"]["data"]]
+            info.p = p
 
             self.get_logger().info(f"Calibracion cargada de {path}")
             return info
@@ -303,7 +371,23 @@ class CsiCameraNode(Node):
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.output_height)
             return cap
 
-        # nvargus (por defecto)
+        # nvargus (por defecto).
+        #
+        # nvarguscamerasrc necesita un EGLDisplay para su FrameConsumer.
+        # Si DISPLAY apunta a un X server al que este proceso NO esta
+        # autorizado (caso tipico dentro del contenedor: el host exporta
+        # DISPLAY=:0 pero sin xhost para 'root'), Argus falla con
+        #   "No protocol specified"
+        #   "(Argus) Error NotSupported: Failed to initialize EGLDisplay"
+        # y la camara nunca entrega un fotograma ("Fallo al leer...").
+        # Sin DISPLAY, Argus usa el EGL headless de Tegra y funciona.
+        # Este nodo publica por 'appsink', nunca dibuja nada, asi que
+        # no perdemos nada quitando DISPLAY.
+        if os.environ.pop("DISPLAY", None) is not None:
+            self.get_logger().info(
+                "DISPLAY desactivado para nvarguscamerasrc (EGL headless)."
+            )
+
         if not self._gstreamer_available():
             if not self._warned_no_gstreamer:
                 self.get_logger().error(
@@ -389,22 +473,47 @@ class CsiCameraNode(Node):
 
         stamp = self.get_clock().now().to_msg()
 
-        try:
-            image_msg = self.bridge.cv2_to_imgmsg(
-                np.ascontiguousarray(frame), encoding="bgr8"
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(f"cv_bridge: {exc}")
-            return
-
-        image_msg.header.stamp = stamp
-        image_msg.header.frame_id = self.frame_id
-
         info_msg = self.camera_info
         info_msg.header.stamp = stamp
         info_msg.header.frame_id = self.frame_id
 
-        self.image_pub.publish(image_msg)
+        # --- imagen cruda (consumidores LOCALES) -------------------
+        if self.publish_raw:
+            try:
+                image_msg = self.bridge.cv2_to_imgmsg(
+                    np.ascontiguousarray(frame), encoding="bgr8"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(f"cv_bridge: {exc}")
+                return
+
+            image_msg.header.stamp = stamp
+            image_msg.header.frame_id = self.frame_id
+            self.image_pub.publish(image_msg)
+
+        # --- imagen comprimida (consumidores REMOTOS) --------------
+        # 960x540 BGR crudo = 1.55 MB por frame: a 15 Hz son 186 Mbit/s,
+        # que ahogan cualquier WiFi y meten latencia. En JPEG son ~60 KB
+        # (~7 Mbit/s). Imprescindible si el detector corre en otra
+        # maquina; ver scripts/tsummit_offboard.sh.
+        if self.publish_compressed:
+            try:
+                ok, buf = cv2.imencode(
+                    ".jpg", frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
+                )
+                if ok:
+                    comp = CompressedImage()
+                    comp.header.stamp = stamp
+                    comp.header.frame_id = self.frame_id
+                    comp.format = "jpeg"
+                    comp.data = buf.tobytes()
+                    self.compressed_pub.publish(comp)
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(
+                    f"jpeg: {exc}", throttle_duration_sec=5.0
+                )
+
         self.info_pub.publish(info_msg)
 
     # =====================================================================
