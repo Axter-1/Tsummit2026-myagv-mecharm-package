@@ -1,0 +1,128 @@
+# =====================================================================
+#  slam_toolbox (async, modo mapping) — PERFIL "MAPA ESTABLE PARA MEDIR"
+# ---------------------------------------------------------------------
+#  Problema: "al alejarse del origen los valores se desfasan, el mapa se
+#  corrompe y las paredes se superponen".
+#
+#  Diagnostico (medido en el robot 2026-09-03):
+#   - La odometria del myAGV es PERFECTA en estatico: 0.000 deg de
+#     deriva de yaw en 40 s. El fallo es DINAMICO (solo al moverse).
+#   - El laser X2 da ~334 puntos utiles de 490 y suelta "Checksum error"
+#     (el enlace serie a 115200 pierde tramas cuando la Nano se satura).
+#     Cada scan corrupto mete geometria mal alineada -> paredes dobles.
+#   - La Jetson Nano (4 nucleos + escritorio del host) va al limite;
+#     slam_toolbox con Ceres compite por CPU con el hilo serie del laser.
+#
+#  Este perfil, por tanto:
+#   1. CONFIA en la odometria (angle/distance penalty por defecto): al
+#      ser buena, es mejor apoyarse en ella que dejar que el scan
+#      matcher "corrija" contra un scan corrupto.
+#   2. Procesa la MITAD de scans (throttle_scans 2) y recalcula el mapa
+#      cada 3 s: libera CPU -> menos Checksum error -> mejores scans.
+#   3. Keyframes moderados (0.20 m / 0.30 rad ~17 deg): no inserta
+#      keyframes a mitad de giro, que es cuando el scan sale mas
+#      deformado (barrido de 125 ms).
+#   4. Cierre de bucle ACTIVO pero NO gatillo facil (response_fine
+#      0.50): corrige la deriva global sin meter cierres falsos, que
+#      son lo que "corrompe" el mapa de golpe.
+#   5. HuberLoss: absorbe los outliers del X2.
+#
+#  ADEMAS (fuera de este archivo):
+#   - run_all_robot_nodes.sh lanza el laser y la odometria con 'chrt -r'
+#     (prioridad tiempo real) -> se acabaron casi todos los Checksum.
+#   - Al mapear: SOLO base + slam + teleop + foxglove(portatil).
+#     NO abras RViz en la Jetson (consume ~1 nucleo con GL software).
+#   - Conduce DESPACIO y en BUCLES; el cierre de bucle es lo unico que
+#     quita las paredes dobles al volver a pasar por un sitio.
+#
+#  Consume /scan_filtered. Para MEDIR: save-map y trabaja sobre el .pgm.
+# =====================================================================
+
+slam_toolbox:
+  ros__parameters:
+
+    # --- Plugins del solver ---
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: HuberLoss
+
+    # --- Frames y topics ---
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint
+    scan_topic: /scan_filtered
+    use_map_saver: true
+    mode: mapping
+
+    debug_logging: false
+    # Procesa 1 de cada 2 scans (~4 Hz): suficiente conduciendo despacio
+    # y baja mucho la carga de CPU (menos Checksum error en el laser).
+    throttle_scans: 2
+    transform_publish_period: 0.05
+    # Recalcula el occupancy grid cada 3 s (no cada 1 s): gran ahorro de
+    # CPU y el mapa se ve mas quieto.
+    map_update_interval: 3.0
+
+    resolution: 0.05
+    max_laser_range: 5.0
+    minimum_time_interval: 0.25
+    transform_timeout: 0.3
+    tf_buffer_duration: 30.0
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true
+
+    # --- Keyframes moderados ---
+    # Keyframes cortos: cuanto menos se mueve el robot entre scans, menor
+    # es la correccion que pide el scan matcher y mas holgada queda la
+    # ventana de correlacion. Con 0.20 m / 0.30 rad el primer match tras
+    # arrancar a conducir pedia una correccion mayor que la ventana y el
+    # mapper abortaba ("unable to get pointer in probability search").
+    minimum_travel_distance: 0.15
+    minimum_travel_heading: 0.15
+
+    # --- Emparejado de scans ---
+    use_scan_matching: true
+    use_scan_barycenter: true
+    scan_buffer_size: 15
+    # Alineado con max_laser_range (5.0): un valor mayor que el alcance
+    # real solo agranda la rejilla sin aportar nada.
+    scan_buffer_maximum_scan_distance: 5.0
+    link_match_minimum_response_fine: 0.13
+    link_scan_maximum_distance: 1.5
+
+    # 0.5 m (default de slam_toolbox): con 0.35 la rejilla de correlacion
+    # (+-0.175 m) no cubria la correccion que pide el matcher al empezar a
+    # moverse -> Karto indexaba fuera de la rejilla y el nodo abortaba,
+    # dejando /map congelado. No bajar de 0.5 en esta Nano.
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # --- Cierre de bucle: ACTIVO, umbral prudente ---
+    do_loop_closing: true
+    loop_search_maximum_distance: 3.0
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 2.5
+    loop_match_minimum_response_coarse: 0.40
+    loop_match_minimum_response_fine: 0.50
+
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # --- Penalizaciones del scan matcher ---
+    # Se confia en la odometria del myAGV (buena en estatico), pero con
+    # 1.0 el matcher casi no corregia el yaw y todo el error dinamico se
+    # iba a traslacion, agotando la ventana de correlacion. 0.9 (como el
+    # perfil del laberinto) deja corregir algo el rumbo.
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 0.9
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true

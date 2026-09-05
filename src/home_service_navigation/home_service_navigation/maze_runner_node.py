@@ -223,7 +223,25 @@ class MazeRunner(Node):
     # =====================================================================
 
     def _status(self, text, level='info'):
-        getattr(self.get_logger(), level)(text)
+        # NO usar getattr(self.get_logger(), level)(text): rclpy cachea
+        # el estado de logging por punto de llamada (fichero+linea) para
+        # soportar throttle/once/skip_first, y esa cache asocia una
+        # UNICA severidad a esa linea. Con una sola linea sirviendo a
+        # 'info', 'warn' y 'error' segun el 'level' de turno, la segunda
+        # severidad distinta que llega revienta con
+        # "ValueError: Logger severity cannot be changed between calls"
+        # -> maze_runner_node moria en el primer _status(..., 'error').
+        # Cada rama de abajo es su propio punto de llamada con severidad
+        # fija: asi rclpy no se queja y encima queda mas explicito.
+        logger = self.get_logger()
+        if level == 'error':
+            logger.error(text)
+        elif level == 'warn':
+            logger.warn(text)
+        elif level == 'debug':
+            logger.debug(text)
+        else:
+            logger.info(text)
         msg = String()
         msg.data = text
         self.status_pub.publish(msg)

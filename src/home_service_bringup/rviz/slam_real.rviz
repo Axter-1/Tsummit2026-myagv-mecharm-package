@@ -1,0 +1,304 @@
+# =====================================================================
+#  RViz2 — perfil DEFINITIVO de mapeo SLAM en el robot REAL (myAGV + X2)
+# ---------------------------------------------------------------------
+#  Objetivo: ver el mapa mientras se construye SIN robarle CPU al
+#  mapeo. La Jetson Nano no expone GPU al contenedor, asi que todo se
+#  rasteriza por software (llvmpipe): cada triangulo y cada texto que
+#  se dibuja se paga en CPU, y esa CPU sale del mismo sitio que la del
+#  scan matcher.
+#
+#  Decisiones de coste (por que esta config es barata):
+#   - Frame Rate 10: RViz solo redibuja 10 veces/s. Es el ajuste que
+#     mas CPU ahorra de largo; el mapa se refresca cada 3 s de todas
+#     formas (map_update_interval), asi que 10 fps sobra.
+#   - Vista TopDownOrtho, no Orbit: ortografica cenital. Es la vista
+#     correcta para juzgar un mapa 2D y ademas no calcula perspectiva.
+#   - RobotModel DESACTIVADO: el URDF del myAGV son dos mallas .dae
+#     (myagv_base + myagv_up), miles de triangulos por frame en
+#     software. Para mapear basta el eje en base_footprint. Actívalo
+#     con un clic si quieres ver el modelo.
+#   - LaserScan (raw) DESACTIVADO: /scan_filtered es lo que come SLAM;
+#     dibujar los dos scans es pagar el doble. Activa el raw solo para
+#     depurar el scan_sanitizer.
+#   - TF sin nombres ni flechas y filtrado a 4 frames: renderizar texto
+#     3D en llvmpipe es carisimo y el arbol completo no aporta nada.
+#   - Depth 1 en los topics de scan: solo importa el ultimo barrido.
+#     Con Depth 5 se acumulaba cola y salia el spam
+#     "Message Filter dropping message ... queue is full".
+#
+#  Puntos que hacen que NO se vea vacio:
+#   - Fixed Frame = map (lo publica slam_toolbox; si SLAM esta muerto,
+#     no hay map->odom y RViz se queda en blanco: mira slam.log).
+#   - Los LaserScan van en Best Effort: el driver X2 publica /scan en
+#     BEST_EFFORT y con "Reliable" RViz no recibe absolutamente nada.
+#   - /map va en Reliable + Transient Local (asi se recibe el ultimo
+#     mapa al conectar, aunque llegues tarde).
+#
+#  El reparto de nucleos (RViz fuera del nucleo del laser) lo hace
+#  scripts/run_robot_routine.sh; esta config solo baja el coste.
+#
+#  CALIBRAR EL OBJETIVO A MANO (Reto 4)
+#  =====================================
+#  goal_x/goal_y de maze.launch.py son una estimacion de diseno: pueden
+#  caer sobre una pared del mapa REAL. Panel "Navigation 2" (abajo a la
+#  izquierda) + estas dos herramientas evitan confiar a ciegas en ese
+#  valor:
+#   - "2D Pose Estimate": corrige donde cree AMCL que esta el robot si
+#     el (0,0,0) que publica tsummit.sh reto4 no es exacto.
+#   - "Nav2 Goal" (del panel Navigation 2): un clic en el mapa = un
+#     objetivo; con el selector "Nav Through Poses" del panel puedes
+#     encadenar VARIOS clics como una ruta de paso. Como se manda
+#     directo a /goal_pose, funciona aunque maze_runner este en modo
+#     manual (auto_start:=false) esperando a /maze/start.
+#  Una vez confirmada visualmente una meta valida (dentro de un
+#  pasillo, no sobre una pared), pasa esas coordenadas a
+#  GOAL_X/GOAL_Y para que el recorrido automatico las use.
+# =====================================================================
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Map1
+        - /LaserScan (filtrado)1
+      Splitter Ratio: 0.5
+    Tree Height: 640
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+  - Class: rviz_common/Tool Properties
+    Expanded:
+      - /2D Pose Estimate1
+    Name: Tool Properties
+    Splitter Ratio: 0.5886790156364441
+  # Start / Pause / Cancel + selector de modo (Nav2 Goal <-> Nav Through
+  # Poses, esto ultimo es lo que deja encadenar varias metas).
+  - Class: nav2_rviz_plugins/Navigation 2
+    Name: Navigation 2
+Visualization Manager:
+  Class: ""
+  Displays:
+    # Rejilla de 1 m: referencia de escala para juzgar el mapa a ojo.
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid (1 m)
+      Normal Cell Count: 0
+      Offset: { X: 0, Y: 0, Z: 0 }
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Value: true
+
+    # El mapa que construye slam_toolbox. Alpha 1 y Draw Behind para
+    # verlo con maximo contraste (paredes dobles/fantasma saltan a la
+    # vista) sin pelearse en z con la rejilla.
+    - Alpha: 1
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: true
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+      Update Topic:
+        Value: /map_updates
+      Use Timestamp: false
+      Value: true
+
+    # Lo que realmente consume slam_toolbox. Si esto no aparece, SLAM
+    # no esta recibiendo nada y el mapa no crecera.
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Class: rviz_default_plugins/LaserScan
+      Color: 255; 85; 0
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: true
+      Name: LaserScan (filtrado)
+      Position Transformer: XYZ
+      Selectable: false
+      Size (Pixels): 3
+      Size (m): 0.03
+      Style: Points
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /scan_filtered
+      Value: true
+
+    # Solo para depurar el scan_sanitizer (comparar crudo vs filtrado).
+    # Desactivado: dibujar los dos scans duplica el coste de render.
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Class: rviz_default_plugins/LaserScan
+      Color: 0; 255; 0
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: false
+      Name: LaserScan (crudo)
+      Position Transformer: XYZ
+      Selectable: false
+      Size (Pixels): 3
+      Size (m): 0.03
+      Style: Points
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /scan
+      Value: false
+
+    # Marcador barato de la pose del robot (sustituye al RobotModel).
+    - Class: rviz_default_plugins/Axes
+      Enabled: true
+      Length: 0.3
+      Name: Robot (base_footprint)
+      Radius: 0.02
+      Reference Frame: base_footprint
+      Value: true
+
+    # Sin nombres ni flechas (texto 3D = lo mas caro en llvmpipe) y
+    # limitado a los 4 frames que importan para diagnosticar SLAM:
+    # si falta map->odom, slam_toolbox esta caido.
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        base_footprint: { Value: true }
+        base_link: { Value: false }
+        laser_frame: { Value: true }
+        map: { Value: true }
+        odom: { Value: true }
+      Marker Scale: 0.3
+      Name: TF (map/odom/base/laser)
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Tree:
+        {}
+      Update Interval: 0
+      Value: true
+
+    # Grafo de poses de slam_toolbox: los nodos y, sobre todo, los
+    # cierres de bucle. Es LA forma de saber si el mapa esta bien
+    # cerrado. Desactivado por defecto porque son cientos de markers;
+    # activalo un momento al terminar una vuelta y vuelve a apagarlo.
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: false
+      Name: Grafo SLAM (cierres de bucle)
+      Namespaces: {}
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /slam_toolbox/graph_visualization
+      Value: false
+
+    # Modelo real del myAGV (mallas .dae). Bonito pero caro en software:
+    # actívalo solo para comprobar montaje/TF, nunca mientras mapeas.
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: false
+      Name: RobotModel (caro)
+      Visual Enabled: true
+      Value: false
+
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Default Light: true
+    Fixed Frame: map
+    # 10 fps: el ajuste que mas CPU ahorra. No lo subas en la Nano.
+    Frame Rate: 10
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    # Measure: para comprobar in situ anchos de pasillo y paredes
+    # dobles sin tener que guardar el .pgm.
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/FocusCamera
+    # "2D Pose Estimate": clic + arrastre en el mapa = donde esta el
+    # robot y hacia donde mira. Corrige la pose inicial si (0,0,0) no
+    # es exacto (publica /initialpose, lo mismo que tsummit.sh reto4).
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
+    # "Nav2 Goal": clic + arrastre = una meta (o varias, encadenadas,
+    # si el panel Navigation 2 esta en modo "Nav Through Poses"). Publica
+    # directo a /goal_pose: evita el goal_x/goal_y fijo de maze_runner,
+    # que puede caer sobre una pared si no esta calibrado.
+    - Class: nav2_rviz_plugins/GoalTool
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      # Cenital ortografica anclada a 'map': el mapa NO gira con el
+      # robot, que es lo que se quiere para juzgar si las paredes
+      # quedan rectas. Scale = pixeles por metro.
+      Angle: 0
+      Class: rviz_default_plugins/TopDownOrtho
+      Enable Stereo Rendering:
+        Value: false
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Scale: 60
+      Target Frame: map
+      Value: TopDownOrtho (rviz_default_plugins)
+      X: 0
+      Y: 0
+    Saved:
+      # Vista alternativa que SIGUE al robot: util en pasillos largos.
+      - Angle: 0
+        Class: rviz_default_plugins/TopDownOrtho
+        Enable Stereo Rendering:
+          Value: false
+        Invert Z Axis: false
+        Name: Seguir al robot
+        Near Clip Distance: 0.01
+        Scale: 90
+        Target Frame: base_footprint
+        Value: TopDownOrtho (rviz_default_plugins)
+        X: 0
+        Y: 0
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Views:
+    collapsed: false
+  Width: 1400

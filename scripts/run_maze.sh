@@ -49,6 +49,12 @@ GOAL_X="${GOAL_X:-3.7}"
 GOAL_Y="${GOAL_Y:--2.2}"
 GOAL_YAW="${GOAL_YAW:-0.0}"
 
+# SLAM en vivo (por defecto) o AMCL contra un mapa ya guardado. Con un
+# mapa guardado del MISMO punto de partida, START sigue siendo (0,0) en
+# el frame "map" (asi se genero al mapear), asi que GOAL_X/Y no cambian.
+SLAM="${SLAM:-true}"
+MAP="${MAP:-}"
+
 # Sectores del LiDAR ocluidos por el propio robot (grados, por pares).
 BLIND_SECTORS="${BLIND_SECTORS:-[-50.0, 50.0]}"
 
@@ -58,6 +64,14 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 SOURCE_ENV='source /opt/ros/humble/setup.bash; source /workspace/install/setup.bash'
+LOG_DIR="${LOG_DIR:-/workspace/log/robot_routine}"
+# DETACH=1: usa 'docker exec -d' en vez de adjuntarse a la terminal.
+# Lo necesita quien orquesta esto desde OTRO script (tsummit.sh reto4):
+# 'run' se queda pegado a la vida del ros2 launch (es lo correcto para
+# uso manual, ves el log en vivo con Ctrl-C para parar), pero eso
+# bloquea para siempre a quien lo llama y le impide seguir con los
+# pasos de despues (publicar la pose inicial, abrir RViz...).
+DETACH="${DETACH:-0}"
 
 exec_flags() {
     if [ -t 0 ] && [ -t 1 ]; then printf -- '-it'; else printf -- '-i'; fi
@@ -98,6 +112,11 @@ launch_maze() {
 
     require_container
 
+    if [ "${SLAM}" = "false" ] && [ -z "${MAP}" ]; then
+        echo "ERROR: SLAM=false exige MAP=/workspace/maps/<archivo>.yaml" >&2
+        exit 2
+    fi
+
     local start_mux='true'
     if twist_mux_running; then
         start_mux='false'
@@ -108,12 +127,27 @@ launch_maze() {
 
     echo "[i] FINISH = (${GOAL_X}, ${GOAL_Y}) yaw=${GOAL_YAW} deg"
     echo "[i] sectores ciegos del LiDAR = ${BLIND_SECTORS}"
+    if [ "${SLAM}" = "false" ]; then
+        echo "[i] localizacion: AMCL contra mapa guardado (${MAP})"
+    else
+        echo "[i] localizacion: SLAM en vivo (map->odom se construye sobre la marcha)"
+    fi
     echo
 
-    in_container "${SOURCE_ENV}; \
+    # OJO: 'map:=' con valor vacio es un argumento MALFORMADO para
+    # ros2 launch (exige <name>:=<value>) y aborta el lanzamiento entero
+    # antes de arrancar un solo nodo. En SLAM en vivo (MAP="") no se
+    # pasa el argumento en absoluto y el launch usa su default ('').
+    local map_arg=""
+    if [ -n "${MAP}" ]; then
+        map_arg="map:='${MAP}'"
+    fi
+
+    local launch_cmd="${SOURCE_ENV}; \
         ros2 launch home_service_bringup maze.launch.py \
             use_sim_time:=false \
-            slam:=true \
+            slam:=${SLAM} \
+            ${map_arg} \
             auto_start:=${auto_start} \
             run_maze_runner:=${run_runner} \
             report_blind_sectors:=${report_blind} \
@@ -122,12 +156,25 @@ launch_maze() {
             goal_y:=${GOAL_Y} \
             goal_yaw_deg:=${GOAL_YAW} \
             blind_sectors_deg:='${BLIND_SECTORS}'"
+
+    if [ "${DETACH}" = "1" ]; then
+        "${DOCKER[@]}" exec -d "${CONTAINER}" bash -lc \
+            "mkdir -p '${LOG_DIR}'; ${launch_cmd} >'${LOG_DIR}/maze.log' 2>&1"
+        echo "[i] maze.launch.py en marcha (detached). Log: ${LOG_DIR}/maze.log"
+    else
+        in_container "${launch_cmd}"
+    fi
 }
 
 case "${1:-run}" in
 
     run)
-        launch_maze true true false
+        # AUTO_START lo puede forzar a 'false' quien nos llama (p.ej.
+        # tsummit.sh reto4) cuando ha comprobado de antemano que
+        # GOAL_X/GOAL_Y cae sobre una pared del mapa: mejor arrancar en
+        # manual y dejar que el operador marque una meta valida desde
+        # RViz que quedarse reintentando un objetivo imposible.
+        launch_maze "${AUTO_START:-true}" true false
         ;;
 
     manual)
@@ -232,18 +279,26 @@ PY"
 
     stop)
         require_container
-        in_container "pkill -f 'maze.launch.py' || true; \
-                      pkill -f 'async_slam_toolbox_node' || true; \
-                      pkill -f 'scan_sanitizer_node' || true; \
-                      pkill -f 'maze_runner_node' || true; \
-                      pkill -f 'nav2_core.launch.py' || true; \
-                      pkill -f 'controller_server' || true; \
-                      pkill -f 'planner_server' || true; \
-                      pkill -f 'bt_navigator' || true; \
-                      pkill -f 'behavior_server' || true; \
-                      pkill -f 'velocity_smoother' || true; \
-                      pkill -f 'smoother_server' || true; \
-                      pkill -f 'lifecycle_manager' || true" || true
+        # Gracia (INT) y despues SIGKILL siempre. smoother_server,
+        # behavior_server y velocity_smoother dependen de un "bond" con
+        # el lifecycle_manager: si este muere primero, se quedan
+        # colgados esperando un heartbeat que ya no llega y un SIGTERM
+        # simple NO los mata (se ha visto en pista: quedan vivos
+        # indefinidamente y el siguiente 'run' arranca con procesos
+        # duplicados). SIGKILL no se puede ignorar, así que es la unica
+        # garantia real de que esto termina.
+        # [x]xxx en cada termino: sin el corchete, el propio texto del
+        # patron (que viaja dentro del argv de este mismo 'bash -lc')
+        # hace self-match y pkill se mata a si mismo a mitad de script,
+        # antes de llegar al 'sleep 2; pkill -KILL' de mas abajo. Con
+        # '[c]ontroller_server' el regex exige que la 'c' vaya SEGUIDA
+        # de "ontroller_server"; en el propio argv, tras la 'c' viene un
+        # ']', asi que no hace self-match mientras que SI cuadra contra
+        # un proceso real cuyo cmdline es ".../controller_server".
+        maze_proc_names='[m]aze.launch.py|[a]sync_slam_toolbox_node|[s]can_sanitizer_node|[m]aze_runner_node|[n]av2_core.launch.py|[c]ontroller_server|[p]lanner_server|[b]t_navigator|[b]ehavior_server|[v]elocity_smoother|[s]moother_server|[l]ifecycle_manager'
+        in_container "pkill -INT -f '${maze_proc_names}' || true; \
+                      sleep 2; \
+                      pkill -KILL -f '${maze_proc_names}' || true" || true
         echo "[i] Stack del laberinto detenido."
         ;;
 

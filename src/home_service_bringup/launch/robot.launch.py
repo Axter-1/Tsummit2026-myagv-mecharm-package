@@ -46,7 +46,12 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("camera_source", default_value="nvargus"),
-        DeclareLaunchArgument("camera_flip_method", default_value="0"),
+        DeclareLaunchArgument("camera_flip_method", default_value="2"),
+        # En modo distribuido el robot NO publica la imagen cruda: por
+        # WiFi solo viaja el JPEG (246.8 -> 6.1 Mbit/s medidos) y
+        # publicar ambas seria gastar CPU de la Nano para nada.
+        DeclareLaunchArgument("camera_publish_raw", default_value="true"),
+        DeclareLaunchArgument("camera_publish_compressed", default_value="true"),
         DeclareLaunchArgument("marker_length", default_value="0.08"),
         DeclareLaunchArgument("arm_port", default_value="/dev/ttyACM0"),
         DeclareLaunchArgument("start_camera", default_value="true"),
@@ -77,6 +82,10 @@ def generate_launch_description():
             "use_sim_time": use_sim_time,
             "source": LaunchConfiguration("camera_source"),
             "flip_method": LaunchConfiguration("camera_flip_method"),
+            "publish_raw": LaunchConfiguration("camera_publish_raw"),
+            "publish_compressed": LaunchConfiguration(
+                "camera_publish_compressed"
+            ),
             "camera_name": "camera",
             "frame_id": "camera_link",
         }.items(),
