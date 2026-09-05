@@ -1,0 +1,291 @@
+diff --git a/myagv_odometry/CMakeLists.txt b/myagv_odometry/CMakeLists.txt
+index e59298f..c132b3a 100644
+--- a/myagv_odometry/CMakeLists.txt
++++ b/myagv_odometry/CMakeLists.txt
+@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
+ find_package(rclcpp REQUIRED)
+ find_package(tf2 REQUIRED)
+ find_package(tf2_ros REQUIRED)
++find_package(tf2_geometry_msgs REQUIRED)
+ find_package(sensor_msgs REQUIRED)
+ find_package(geometry_msgs REQUIRED)
+ find_package(Boost REQUIRED)
+@@ -22,7 +23,7 @@ include_directories(
+ add_executable(myagv_odometry_node
+                src/myAGV.cpp
+                src/myAGVSub.cpp)
+-ament_target_dependencies(myagv_odometry_node rclcpp tf2 tf2_ros sensor_msgs geometry_msgs nav_msgs)
++ament_target_dependencies(myagv_odometry_node rclcpp tf2 tf2_ros tf2_geometry_msgs sensor_msgs geometry_msgs nav_msgs)
+ 
+ install(TARGETS
+   myagv_odometry_node
+diff --git a/myagv_odometry/include/myagv_odometry/myAGV.h b/myagv_odometry/include/myagv_odometry/myAGV.h
+index de774ab..d255344 100755
+--- a/myagv_odometry/include/myagv_odometry/myAGV.h
++++ b/myagv_odometry/include/myagv_odometry/myAGV.h
+@@ -10,7 +10,7 @@
+ #include <tf2/LinearMath/Quaternion.h>
+ #include <tf2_ros/transform_broadcaster.h>
+ #include <tf2/LinearMath/Quaternion.h>
+-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
++#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+ #include <boost/asio.hpp>
+ #include <chrono>
+ #include <memory>
+@@ -26,8 +26,10 @@ class MyAGV : public rclcpp::Node{
+ public:
+     MyAGV(const std::string &node_name = "myagv_odometry_node");
+ 	~MyAGV();
+-	bool init();
+-	void execute(double linearX, double linearY, double angularZ);
++    bool init();
++    void sendCommand(double linearX, double linearY, double angularZ);
++    void readTelemetry();
++    void execute(double linearX, double linearY, double angularZ);
+ 	void publisherOdom(double dt);
+ 	void publisherImuSensor();
+ 	void Publish_Voltage();
+@@ -79,4 +81,4 @@ private:
+     sensor_msgs::msg::Imu imu_data;
+ };
+ 
+-#endif // !MYAGV_H
+\ No newline at end of file
++#endif // !MYAGV_H
+diff --git a/myagv_odometry/package.xml b/myagv_odometry/package.xml
+index 2a7beb6..f6823ba 100644
+--- a/myagv_odometry/package.xml
++++ b/myagv_odometry/package.xml
+@@ -9,6 +9,8 @@
+ 
+   <buildtool_depend>ament_cmake</buildtool_depend>
+ 
++  <depend>tf2_geometry_msgs</depend>
++
+   <test_depend>ament_lint_auto</test_depend>
+   <test_depend>ament_lint_common</test_depend>
+ 
+diff --git a/myagv_odometry/src/myAGV.cpp b/myagv_odometry/src/myAGV.cpp
+index d513bea..71bc83c 100755
+--- a/myagv_odometry/src/myAGV.cpp
++++ b/myagv_odometry/src/myAGV.cpp
+@@ -316,7 +316,7 @@ void MyAGV::publisherOdom(double dt)
+ 
+     odom_trans.transform.rotation = odom_quat;
+ 
+-    // odomBroadcaster->sendTransform(odom_trans); // Use the Robot Localization ros package instead.
++    odomBroadcaster->sendTransform(odom_trans);
+ 
+     nav_msgs::msg::Odometry odom;
+     odom.header.stamp = this->get_clock()->now();;
+@@ -337,20 +337,30 @@ void MyAGV::publisherOdom(double dt)
+     pub_odom->publish(odom);
+ }
+ 
+-void MyAGV::execute(double linearX, double linearY, double angularZ)
+-{   
+-    currentTime = this->get_clock()->now();   
+-    double dt = (currentTime - lastTime).seconds();
+-    if (true ==  readSpeed()) 
+-    {    
+-        writeSpeed(linearX, linearY, angularZ);
+-        publisherOdom(dt);
++void MyAGV::sendCommand(double linearX, double linearY, double angularZ)
++{
++    writeSpeed(linearX, linearY, angularZ);
++}
++
++void MyAGV::readTelemetry()
++{
++    currentTime = this->get_clock()->now();
++    double dt = (currentTime - lastTime).seconds();
++    if (true ==  readSpeed())
++    {
++        publisherOdom(dt);
+         //ROS_INFO("dt:%f",dt);
+         publisherImuSensor();
+         Publish_Voltage();
+-    } 
+-    lastTime = currentTime;
+-}
++    }
++    lastTime = currentTime;
++}
++
++void MyAGV::execute(double linearX, double linearY, double angularZ)
++{
++    sendCommand(linearX, linearY, angularZ);
++    readTelemetry();
++}
+ 
+ /**
+  * @brief auto report 
+@@ -378,4 +388,4 @@ void MyAGV::setAutoReportState(bool state)
+     boost::asio::write(sp, boost::asio::buffer(cmd));
+     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+     return;
+-}
+\ No newline at end of file
++}
+diff --git a/myagv_odometry/src/myAGVSub.cpp b/myagv_odometry/src/myAGVSub.cpp
+index 832cc4a..8edb76f 100755
+--- a/myagv_odometry/src/myAGVSub.cpp
++++ b/myagv_odometry/src/myAGVSub.cpp
+@@ -1,44 +1,112 @@
+-#include "myagv_odometry/myAGV.h"
+-
+-#include "rclcpp/rclcpp.hpp"
+-#include "geometry_msgs/msg/twist.hpp"
+-#include <iostream>
+-#include <cstring> 
+-
+-double linearX = 0.0;
+-double linearY = 0.0;
+-double angularZ = 0.0;
+-
+-//using namespace std;
+-
+-void cmdCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
+-{
+-    linearX = msg->linear.x;
+-    linearY = msg->linear.y;
+-    angularZ = msg->angular.z;
+-    //RCLCPP_INFO(rclcpp::get_logger("myagv_odometry_node"), "cmdCallback: linearX: %.2f, linearY: %.2f, angularZ: %.2f", linearX, linearY, angularZ);
+-}
+-
+-int main(int argc, char* argv[])
+-{
+-    rclcpp::init(argc, argv);
+-    auto node = std::make_shared<MyAGV>("myagv_odometry_node");
+-
+-    if (!node->init()) {
+-        RCLCPP_ERROR(node->get_logger(), "myAGV initialized failed!");
+-        return 1;
+-    }
+-    RCLCPP_INFO(node->get_logger(), "myAGV initialized successful!");
+-
+-    auto sub = node->create_subscription<geometry_msgs::msg::Twist>("cmd_vel", 50, cmdCallback);
+-    rclcpp::Rate loop_rate(100);
+-
+-    while (rclcpp::ok()) {
+-        rclcpp::spin_some(node);
+-        node->execute(linearX, linearY, angularZ);
+-        loop_rate.sleep();
+-    }
+-
+-    rclcpp::shutdown();
+-    return 0;
+-}
+\ No newline at end of file
++#include "myagv_odometry/myAGV.h"
++
++#include "rclcpp/rclcpp.hpp"
++#include "geometry_msgs/msg/twist.hpp"
++#include <iostream>
++#include <cstring>
++#include <atomic>
++#include <thread>
++#include <chrono>
++#include <cstdint>
++
++std::atomic<double> linearX{0.0};
++std::atomic<double> linearY{0.0};
++std::atomic<double> angularZ{0.0};
++
++// Marca de tiempo (steady clock, nanosegundos) del ultimo /cmd_vel.
++std::atomic<int64_t> lastCmdNs{0};
++
++// WATCHDOG DE VELOCIDAD
++// =====================
++// Sin esto, este nodo guardaba el ultimo /cmd_vel y lo reenviaba a los
++// motores a 100 Hz PARA SIEMPRE: si el emisor callaba (nodo muerto,
++// twist_mux con todas sus entradas en timeout, o -sobre todo- el enlace
++// WiFi caido cuando el procesamiento corre en un portatil externo), el
++// robot seguia rodando a la ultima velocidad ordenada. Un AMR no puede
++// depender de que "alguien siga hablando" para frenar.
++//
++// 0.30 s: por encima del timeout de 0.5 s de twist_mux seria inutil, y
++// por debajo de ~0.2 s un hipo normal de red frenaria el robot a
++// tirones. Los emisores publican a >= 10 Hz, asi que 0.3 s son 3
++// mensajes perdidos seguidos.
++constexpr int64_t CMD_TIMEOUT_NS = 300LL * 1000LL * 1000LL;
++
++//using namespace std;
++
++void cmdCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
++{
++    linearX.store(msg->linear.x, std::memory_order_relaxed);
++    linearY.store(msg->linear.y, std::memory_order_relaxed);
++    angularZ.store(msg->angular.z, std::memory_order_relaxed);
++    lastCmdNs.store(
++        std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now().time_since_epoch()).count(),
++        std::memory_order_relaxed);
++    //RCLCPP_INFO(rclcpp::get_logger("myagv_odometry_node"), "cmdCallback: linearX: %.2f, linearY: %.2f, angularZ: %.2f", linearX, linearY, angularZ);
++}
++
++int main(int argc, char* argv[])
++{
++    rclcpp::init(argc, argv);
++    auto node = std::make_shared<MyAGV>("myagv_odometry_node");
++
++    if (!node->init()) {
++        RCLCPP_ERROR(node->get_logger(), "myAGV initialized failed!");
++        return 1;
++    }
++    RCLCPP_INFO(node->get_logger(), "myAGV initialized successful!");
++
++    auto sub = node->create_subscription<geometry_msgs::msg::Twist>("cmd_vel", 50, cmdCallback);
++    rclcpp::Rate command_rate(100);
++
++    // Telemetry is a blocking serial read (~12 Hz). Keep command writes on
++    // the fast path so they do not wait for the next telemetry packet.
++    std::thread telemetry_thread([&node]() {
++        while (rclcpp::ok()) {
++            node->readTelemetry();
++        }
++    });
++
++    bool stopped_by_watchdog = false;
++
++    while (rclcpp::ok()) {
++        rclcpp::spin_some(node);
++
++        const int64_t now_ns =
++            std::chrono::duration_cast<std::chrono::nanoseconds>(
++                std::chrono::steady_clock::now().time_since_epoch()).count();
++        const int64_t last_ns = lastCmdNs.load(std::memory_order_relaxed);
++
++        // last_ns == 0 -> aun no ha llegado ningun /cmd_vel: quietos.
++        const bool cmd_fresh =
++            (last_ns != 0) && ((now_ns - last_ns) < CMD_TIMEOUT_NS);
++
++        if (cmd_fresh) {
++            if (stopped_by_watchdog) {
++                RCLCPP_INFO(node->get_logger(),
++                            "cmd_vel restablecido; se reanuda el control.");
++                stopped_by_watchdog = false;
++            }
++            node->sendCommand(
++                linearX.load(std::memory_order_relaxed),
++                linearY.load(std::memory_order_relaxed),
++                angularZ.load(std::memory_order_relaxed));
++        } else {
++            if (!stopped_by_watchdog && last_ns != 0) {
++                RCLCPP_WARN(node->get_logger(),
++                            "WATCHDOG: sin /cmd_vel en %.0f ms. Motores a cero.",
++                            CMD_TIMEOUT_NS / 1e6);
++                stopped_by_watchdog = true;
++            }
++            node->sendCommand(0.0, 0.0, 0.0);
++        }
++
++        command_rate.sleep();
++    }
++
++    if (telemetry_thread.joinable()) {
++        telemetry_thread.join();
++    }
++    rclcpp::shutdown();
++    return 0;
++}
