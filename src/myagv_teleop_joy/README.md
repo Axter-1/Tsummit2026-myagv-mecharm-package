@@ -1,8 +1,7 @@
 # myagv_teleop_joy
 
-Teleoperación **omnidireccional** del myAGV con un mando **Bluetooth**
-(pensado para un **Xbox Series / Xbox One**, sirve cualquier mando reconocido
-por Linux).
+Teleoperación **omnidireccional** del myAGV con un gamepad genérico **USB**
+(identificado por Linux como **TGZ Controller**).
 
 El nodo `bluetooth_gamepad_teleop` **no usa el stack `joy` de ROS**. Abre el
 mando directamente como dispositivo de entrada del kernel (`evdev`,
@@ -13,17 +12,14 @@ por Bluetooth, y publica `geometry_msgs/Twist`.
 
 | Control | Acción | Campo de `Twist` |
 |---|---|---|
-| **RT** (gatillo derecho) | avanzar | `linear.x > 0` |
-| **LT** (gatillo izquierdo) | retroceder | `linear.x < 0` |
-| **LB** | girar a la izquierda | `angular.z > 0` |
-| **RB** | girar a la derecha | `angular.z < 0` |
-| **Joystick izquierdo** ↑↓ | adelante / atrás | `linear.x` |
-| **Joystick izquierdo** ←→ | traslación lateral | `linear.y` |
-| **Cruceta (D-Pad)** ↑↓ | adelante / atrás | `linear.x` |
-| **Cruceta (D-Pad)** ←→ | traslación lateral | `linear.y` |
+| **Joystick izquierdo** ↑↓ | avance/retroceso | `linear.x` |
+| **Joystick izquierdo** ←→ | desplazamiento lateral | `linear.y` |
+| **Cruceta** ↑↓←→ | movimiento lineal alternativo | `linear.x` / `linear.y` |
+| **LB / L1** | girar a la izquierda | `angular.z > 0` |
+| **RB / R1 / R2** | girar a la derecha | `angular.z < 0` |
 
-Los aportes del joystick, la cruceta y los gatillos se **suman** y se recortan
-al máximo configurado. Si no llegan eventos del mando durante
+Solo el stick izquierdo y LB/RB generan movimiento. El stick derecho, gatillos
+y cruceta se ignoran. Si no llegan eventos del mando durante
 `controller_timeout` segundos, o si el mando se desconecta, el nodo publica
 velocidad cero.
 
@@ -39,18 +35,16 @@ El usuario debe poder leer `/dev/input/event*` (grupo `input`):
 sudo usermod -aG input $USER          # y volver a iniciar sesión
 ```
 
-## Emparejar el mando Xbox por Bluetooth
+## Conectar el gamepad USB
 
 ```bash
-bluetoothctl
-> power on
-> agent on
-> scan on
-# mantener pulsado el botón de sincronización del mando hasta que parpadee rápido
-> pair <MAC_DEL_MANDO>
-> trust <MAC_DEL_MANDO>
-> connect <MAC_DEL_MANDO>
+ls -l /dev/input/by-id/*event-joystick*
+cat /proc/bus/input/devices
 ```
+
+El gamepad utilizado aparece como `TGZ Controller`. El evento puede cambiar
+entre `/dev/input/event2`, `/dev/input/event7`, etc.; el nodo lo detecta por
+nombre y capacidades, no por el número del evento.
 
 Comprueba que aparece como dispositivo de entrada:
 
@@ -59,10 +53,8 @@ cat /proc/bus/input/devices | grep -iA5 xbox
 ls -l /dev/input/by-id/*event-joystick*
 ```
 
-> **WSL:** el Bluetooth no pasa a WSL directamente. Empareja el mando (o su
-> receptor USB inalámbrico) en Windows y adjunta el dispositivo con
-> `usbipd attach --wsl --busid <BUSID>` como se hace con el resto de
-> periféricos del proyecto.
+El contenedor monta `/dev/input` y permite dinámicamente la clase evdev, por lo
+que no es necesario configurar manualmente `eventX`.
 
 ## Uso
 
@@ -108,25 +100,33 @@ y lanza el nodo con `cmd_vel_topic:=/cmd_vel_joy`.
 | Parámetro | Def. | Descripción |
 |---|---|---|
 | `device_path` | `""` | Ruta fija (`/dev/input/eventX`). Vacío = autodetección. |
-| `device_name` | `"Xbox Wireless Controller"` | Subcadena del nombre para autodetección. |
+| `device_name` | `"TGZ Controller"` | Subcadena del nombre para autodetección. |
 | `cmd_vel_topic` | `/cmd_vel` | Topic `Twist` de salida. |
-| `publish_rate` | `20.0` | Frecuencia de publicación (Hz). |
+| `publish_rate` | `100.0` | Frecuencia de publicación (Hz). |
 | `max_linear_x` | `0.4` | Velocidad lineal máx. adelante/atrás (m/s). |
 | `max_linear_y` | `0.4` | Velocidad lineal máx. lateral (m/s). |
 | `max_angular_z` | `1.2` | Velocidad angular máx. (rad/s). |
 | `stick_deadzone` | `0.12` | Zona muerta del joystick. |
 | `trigger_deadzone` | `0.05` | Zona muerta de los gatillos. |
-| `slew_rate` | `2.0` | Límite de aceleración (fracción de rango/s). `0` = desactivado. |
-| `controller_timeout` | `1.0` | Segundos sin eventos → frena. |
+| `slew_rate` | `0.0` | Respuesta inmediata. `0` = desactivado. |
+| `controller_timeout` | `0.0` | `0` mantiene el último estado hasta soltar/desconectar. |
 | `invert_linear_x` / `_y` / `_angular_z` | `false` | Inversión de ejes. |
 | `code.*` | ver `config/xbox_series.yaml` | Nombres de códigos `evdev` (solo si tu mando difiere del `xpad` estándar). |
 
 ## Diagnóstico
 
 ```bash
-# ver qué códigos emite tu mando en tiempo real
-python3 -m evdev.evtest
+# ver qué códigos emite el gamepad en tiempo real, sin fijar eventX
+./scripts/myagv_commands.sh inputs
 
 # comprobar la salida del nodo
-ros2 topic echo /cmd_vel
+./scripts/myagv_commands.sh cmd_vel
+```
+
+Si `ros2 topic echo /cmd_vel` muestra `RuntimeError: !rclpy.ok()`, el daemon
+de la CLI quedo en un estado invalido. Reinicialo con:
+
+```bash
+ros2 daemon stop
+ros2 daemon start
 ```

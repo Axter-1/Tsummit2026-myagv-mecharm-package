@@ -43,3 +43,7 @@ secrets*
 /src/elephant_myagv_ros2/
 /src/elephant_mycobot_ros2/
 *.bak*
+
+# Volcados de memoria (85 MB de basura)
+core
+core.*

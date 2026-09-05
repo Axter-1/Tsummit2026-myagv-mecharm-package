@@ -5,7 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONTAINER="${CONTAINER:-myagv-robot}"
-MAP="${MAP:-/workspace/maps/home_service_challenge_myagv.yaml}"
+MAP="${MAP:-}"
+MAP_DIR="${MAP_DIR:-${ROOT}/maps}"
 PARAMS="${PARAMS:-/workspace/install/home_service_bringup/share/home_service_bringup/config/nav2_real.yaml}"
 
 DOCKER=(docker)
@@ -30,6 +31,46 @@ require_container() {
     fi
 }
 
+select_map() {
+    local -a maps
+    local choice
+
+    shopt -s nullglob
+    maps=("${MAP_DIR}"/*.yaml)
+    shopt -u nullglob
+
+    if [ "${#maps[@]}" -eq 0 ]; then
+        printf 'ERROR: no hay mapas .yaml en %s\n' "${MAP_DIR}" >&2
+        exit 1
+    fi
+
+    if [ -n "${MAP}" ]; then
+        return
+    fi
+
+    if [ ! -t 0 ]; then
+        printf 'ERROR: selecciona un mapa con MAP=/workspace/maps/<archivo>.yaml\n' >&2
+        exit 2
+    fi
+
+    printf 'Mapas disponibles:\n'
+    for choice in "${!maps[@]}"; do
+        printf '  %d) %s\n' "$((choice + 1))" "$(basename "${maps[choice]}")"
+    done
+
+    while true; do
+        read -r -p 'Selecciona un mapa: ' choice
+        if [[ "${choice}" =~ ^[0-9]+$ ]] \
+            && [ "${choice}" -ge 1 ] \
+            && [ "${choice}" -le "${#maps[@]}" ]; then
+            MAP="/workspace/maps/$(basename "${maps[choice - 1]}")"
+            printf 'Mapa seleccionado: %s\n' "${MAP}"
+            return
+        fi
+        printf 'Seleccion no valida.\n' >&2
+    done
+}
+
 case "${1:-help}" in
     teleop)
         require_container
@@ -43,6 +84,7 @@ case "${1:-help}" in
         ;;
     nav2)
         require_container
+        select_map
         docker_exec "pkill -f '[b]luetooth_gamepad_teleop --ros-args' 2>/dev/null || true; source /opt/ros/humble/setup.bash; source /workspace/install/setup.bash; ros2 launch home_service_bringup nav2.launch.py map:=${MAP} params_file:=${PARAMS} autostart:=true"
         ;;
     rqt)
@@ -67,6 +109,7 @@ case "${1:-help}" in
             '  inputs  Muestra eventos del mando en tiempo real.' \
             '  cmd_vel Muestra /cmd_vel con QoS explícito, sin depender del daemon.' \
             '' \
+            'Nav2 abre un menu de mapas si MAP no esta definido.' \
             'Variables opcionales: MAP=/workspace/... PARAMS=/workspace/... CONTAINER=nombre'
         ;;
     *)

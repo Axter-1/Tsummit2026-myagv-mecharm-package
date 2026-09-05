@@ -1,4 +1,4 @@
-# Parametros de teleoperacion con mando Xbox Series por Bluetooth.
+# Parametros de teleoperacion con gamepad generico USB.
 #
 #   ros2 run myagv_teleop_joy bluetooth_gamepad_teleop \
 #       --ros-args --params-file <ruta>/xbox_series.yaml
@@ -7,11 +7,12 @@
   ros__parameters:
 
     # --- Dispositivo -----------------------------------------------
-    # Deja device_path vacio para autodeteccion por nombre.
+    # Deja device_path vacio para autodeteccion por nombre. Este gamepad
+    # aparece en Linux como TGZ Controller y puede cambiar de eventX.
     # Averigua el nombre exacto con:  ros2 run myagv_teleop_joy ... (ver logs)
     # o con:  cat /proc/bus/input/devices | grep -i xbox
     device_path: ""
-    device_name: "Xbox Wireless Controller"
+    device_name: "TGZ Controller"
     reconnect_period: 2.0
 
     # --- Salida --------------------------------------------------
@@ -19,7 +20,7 @@
     # En este workspace hay twist_mux: usa un topic propio y anadelo
     # a mobile_manipulator_sim/config/twist_mux.yaml con prioridad alta.
     cmd_vel_topic: "/cmd_vel"
-    publish_rate: 20.0
+    publish_rate: 100.0
     publish_zero_when_idle: true
 
     # --- Limites de velocidad (myAGV: ~0.8 m/s max de fabrica) ----
@@ -29,9 +30,9 @@
 
     # --- Respuesta ----------------------------------------------
     stick_deadzone: 0.12
-    trigger_deadzone: 0.05
-    slew_rate: 2.0          # limita la aceleracion (rango/s); 0 = desactivado
-    controller_timeout: 1.0 # s sin eventos -> frena
+    trigger_deadzone: 0.05  # reservado; los gatillos no se usan
+    slew_rate: 0.0          # respuesta inmediata para teleoperacion
+    controller_timeout: 0.0 # 0 = mantener hasta soltar o desconectar
 
     invert_linear_x: false
     invert_linear_y: false
@@ -46,3 +47,4 @@
     code.axis_dpad_y: "ABS_HAT0Y"
     code.button_lb: "BTN_TL"
     code.button_rb: "BTN_TR"
+    code.button_r2: "BTN_TR2"

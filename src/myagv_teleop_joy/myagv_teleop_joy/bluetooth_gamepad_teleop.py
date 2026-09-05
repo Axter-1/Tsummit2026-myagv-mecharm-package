@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 """
-Teleoperacion del myAGV con un mando Bluetooth (Xbox Series / Xbox One).
+Teleoperacion del myAGV con un gamepad generico USB.
 
 Este nodo NO usa el stack `joy` de ROS. Abre el mando directamente como
 dispositivo de entrada del kernel (evdev, /dev/input/eventX), que es la forma
-en la que Linux expone un mando emparejado por Bluetooth. A partir de los
+en la que Linux expone un gamepad USB. A partir de los
 eventos del mando publica `geometry_msgs/Twist` para el movimiento
 omnidireccional del myAGV (ruedas mecanum: linear.x, linear.y, angular.z).
 
 Mapeo de controles
 ------------------
-  * Gatillo RT ............ avanzar        (linear.x > 0)
-  * Gatillo LT ............ retroceder     (linear.x < 0)
-  * Boton  LB ............. girar izquierda (angular.z > 0)
-  * Boton  RB ............. girar derecha   (angular.z < 0)
-  * Joystick izquierdo .... adelante/atras (linear.x) e izquierda/derecha
-                            (linear.y, traslacion lateral omnidireccional)
-  * Cruceta (D-Pad) ....... mismos ejes que el joystick izquierdo
+  * Joystick izquierdo .... traslacion en X/Y (adelante/atras, izquierda/derecha)
+  * LB .................... rotacion a la izquierda
+  * RB .................... rotacion a la derecha
 
-Los aportes del joystick, la cruceta y los gatillos se suman y se recortan
-al maximo configurado, de modo que cualquier combinacion es valida.
+La cruceta ofrece una alternativa digital para el movimiento; los gatillos
+se ignoran.
 
 Requisitos
 ----------
@@ -85,9 +81,9 @@ def apply_deadzone(value, deadzone):
 # Nombres logicos de los controles del mando
 # ============================================================
 #
-# Los codigos por defecto corresponden a un mando Xbox Series/One
-# reconocido por el driver `xpad` / `xpadneo` en Linux. Si tu mando
-# expone codigos distintos puedes sobreescribirlos por parametros.
+# Los codigos por defecto corresponden al gamepad generico `TGZ Controller`
+# reconocido por Linux. Si otro mando expone codigos distintos, se pueden
+# sobreescribir por parametros.
 
 DEFAULT_CODE_MAP = {
     # Ejes analogicos
@@ -98,8 +94,9 @@ DEFAULT_CODE_MAP = {
     "axis_dpad_x": "ABS_HAT0X",     # cruceta horizontal (+ derecha)
     "axis_dpad_y": "ABS_HAT0Y",     # cruceta vertical   (+ abajo)
     # Botones
-    "button_lb": "BTN_TL",
-    "button_rb": "BTN_TR",
+    "button_lb": "BTN_TL",         # LB / L1
+    "button_rb": "BTN_TR",         # RB / R1
+    "button_r2": "BTN_TR2",        # R2; algunos gamepads no tienen RB
 }
 
 # Algunos drivers exponen la cruceta como botones en vez de como eje HAT.
@@ -124,7 +121,7 @@ class GamepadReader:
         stick_x, stick_y   in [-1, 1]
         dpad_x,  dpad_y     in [-1, 1]
         trigger_lt, trigger_rt in [0, 1]
-        button_lb, button_rb   in {0, 1}
+        button_lb, button_rb, button_r2 in {0, 1}
 
     Si el mando se desconecta el estado se pone a cero y el hilo intenta
     reconectar periodicamente.
@@ -207,6 +204,7 @@ class GamepadReader:
             "trigger_rt": 0.0,
             "button_lb": 0,
             "button_rb": 0,
+            "button_r2": 0,
         }
 
     def _find_device(self):
@@ -295,7 +293,7 @@ class GamepadReader:
         return clamp(value, -1.0, 1.0)
 
     def _norm_trigger(self, code, raw):
-        """Normaliza un gatillo (reposo = minimo) a [0, 1]."""
+        """Normaliza un gatillo centrado a [0, 1]."""
         info = self._absinfo.get(code)
         if info is None:
             # Fallback razonable para xpad (0..255)
@@ -305,7 +303,15 @@ class GamepadReader:
         if hi == lo:
             return 0.0
 
-        return clamp((raw - lo) / (hi - lo), 0.0, 1.0)
+        # Xbox Bluetooth exposes centered trigger axes (0..65535), while
+        # some xpad devices expose unipolar axes (0..255).
+        if hi <= 1023:
+            return clamp((raw - lo) / (hi - lo), 0.0, 1.0)
+
+        center = (lo + hi) / 2.0
+        if code == self._code["axis_trigger_lt"]:
+            return clamp((center - raw) / (center - lo), 0.0, 1.0)
+        return clamp((raw - center) / (hi - center), 0.0, 1.0)
 
     def _handle_event(self, event):
         now = time.monotonic()
@@ -353,6 +359,9 @@ class GamepadReader:
                 elif event.code == self._code["button_rb"]:
                     self._state["button_rb"] = pressed
                     self._last_event_time = now
+                elif event.code == self._code["button_r2"]:
+                    self._state["button_r2"] = pressed
+                    self._last_event_time = now
                 elif event.code == self._dpad_btn.get("up"):
                     self._state["dpad_y"] = -1.0 if pressed else 0.0
                     self._last_event_time = now
@@ -382,7 +391,7 @@ class GamepadReader:
 
             try:
                 # Espera con timeout para poder atender la parada.
-                r, _, _ = select.select([self._device.fd], [], [], 0.5)
+                r, _, _ = select.select([self._device.fd], [], [], 0.005)
                 if not r:
                     continue
 
@@ -410,7 +419,7 @@ class BluetoothGamepadTeleop(Node):
         # Parametros: dispositivo
         # ----------------------------------------------------
         self.declare_parameter("device_path", "")
-        self.declare_parameter("device_name", "Xbox Wireless Controller")
+        self.declare_parameter("device_name", "TGZ Controller")
         self.declare_parameter("reconnect_period", 2.0)
 
         # ----------------------------------------------------
@@ -521,36 +530,25 @@ class BluetoothGamepadTeleop(Node):
 
     def _compute_target(self, state):
         """
-        Combina joystick, cruceta y gatillos en un objetivo normalizado.
+        Traduce el stick izquierdo a traslacion y LB/RB a rotacion.
 
         Devuelve fracciones de rango en [-1, 1] con la convencion REP-103:
         x adelante, y izquierda, z antihorario.
         """
-        # --- Joystick izquierdo -----------------------------
-        # ABS_Y crece hacia abajo  -> adelante = -stick_y
-        # ABS_X crece hacia la derecha -> izquierda (+y) = -stick_x
-        stick_fwd = -apply_deadzone(state["stick_y"], self.stick_deadzone)
+        # ABS_Y crece hacia abajo: arriba es avance (+x).
+        stick_forward = -apply_deadzone(state["stick_y"], self.stick_deadzone)
+        # ABS_X crece hacia la derecha: izquierda es +y.
         stick_left = -apply_deadzone(state["stick_x"], self.stick_deadzone)
+        # La cruceta ofrece el mismo movimiento en pasos lineales.
+        dpad_forward = -float(state["dpad_y"])
+        dpad_left = -float(state["dpad_x"])
+        # LB/L1 gira a la izquierda. RB/R1 o R2 gira a la derecha.
+        right_pressed = max(state["button_rb"], state["button_r2"])
+        rotation = float(state["button_lb"]) - float(right_pressed)
 
-        # --- Cruceta (D-Pad) --------------------------------
-        # HAT0Y: -1 arriba/adelante, +1 abajo/atras
-        # HAT0X: -1 izquierda, +1 derecha
-        dpad_fwd = -state["dpad_y"]
-        dpad_left = -state["dpad_x"]
-
-        # --- Gatillos --------------------------------------
-        # RT -> adelante ; LT -> atras
-        lt = apply_deadzone(state["trigger_lt"], self.trigger_deadzone)
-        rt = apply_deadzone(state["trigger_rt"], self.trigger_deadzone)
-        trigger_fwd = rt - lt
-
-        # --- Giro -----------------------------------------
-        # LB -> girar izquierda (+z) ; RB -> girar derecha (-z)
-        turn = float(state["button_lb"]) - float(state["button_rb"])
-
-        target_x = clamp(stick_fwd + dpad_fwd + trigger_fwd, -1.0, 1.0)
+        target_x = clamp(stick_forward + dpad_forward, -1.0, 1.0)
         target_y = clamp(stick_left + dpad_left, -1.0, 1.0)
-        target_z = clamp(turn, -1.0, 1.0)
+        target_z = clamp(rotation, -1.0, 1.0)
 
         if self.invert_linear_x:
             target_x = -target_x
@@ -576,7 +574,8 @@ class BluetoothGamepadTeleop(Node):
 
         connected = self.reader.connected
         stale = (
-            self.reader.seconds_since_last_event > self.controller_timeout
+            self.controller_timeout > 0.0
+            and self.reader.seconds_since_last_event > self.controller_timeout
         )
 
         if connected and not self._was_connected:
