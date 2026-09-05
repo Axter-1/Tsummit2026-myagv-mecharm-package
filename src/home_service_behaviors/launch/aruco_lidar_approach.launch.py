@@ -60,7 +60,9 @@ def generate_launch_description():
         'camera_x_minus_lidar_x': 0.16,
         'lidar_sector_half_angle_deg': 4.0,
 
-        'detection_timeout': 0.35,
+        # 0.6: la deteccion en la Nano ronda 4-9 Hz y con picos de carga
+        # se salta algun frame; 0.35 abortaba con TARGET_LOST en falso.
+        'detection_timeout': 0.6,
         'scan_timeout': 0.35,
         'control_rate': 20.0,
 }]

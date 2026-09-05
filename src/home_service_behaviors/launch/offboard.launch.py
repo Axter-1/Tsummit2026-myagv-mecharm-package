@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Pila de PROCESAMIENTO para ejecutar FUERA del robot (portatil/servidor).
+
+Reparto (ver scripts/tsummit_offboard.sh):
+
+    Jetson  -> drivers y seguridad:  camara CSI, LiDAR, odometria/motores,
+               twist_mux, scan_sanitizer, driver del MechArm.
+    AQUI    -> lo que come CPU:      detector ArUco, aproximacion,
+               orquestador de agarre  (y Nav2/SLAM si se lanzan aparte).
+
+Motivo: el FAQ oficial del T-SUMMIT lo recomienda explicitamente para
+este sintoma ("image recognition... insufficient computing power ->
+distributed computing"). En la Nano el detector ArUco llegaba a comerse
+1.6 nucleos y la deteccion caia a 0.1 Hz.
+
+La imagen viaja COMPRIMIDA (JPEG): medido en el robot, 246.8 Mbit/s en
+crudo frente a 6.1 Mbit/s comprimida, con identica tasa de deteccion
+(0/10 vs 0/10 en la misma escena; ninguna diferencia atribuible al JPEG).
+Por eso 'use_compressed' va a true por defecto aqui.
+
+Requisitos ANTES de lanzar esto (los comprueba tsummit_offboard.sh):
+  * misma red y mismo ROS_DOMAIN_ID que el robot,
+  * CYCLONEDDS_URI con peers unicast (multicast sobre WiFi no es fiable),
+  * relojes sincronizados (chrony) o TF fallara con "message too old".
+"""
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+
+    args = [
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument(
+            'use_compressed',
+            default_value='true',
+            description='Consumir <image_topic>/compressed en vez de la '
+                        'imagen cruda. true salvo que corras esto en el '
+                        'propio robot.',
+        ),
+        DeclareLaunchArgument('image_topic', default_value='/camera/image_raw'),
+        DeclareLaunchArgument(
+            'camera_info_topic', default_value='/camera/camera_info'
+        ),
+        DeclareLaunchArgument('marker_length', default_value='0.08'),
+        DeclareLaunchArgument(
+            'scan_topic',
+            default_value='/scan_filtered',
+            description='Lo publica el scan_sanitizer, que corre en el robot.',
+        ),
+        # Fuera de la Nano sobra CPU: sin tope de proceso y sin reducir
+        # la imagen para detectar. Son justo las dos concesiones que
+        # habia que hacer en el robot.
+        DeclareLaunchArgument('max_process_hz', default_value='0.0'),
+        DeclareLaunchArgument('detect_scale', default_value='1.0'),
+        DeclareLaunchArgument('start_aruco_detector', default_value='true'),
+        DeclareLaunchArgument('start_aruco_approach', default_value='true'),
+        DeclareLaunchArgument('start_object_grasp', default_value='false'),
+        DeclareLaunchArgument('grasp_enable_arm', default_value='true'),
+        DeclareLaunchArgument('grasp_enable_approach', default_value='true'),
+    ]
+
+    use_sim_time = LaunchConfiguration('use_sim_time')
+
+    aruco_detector = Node(
+        package='home_service_perception',
+        executable='aruco_detector_node',
+        name='aruco_detector',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'use_compressed': LaunchConfiguration('use_compressed'),
+            'image_topic': LaunchConfiguration('image_topic'),
+            'camera_info_topic': LaunchConfiguration('camera_info_topic'),
+            'marker_length': LaunchConfiguration('marker_length'),
+            'max_process_hz': LaunchConfiguration('max_process_hz'),
+            'detect_scale': LaunchConfiguration('detect_scale'),
+            'equalize_hist': True,
+            'publish_tf': True,
+        }],
+        condition=IfCondition(LaunchConfiguration('start_aruco_detector')),
+    )
+
+    aruco_approach = Node(
+        package='home_service_behaviors',
+        executable='aruco_lidar_approach_server',
+        name='aruco_lidar_approach_server',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'detections_topic': '/aruco/detections',
+            'scan_topic': LaunchConfiguration('scan_topic'),
+            'odom_topic': '/odom',
+            'cmd_vel_topic': '/cmd_vel_aruco',
+            'action_name': '/aruco_lidar_approach',
+            'odom_frame': 'odom',
+            # Con la red de por medio hay que ser un poco mas tolerante
+            # que en local, pero NO tanto como para no notar una caida:
+            # el watchdog de myagv_odometry (300 ms) es la red de
+            # seguridad real si el enlace se cae.
+            'detection_timeout': 0.8,
+            'scan_timeout': 0.8,
+            'control_rate': 20.0,
+        }],
+        condition=IfCondition(LaunchConfiguration('start_aruco_approach')),
+    )
+
+    object_grasp = Node(
+        package='home_service_behaviors',
+        executable='object_grasp_server',
+        name='object_grasp_server',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'detections_topic': '/aruco/detections',
+            'enable_arm': LaunchConfiguration('grasp_enable_arm'),
+            'enable_approach': LaunchConfiguration('grasp_enable_approach'),
+        }],
+        condition=IfCondition(LaunchConfiguration('start_object_grasp')),
+    )
+
+    return LaunchDescription(
+        args + [aruco_detector, aruco_approach, object_grasp]
+    )

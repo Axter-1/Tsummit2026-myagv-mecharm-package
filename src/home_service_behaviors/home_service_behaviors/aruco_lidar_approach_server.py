@@ -209,9 +209,14 @@ class ArucoLidarApproachServer(Node):
         # Freshness
         # =========================================================
 
+        # 0.6 s: la deteccion en la Nano ronda 4-6 Hz (0.17-0.25 s) y
+        # con picos de carga se salta algun frame. 0.35 abortaba con
+        # TARGET_LOST en falso; 0.6 aguanta un par de frames perdidos
+        # sin dejar de reaccionar a que el marcador desaparezca de
+        # verdad.
         self.declare_parameter(
             'detection_timeout',
-            0.35
+            0.6
         )
 
         self.declare_parameter(

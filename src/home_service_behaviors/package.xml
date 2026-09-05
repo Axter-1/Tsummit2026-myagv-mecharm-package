@@ -13,6 +13,10 @@
   <depend>tf2_ros</depend>
   <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
+  <!-- offboard.launch.py arranca tambien el detector ArUco, que corre
+       en este mismo paquete-launch cuando el procesamiento va fuera
+       del robot. -->
+  <exec_depend>home_service_perception</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

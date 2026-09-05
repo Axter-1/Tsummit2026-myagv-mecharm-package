@@ -1,0 +1,227 @@
+# =====================================================================
+#  CATALOGO DE AGARRE — T-SUMMIT Challenge
+#  MechArm 270 M5 + pinza adaptativa, sobre myAGV
+# ---------------------------------------------------------------------
+#  Este fichero es el UNICO sitio donde vive el conocimiento de "como se
+#  coge cada pieza". El nodo object_grasp_server.py no sabe nada de
+#  engranajes ni de postes: lee de aqui.
+#
+#  PROCEDENCIA DE LAS MEDIDAS
+#  ==========================
+#  Medidas directamente de los STL de Contexto/ (unidades = mm),
+#  contrastadas con las dimensiones dictadas por el operador. Donde las
+#  dos fuentes discrepan se anota; manda el STL salvo nota en contrario,
+#  porque es lo que se imprimio.
+#
+#  CONVENIO DE LA PINZA
+#  ====================
+#  El driver (mecharm_driver_node) habla en 0..100, no en mm. Aqui se
+#  trabaja en MILIMETROS y el nodo convierte con 'gripper':
+#      valor = 100 * apertura_mm / stroke_mm
+#  Asi las cifras de abajo se pueden comparar con un calibre contra la
+#  pieza real, que es lo que se hara en la pista.
+#
+#  Para cada pieza:
+#    span_mm    ancho REAL del rasgo que se pinza (lo que mide la pieza
+#               entre las dos mordazas).
+#    open_mm    apertura antes de bajar. span + holgura de entrada.
+#    close_mm   apertura de cierre. MENOR que span: la diferencia
+#               (span - close) es el aplastamiento que da la fuerza de
+#               agarre. Con piezas impresas en PLA, 4-6 mm va bien.
+#
+#  TODAS las alturas (grasp_z_mm, approach_height_mm) son sobre la
+#  superficie de apoyo de la pieza, no sobre la base del brazo. El nodo
+#  las suma a 'table_z_mm', que es lo que hay que calibrar en pista.
+# =====================================================================
+
+grasp_catalog:
+
+  # -------------------------------------------------------------------
+  # Calibracion de la pinza. Medir con un calibre: abrir a 100, medir
+  # la separacion entre mordazas -> ese es stroke_mm.
+  # -------------------------------------------------------------------
+  gripper:
+    stroke_mm: 45.0
+    # Por debajo de esto la pinza no cierra de forma repetible.
+    min_close_mm: 2.0
+    speed_percent: 40.0
+
+  # -------------------------------------------------------------------
+  # Altura del plano de apoyo de las piezas medida en el frame del
+  # brazo (Z de /mecharm coords, mm). ES EL VALOR A CALIBRAR EN PISTA:
+  #   1. Coloca la pieza en la plataforma.
+  #   2. mecharm_console.py -> free, baja la punta hasta rozar la mesa.
+  #   3. lock, lee coords, apunta la Z.
+  # Un error aqui se traduce en chocar contra la mesa o cerrar al aire.
+  # -------------------------------------------------------------------
+  table_z_mm: 90.0
+
+  # Margen de seguridad: el nodo rechaza cualquier objetivo cuyo radio
+  # desde la base del brazo supere esto (MechArm 270 -> 270 mm).
+  max_reach_mm: 250.0
+
+  # -------------------------------------------------------------------
+  # Mapa ArUco -> pieza. Los marcadores son 6x6_250, 8 cm, IDs 0..9
+  # (Contexto/ArUcos_6x6_250_ID0-9_8cm_Carta.pdf).
+  # AJUSTAR cuando el jurado publique la asignacion real de IDs.
+  # -------------------------------------------------------------------
+  aruco_to_object:
+    1: engranaje
+    2: poste
+    3: rueda
+    # IDs de reserva por si se reimprime la hoja.
+    4: engranaje
+    5: poste
+    6: rueda
+
+  # ===================================================================
+  # PIEZAS
+  # ===================================================================
+  objects:
+
+    # -----------------------------------------------------------------
+    # ENGRANAJE  (Contexto/ENGRANAJE.STL)
+    # -----------------------------------------------------------------
+    # Medido en el STL (disco macizo, 896 triangulos):
+    #   Ø punta de diente .... 152.8 mm
+    #   Ø raiz de diente ..... 114.8 mm
+    #   Ø agujero central ....  49.2 mm
+    #   espesor ..............  15.0 mm
+    #
+    # NOTA / DISCREPANCIA: el operador indico "15 cm de diametro sin
+    # contar dientes". El STL dice que los 15 cm son CON dientes
+    # (152.8) y que sin dientes son 11.5 cm. Se usa el STL.
+    # El agujero interior de 5 cm SI coincide (49.2 mm).
+    #
+    # ESTRATEGIA: pinza radial sobre el ALMA ANULAR. Entre el agujero
+    # (r=24.6) y la raiz del diente (r=57.4) hay 32.8 mm de material
+    # macizo y continuo. Una mordaza baja DENTRO del agujero central y
+    # la otra apoya fuera, contra la raiz. Es el agarre mas solido de
+    # las tres piezas: superficie plana, sin dientes de por medio y
+    # muy dentro del recorrido de la pinza.
+    # Se descarta pinzar el canto de 15 mm: obligaria a meter una
+    # mordaza por debajo del disco, que esta apoyado en la mesa.
+    # -----------------------------------------------------------------
+    engranaje:
+      label: "Engranaje"
+      approach: top              # descenso vertical
+      # Geometria (documental, el nodo solo usa las *_mm de agarre)
+      outer_diameter_mm: 152.8
+      root_diameter_mm: 114.8
+      bore_diameter_mm: 49.2
+      thickness_mm: 15.0
+      # Agarre: 32.8 mm de alma maciza
+      span_mm: 32.8
+      open_mm: 40.0              # 32.8 + 7.2 de holgura de entrada
+      close_mm: 28.0             # aplasta 4.8 mm
+      # La pieza esta tumbada: el punto de agarre es la mitad del
+      # espesor. La mordaza interior entra 15 mm en el agujero.
+      grasp_z_mm: 7.5
+      approach_height_mm: 70.0
+      # Radial: la pinza debe quedar alineada con un radio del
+      # engranaje. Offset del centro del ArUco al centro de la pieza.
+      grasp_offset_mm: [0.0, 0.0]
+      # Muñeca: 0 = mordazas paralelas al eje X del brazo.
+      wrist_deg: 0.0
+      lift_mm: 80.0
+      carry_pose: carry
+
+    # -----------------------------------------------------------------
+    # POSTE / BASE  (Contexto/POSTE2Nuevo.STL)
+    # -----------------------------------------------------------------
+    # Dictado por el operador: tubo Ø20, base Ø120, altura 100.
+    # Medido en el STL: disco de base Ø110 x 20 mm de espesor.
+    #
+    # NOTA / DISCREPANCIA: el STL parece una variante orientada para
+    # impresion (fuera del disco solo hay 10 mm de material, no un tubo
+    # de Ø20 cerrado). No se pudo confirmar el tubo de 20 mm en el
+    # fichero, asi que MANDAN las medidas del operador: tubo Ø20.
+    # VERIFICAR con calibre sobre la pieza impresa antes de competir;
+    # si el tubo resulta ser de 10 mm, poner span_mm: 10 y close_mm: 7.
+    #
+    # ESTRATEGIA: es la pieza mas facil. Cilindro vertical de Ø20 muy
+    # dentro del recorrido de la pinza. Se agarra el tubo por su tercio
+    # superior, bien por encima del disco de base (20 mm de espesor)
+    # para que las mordazas no choquen con el.
+    # -----------------------------------------------------------------
+    poste:
+      label: "Poste / base"
+      approach: top
+      base_diameter_mm: 110.0
+      base_thickness_mm: 20.0
+      tube_diameter_mm: 20.0
+      height_mm: 100.0
+      span_mm: 20.0
+      open_mm: 32.0
+      close_mm: 15.0             # aplasta 5 mm
+      # 70 mm sobre la mesa: tercio superior del tubo, 50 mm por encima
+      # del disco de base. Margen de sobra para no rozarlo.
+      grasp_z_mm: 70.0
+      approach_height_mm: 60.0
+      grasp_offset_mm: [0.0, 0.0]
+      wrist_deg: 0.0
+      lift_mm: 60.0
+      carry_pose: carry
+
+    # -----------------------------------------------------------------
+    # RUEDA / CIRCUNFERENCIA  (Contexto/RUEDA15Nueva.STL)
+    # -----------------------------------------------------------------
+    # Medido en el STL:
+    #   Ø del aro ............ 150.0 mm  (coincide con el operador)
+    #   espesor axial del aro .. 5.0 mm  (pared muy fina)
+    #   pared radial del aro .. 20.0 mm  (banda r=62..82)
+    #   pie rectangular ....... 30 x 30 mm de seccion, 50 de largo
+    #     (el operador dijo 20 x 30; se usa 20 como lado a pinzar,
+    #      que es el caso conservador)
+    #
+    # ESTRATEGIA ELEGIDA: pinzar el PIE RECTANGULAR (20 mm de lado)
+    # justo encima de la mesa.
+    #
+    # Por que NO se agarra por la cima del aro, que a primera vista es
+    # el agarre bonito: el aro apoya sobre el pie (30 mm), asi que su
+    # punto mas alto queda a 30 + 150 = 180 mm sobre la mesa. Sumando
+    # table_z_mm (90) da Z = 270 mm en el frame del brazo, que es
+    # EXACTAMENTE el alcance maximo del MechArm 270 contando ya la
+    # altura. El brazo no llega, o llega totalmente estirado y sin
+    # fuerza. Ademas la pared del aro solo tiene 5 mm de ancho de
+    # contacto y la pieza bascularia.
+    # El pie, en cambio, esta a 15 mm de la mesa (Z=105), es macizo y
+    # es la parte con mas masa: agarre estable y bien dentro del
+    # espacio de trabajo.
+    #
+    # ALTERNATIVA (aro por la cima) documentada abajo en 'alt_aro'.
+    # Solo es viable si se rebaja table_z_mm acercando el brazo, o si
+    # la pieza se presenta tumbada.
+    # -----------------------------------------------------------------
+    rueda:
+      label: "Rueda / circunferencia"
+      approach: top
+      ring_diameter_mm: 150.0
+      ring_axial_thickness_mm: 5.0
+      ring_radial_wall_mm: 20.0
+      foot_mm: [20.0, 30.0]
+      # Se pinza el lado corto del pie (2 cm segun el operador; el STL
+      # da 30 mm, asi que 20 es el caso conservador: si el pie resulta
+      # ser de 30, subir span_mm a 30 y close_mm a 25).
+      span_mm: 20.0
+      open_mm: 32.0
+      close_mm: 15.0             # aplasta 5 mm
+      # Mitad de la altura del pie (30 mm), con holgura para no rozar
+      # la mesa con las mordazas.
+      grasp_z_mm: 15.0
+      approach_height_mm: 60.0
+      grasp_offset_mm: [0.0, 0.0]
+      wrist_deg: 0.0
+      lift_mm: 60.0
+      carry_pose: carry
+
+      # Plan B: agarre por la cima del aro. Copiar estos campos sobre
+      # los de arriba SOLO si se confirma que el brazo llega (mide Z
+      # real con mecharm_console.py antes de intentarlo).
+      alt_aro:
+        span_mm: 20.0
+        open_mm: 30.0
+        close_mm: 15.0
+        grasp_z_mm: 172.0
+        approach_height_mm: 50.0
+        lift_mm: 40.0

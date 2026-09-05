@@ -50,6 +50,18 @@ setup(
                 "launch/*.launch.py"
             )
         ),
+
+        (
+            os.path.join(
+                "share",
+                package_name,
+                "config"
+            ),
+
+            glob(
+                "config/*.yaml"
+            )
+        ),
     ],
 
     install_requires=[
@@ -76,6 +88,10 @@ setup(
             "home_service_behaviors."
             "aruco_approach_server:main",
             'aruco_lidar_approach_server = home_service_behaviors.aruco_lidar_approach_server:main',
+
+            "object_grasp_server = "
+            "home_service_behaviors."
+            "object_grasp_server:main",
         ],
     },
 )
