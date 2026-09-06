@@ -846,7 +846,24 @@ class ArucoLidarApproachServer(Node):
 
         Solo la DIRECCION. La distancia del ArUco depende de que
         marker_size sea correcto; la direccion, no.
+
+        EXIGE deteccion fresca. El buffer de TF guarda 10 s: si el
+        marcador se pierde, `lookup_transform(..., Time())` sigue
+        devolviendo la ultima transformada tan campante. Y como esa
+        transformada cuelga de camera_optical_frame, el rumbo en
+        base_link NO cambia aunque el robot gire. El resultado era un
+        rumbo congelado, un error de giro constante, y el robot dando
+        vueltas indefinidamente con state=ALIGN_HEADING_TO_ARUCO y
+        center_error=0.0 -- girando como si buscara, pero sin buscar.
+
+        La frescura se mide con get_detection(), que sella por hora de
+        RECEPCION. La cabecera de la TF viene sellada por la Jetson y
+        compararla con el reloj del portatil traeria el desfase de
+        relojes por la puerta de atras.
         """
+
+        if self.get_detection(target_id) is None:
+            return None
 
         try:
 
@@ -2012,9 +2029,38 @@ class ArucoLidarApproachServer(Node):
                     )
                 )
 
-                if heading_error is None:
+                # Sin marcador no hay a que encararse. Este estado no
+                # comprobaba la deteccion: se quedaba girando para
+                # siempre contra un rumbo congelado.
+                if (
+                    heading_error is None or
+                    detection is None
+                ):
 
-                    self.publish_cmd()
+                    if lost_since_ns is None:
+                        lost_since_ns = now_ns
+
+                    lost_for = (
+                        now_ns - lost_since_ns
+                    ) / 1e9
+
+                    self.stop_robot()
+
+                    if lost_for >= self.pf(
+                        'lost_marker_timeout'
+                    ):
+
+                        search_moving = True
+                        search_phase_start_ns = now_ns
+                        lost_since_ns = None
+
+                        state = 'SEARCHING'
+
+                        self.get_logger().warn(
+                            'Marcador perdido al '
+                            f'encararse ({lost_for:.1f} s). '
+                            'Volviendo a buscar.'
+                        )
 
                 elif (
                     abs(heading_error) <=
@@ -2022,6 +2068,8 @@ class ArucoLidarApproachServer(Node):
                         'heading_tolerance'
                     )
                 ):
+
+                    lost_since_ns = None
 
                     self.stop_robot()
 
@@ -2035,6 +2083,8 @@ class ArucoLidarApproachServer(Node):
                     )
 
                 else:
+
+                    lost_since_ns = None
 
                     self.publish_cmd(
                         wz=wz

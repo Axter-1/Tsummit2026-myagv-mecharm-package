@@ -46,6 +46,7 @@ DDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="lo"/><
 # autodetermine elegia otra interfaz y el portatil no veia NI UN topic
 # del robot, sin ningun error. Verificado en la Jetson.
 DISTRIBUTED="${DISTRIBUTED:-0}"
+DDS_MULTICAST="${DDS_MULTICAST:-true}"
 ROBOT_IP="${ROBOT_IP:-}"
 LAPTOP_IP="${LAPTOP_IP:-}"
 
@@ -90,7 +91,12 @@ if [ "${DISTRIBUTED}" = "1" ]; then
         printf '       (el DHCP del hotspot la habra cambiado; reserva una IP fija)\n' >&2
         exit 2
     fi
-    DDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface address=\"${ROBOT_IP}\"/></Interfaces><AllowMulticast>false</AllowMulticast></General><Discovery><ParticipantIndex>auto</ParticipantIndex><MaxAutoParticipantIndex>32</MaxAutoParticipantIndex><Peers><Peer address=\"${ROBOT_IP}\"/><Peer address=\"${LAPTOP_IP}\"/></Peers></Discovery></Domain></CycloneDDS>"
+    # DDS_MULTICAST=true (por defecto): camino estandar de ROS 2. Poner
+    # 'false' desactiva el multicast y deja solo los peers unicast; era
+    # el default anterior, por la suposicion de que el multicast en WiFi
+    # no es fiable. Esa suposicion resulto ser el principal sospechoso
+    # de que el descubrimiento no funcionara.
+    DDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface address=\"${ROBOT_IP}\"/></Interfaces><AllowMulticast>${DDS_MULTICAST}</AllowMulticast></General><Discovery><ParticipantIndex>auto</ParticipantIndex><MaxAutoParticipantIndex>32</MaxAutoParticipantIndex><Peers><Peer address=\"${ROBOT_IP}\"/><Peer address=\"${LAPTOP_IP}\"/></Peers></Discovery></Domain></CycloneDDS>"
 fi
 
 DOCKER=(docker)
@@ -285,7 +291,12 @@ teleop() {
 }
 
 aruco() {
-    if is_running '[a]ruco_detector_node'; then
+    # En distribuido el detector vive en el portatil y AQUI no corre
+    # nunca, asi que vigilar 'aruco_detector_node' daria siempre falso
+    # y cada llamada lanzaria otra camara encima de la anterior.
+    local guard='[a]ruco_detector_node'
+    [ "${DISTRIBUTED}" = "1" ] && guard='[c]si_camera_node'
+    if is_running "${guard}"; then
         printf 'Pila ArUco ya iniciada.\n'
         return
     fi
@@ -309,8 +320,21 @@ aruco() {
         printf '    ROBOT_IP=%s LAPTOP_IP=%s ./scripts/tsummit_offboard.sh run\n' \
             "${ROBOT_IP}" "${LAPTOP_IP}"
     fi
+    # Montaje de la camara. Se pasa por entorno porque robot.launch.py
+    # solo existe DENTRO del contenedor (el host de la Jetson tiene
+    # Galactic y otro workspace): lanzarlo a mano desde el host falla
+    # con "package 'home_service_bringup' not found".
+    local cam_tf=""
+    cam_tf="camera_x:=${CAMERA_X:-0.16} camera_y:=${CAMERA_Y:-0.0} \
+            camera_z:=${CAMERA_Z:-0.07} camera_roll:=${CAMERA_ROLL:-0.0} \
+            camera_pitch:=${CAMERA_PITCH:-0.0} camera_yaw:=${CAMERA_YAW:-0.0}"
+    printf 'Camara en base_link: x=%s y=%s z=%s  rpy=%s/%s/%s\n' \
+        "${CAMERA_X:-0.16}" "${CAMERA_Y:-0.0}" "${CAMERA_Z:-0.07}" \
+        "${CAMERA_ROLL:-0.0}" "${CAMERA_PITCH:-0.0}" "${CAMERA_YAW:-0.0}"
+
     run_bg aruco "taskset -c ${SLAM_CPUS} ros2 launch home_service_bringup \
-        robot.launch.py use_sim_time:=false start_arm:=false start_twist_mux:=false ${extra}"
+        robot.launch.py use_sim_time:=false start_arm:=false start_twist_mux:=false \
+        ${cam_tf} ${extra}"
     mux
 }
 
@@ -463,10 +487,22 @@ foxglove() {
         run_bg foxglove \
             "ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=${FOXGLOVE_PORT}"
     fi
+    # OJO: NO usar 'hostname -I | awk {print $1}'. Esta maquina tiene
+    # eth0, wlan0, tailscale0 y docker0; la primera que devuelve es la
+    # del CABLE, y desde el portatil por WiFi esa direccion no responde.
+    # El sintoma es "Check that the WebSocket server at ws://... is
+    # reachable", que suena a que el bridge no arranco cuando en
+    # realidad esta anunciando la interfaz equivocada.
     local ip
-    ip="$("${DOCKER[@]}" exec "${CONTAINER}" hostname -I 2>/dev/null | awk '{print $1}')"
+    ip="${ROBOT_IP:-$(own_ip)}"
     printf 'Abre Foxglove (app de escritorio o https://app.foxglove.dev) y conecta a:\n'
     printf '  ws://%s:%s\n' "${ip:-<ip-de-la-jetson>}" "${FOXGLOVE_PORT}"
+    if [ -n "${ip}" ]; then
+        printf 'Otras direcciones de esta maquina (por si conectas desde otra red):\n'
+        ip -4 -o addr show scope global 2>/dev/null \
+            | awk -v cur="${ip}" '{split($4,a,"/"); \
+                 printf "  %-16s %s%s\n", a[1], $2, (a[1]==cur ? "   <- la anunciada" : "")}'
+    fi
     printf 'Paneles utiles: 3D (mapa, /scan, TF, costmaps), Image (/camera), Raw Messages.\n'
 }
 
@@ -506,11 +542,15 @@ confirm_motion() {
 
 aruco_goal() {
     confirm_motion
-    local marker_id="${1:?uso: aruco-goal <id>}"
+    local marker_id="${1:?uso: aruco-goal <id> [stop_distance_m] [timeout_s]}"
+    local stop_dist="${2:-${STOP_DISTANCE:-0.20}}"
+    # 30 s no daban ni para una vuelta de busqueda paso-y-mira: cada
+    # paso son ~1.15 s y hacen falta bastantes para barrer 360 grados.
+    local timeout_s="${3:-${APPROACH_TIMEOUT:-180.0}}"
     "${DOCKER[@]}" exec -i -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" bash -lc \
         "${source_env}; ros2 action send_goal /aruco_lidar_approach \
          home_service_interfaces/action/ArucoApproach \
-         '{target_id: ${marker_id}, stop_distance: 0.20, timeout_sec: 30.0}' --feedback"
+         '{target_id: ${marker_id}, stop_distance: ${stop_dist}, timeout_sec: ${timeout_s}}' --feedback"
 }
 
 nav2_goal() {

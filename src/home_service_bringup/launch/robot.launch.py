@@ -53,6 +53,15 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_publish_raw", default_value="true"),
         DeclareLaunchArgument("camera_publish_compressed", default_value="true"),
         DeclareLaunchArgument("marker_length", default_value="0.08"),
+        # Montaje de la camara respecto a base_link, en metros y radianes.
+        # SIN MEDIR: son estimaciones. Un error aqui desplaza el marcador
+        # en odom y la aproximacion se para donde no es.
+        DeclareLaunchArgument("camera_x", default_value="0.16"),
+        DeclareLaunchArgument("camera_y", default_value="0.0"),
+        DeclareLaunchArgument("camera_z", default_value="0.07"),
+        DeclareLaunchArgument("camera_roll", default_value="0.0"),
+        DeclareLaunchArgument("camera_pitch", default_value="0.0"),
+        DeclareLaunchArgument("camera_yaw", default_value="0.0"),
         DeclareLaunchArgument("arm_port", default_value="/dev/ttyACM0"),
         DeclareLaunchArgument("start_camera", default_value="true"),
         DeclareLaunchArgument("start_aruco_detector", default_value="true"),
@@ -87,7 +96,12 @@ def generate_launch_description():
                 "camera_publish_compressed"
             ),
             "camera_name": "camera",
-            "frame_id": "camera_link",
+            # Frame OPTICO, no camera_link: el tvec de OpenCV viene en
+            # convencion optica (x derecha, y abajo, z hacia delante),
+            # mientras que camera_link sigue REP-103 (x delante, y
+            # izquierda, z arriba). Etiquetarlo como camera_link
+            # rotaba la pose 90 grados en dos ejes.
+            "frame_id": "camera_optical_frame",
         }.items(),
         condition=IfCondition(LaunchConfiguration("start_camera")),
     )
@@ -193,8 +207,49 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("start_twist_mux")),
     )
 
+    # -----------------------------------------------------------------
+    # TF de la camara
+    #
+    # Sin esto 'aruco_<id>' cuelga de un frame que no existe en el
+    # arbol, lookup_transform(odom, aruco_N) falla y la aproximacion
+    # pierde la normal del marcador (falla en silencio: el except
+    # devuelve None).
+    #
+    # Dos eslabones, como manda REP-103:
+    #   base_link -> camera_link           montaje fisico
+    #   camera_link -> camera_optical_frame  convencion optica (fija)
+    # -----------------------------------------------------------------
+    cam_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="static_tf_base_to_camera",
+        arguments=[
+            LaunchConfiguration("camera_x"),
+            LaunchConfiguration("camera_y"),
+            LaunchConfiguration("camera_z"),
+            LaunchConfiguration("camera_yaw"),
+            LaunchConfiguration("camera_pitch"),
+            LaunchConfiguration("camera_roll"),
+            "base_link", "camera_link",
+        ],
+        condition=IfCondition(LaunchConfiguration("start_camera")),
+    )
+
+    # Rotacion fija optica: -90 en Z y -90 en X. No se toca.
+    cam_optical_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="static_tf_camera_optical",
+        arguments=[
+            "0", "0", "0",
+            "-1.5707963267948966", "0", "-1.5707963267948966",
+            "camera_link", "camera_optical_frame",
+        ],
+        condition=IfCondition(LaunchConfiguration("start_camera")),
+    )
+
     return LaunchDescription(
         args
-        + [camera, scan_sanitizer, aruco_detector, aruco_approach,
-           mecharm, twist_mux]
+        + [camera, cam_tf, cam_optical_tf, scan_sanitizer, aruco_detector,
+           aruco_approach, mecharm, twist_mux]
     )

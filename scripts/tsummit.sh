@@ -24,7 +24,31 @@ MAZE="${ROOT}/scripts/run_maze.sh"
 CONTAINER="${CONTAINER:-myagv-robot}"
 LOG_DIR="${LOG_DIR:-/workspace/log/robot_routine}"
 
-DDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="lo"/></Interfaces></General><Discovery><ParticipantIndex>auto</ParticipantIndex><MaxAutoParticipantIndex>100</MaxAutoParticipantIndex></Discovery></Domain></CycloneDDS>'
+# Config DDS con la que este script habla con los nodos.
+#
+# Por defecto solo loopback: todo corre dentro del contenedor y asi se
+# evita que el trafico salga a la red.
+#
+# CUIDADO con DISTRIBUTED=1: el detector y el servidor de aproximacion
+# viven en el PORTATIL. Con la config de loopback, un 'action send_goal'
+# desde aqui no los alcanza y se queda esperando sin error legible: el
+# sintoma es "mando el goal y el robot no se mueve".
+DISTRIBUTED="${DISTRIBUTED:-0}"
+
+if [ "${DISTRIBUTED}" = "1" ]; then
+    if [ -n "${WIFI_IFACE:-}" ]; then
+        ROBOT_IP="${ROBOT_IP:-$(ip -4 -o addr show "${WIFI_IFACE}" 2>/dev/null \
+            | awk '{print $4}' | cut -d/ -f1 | head -1)}"
+    else
+        ROBOT_IP="${ROBOT_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null \
+            | awk '{for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -1)}"
+    fi
+    [ -n "${ROBOT_IP:-}" ] || { printf 'ERROR: DISTRIBUTED=1 exige ROBOT_IP.\n' >&2; exit 1; }
+    [ -n "${LAPTOP_IP:-}" ] || { printf 'ERROR: DISTRIBUTED=1 exige LAPTOP_IP.\n' >&2; exit 1; }
+    DDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface address=\"${ROBOT_IP}\"/></Interfaces><AllowMulticast>${DDS_MULTICAST:-true}</AllowMulticast></General><Discovery><ParticipantIndex>auto</ParticipantIndex><MaxAutoParticipantIndex>32</MaxAutoParticipantIndex><Peers><Peer address=\"${ROBOT_IP}\"/><Peer address=\"${LAPTOP_IP}\"/></Peers></Discovery></Domain></CycloneDDS>"
+else
+    DDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="lo"/></Interfaces></General><Discovery><ParticipantIndex>auto</ParticipantIndex><MaxAutoParticipantIndex>100</MaxAutoParticipantIndex></Discovery></Domain></CycloneDDS>'
+fi
 
 DOCKER=(docker)
 if ! docker info >/dev/null 2>&1; then
@@ -197,7 +221,9 @@ arm() {
 
 perception() {
     ensure_container
-    if is_running '[a]ruco_detector_node'; then
+    local guard='[a]ruco_detector_node'
+    [ "${DISTRIBUTED}" = "1" ] && guard='[c]si_camera_node'
+    if is_running "${guard}"; then
         printf 'Camara + detector ArUco ya iniciados.\n'
         return
     fi
@@ -252,11 +278,12 @@ approach() {
     confirm_motion
     local marker_id="${1:?uso: approach <id_aruco> [stop_distance_m]}"
     local stop_dist="${2:-0.20}"
+    local timeout_s="${3:-${APPROACH_TIMEOUT:-180.0}}"
     approach_stack
-    say "Enviando goal /aruco_lidar_approach  (id=${marker_id}, stop=${stop_dist} m)"
+    say "Enviando goal /aruco_lidar_approach  (id=${marker_id}, stop=${stop_dist} m, timeout=${timeout_s} s)"
     in_container "ros2 action send_goal /aruco_lidar_approach \
         home_service_interfaces/action/ArucoApproach \
-        '{target_id: ${marker_id}, stop_distance: ${stop_dist}, timeout_sec: 40.0}' \
+        '{target_id: ${marker_id}, stop_distance: ${stop_dist}, timeout_sec: ${timeout_s}}' \
         --feedback"
 }
 
@@ -517,7 +544,9 @@ case "${1:-help}" in
     reto4)        reto4 ;;
 
     rviz)         routine rviz ;;
-    viz)          shift; VIZ="${1:-rviz}" open_viz ;;
+    # El argumento manda, pero si no lo hay se respeta VIZ del entorno:
+    # con "${1:-rviz}" a secas, 'VIZ=foxglove ... viz' abria RViz.
+    viz)          shift; VIZ="${1:-${VIZ:-rviz}}" open_viz ;;
     teleop)       routine teleop ;;
     status)       status ;;
     logs)         shift; logs "$@" ;;

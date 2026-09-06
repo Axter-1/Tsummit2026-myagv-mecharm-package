@@ -482,3 +482,126 @@ El nodo que corria venia de un fuente sin ese parametro. **Recompilar en
 el portatil ANTES de fiarse de cualquier prueba.** El servidor corre
 alli; lo que se edite en la Jetson no cambia nada hasta que se copia el
 bundle y se compila.
+
+---
+
+## Septima ronda (2026-09-05): el giro infinito, y por que la normal NO es la tangente
+
+### El bloqueo nuevo: giro infinito en ALIGN_HEADING_TO_ARUCO
+
+    state: ALIGN_HEADING_TO_ARUCO   center_error: 0.0   elapsed_sec: 91.2
+
+El robot giraba como si buscara, pero el estado decia que se estaba
+encarando. Fallo mio de la ronda anterior, con dos mitades:
+
+**El buffer de TF guarda 10 s.** Si el marcador se pierde,
+`lookup_transform(..., Time())` sigue devolviendo la ultima transformada
+tan campante. Y como `aruco_N` cuelga de `camera_optical_frame`, ese
+rumbo expresado en `base_link` NO CAMBIA aunque el robot gire. Entonces
+`face_marker_control` calculaba `desired_heading = yaw + rumbo_congelado`
+y el error salia constante: giro a velocidad constante, para siempre.
+`center_error: 0.0` era la pista -- ese valor solo aparece cuando NO hay
+deteccion.
+
+**Y el estado no comprobaba la deteccion.** No tenia salida.
+
+Arreglado: `get_marker_bearing()` exige deteccion fresca (medida por
+hora de RECEPCION via `get_detection()`, no por la cabecera de la TF,
+que viene sellada por la Jetson y traeria el desfase de relojes por la
+puerta de atras), y el estado se rinde a `SEARCHING` tras
+`lost_marker_timeout`.
+
+### La normal del lidar NO es la tangente
+
+La sugerencia de rotar 90 grados el resultado de
+`get_lidar_surface_normal()` **romperia el caso que importa**. Dos
+escenarios sinteticos lo separan:
+
+    A) pared frontal en x=1.0, robot desplazado 0.4 m al lado
+       rumbo al marcador : +21.8 deg
+       normal devuelta   :  +0.0 deg   <- CORRECTA (la tangente daria +90)
+       oblicuidad        :  21.8 deg
+
+    B) pared LATERAL en y=-0.35 que se aleja hacia delante
+       rumbo al marcador : -20.0 deg
+       normal devuelta   : -90.0 deg   <- tambien CORRECTA, otra pared
+       oblicuidad        :  70.0 deg
+
+El escenario B reproduce lo observado en el robot **con una
+implementacion correcta**. Coherencia 1.00 y residuo de milimetros solo
+dicen que la nube ES una recta; no dicen que sea la recta del marcador.
+Rotar 90 grados arreglaria B y estropearia A, que es el caso normal.
+
+Lo que si hacia falta era estrechar el sector: 30 grados a 1 m abarca
++-0.58 m y arrastra paredes laterales. Bajado a **15 grados**.
+
+La guarda de oblicuidad se queda. En la corrida de las 23:14 hizo
+exactamente su trabajo: rechazo la normal de 99 grados, cayo al centrado
+de camara y **esa fue la primera aproximacion completada del historial**
+(`Target reached: lidar=0.277 m, camera-distance=0.182 m`).
+
+### Pendiente de verdad
+
+  * Repetir la aproximacion desde ~1 m. Los 0.35 m de la corrida buena
+    no prueban que aproxime desde lejos.
+  * `SECTOR_VACIO` durante 5.4 de los 7.3 s de esa aproximacion: el
+    lidar deja de ver superficie en el sector frontal a corta distancia.
+    Mirar si el `range_min` de 0.16 m o la oclusion del chasis se comen
+    el sector cuando el robot se acerca.
+  * Calibrar la zona muerta de verdad, con el comando de la cabecera de
+    los logs.
+
+### DOS ARBOLES DIVERGIDOS OTRA VEZ
+
+El portatil tiene `escape_deadband()` y `min_linear_speed`, que aqui no
+existen. Esta Jetson tiene la guarda de oblicuidad, el rodeo por
+`axis_error`, el sector de 15 grados y el arreglo del giro infinito, que
+alli no existen. **Antes de la proxima prueba hay que unificar**, o cada
+sesion seguira midiendo codigo que la otra ya cambio.
+
+### Cerrado: la sesion del portatil retira la sugerencia de los 90 grados
+
+Confirmado por su parte leyendo el fuente: `np.linalg.svd` devuelve `vh`,
+cuyas FILAS son los vectores singulares por la derecha, asi que
+`vectors[1]` ya es la normal. El arreglo real era estrechar el sector
+(`lidar_normal_half_angle_deg` 30 -> 15), porque el ajuste se enganchaba
+a la pared contigua. No rotar nada.
+
+---
+
+## Octava ronda (2026-09-06): sincronizacion por git, y el parche que destruyo un fichero
+
+**Se acabaron los parches y el scp.** A partir de aqui, commit y push a
+`feature/real-hardware-infra`. Motivo: `docs/APLICAR_PARCHE_JETSON.md`
+daba por base comun un fichero de 42194 bytes que en el portatil ya no
+existia -- las rondas 4-7 le habian llegado por otra via y su arbol
+tenia 70092 bytes. Al reaplicar, `patch` aviso *"Reversed (or previously
+applied) patch detected!"*, se respondio `y` dos veces, y el fichero
+perdio 271 lineas. `colcon build` dio verde igualmente: ament_python con
+`--symlink-install` no compila nada, asi que **el build en verde no
+prueba que el fichero este entero**. Se recupero del respaldo.
+
+La base comun deja de existir en cuanto los dos arboles avanzan. Git lo
+sabe; un parche suelto, no.
+
+### Lo que trajo 105d832 (del portatil)
+
+  - `apply_linear_deadband()` sobre vx, hermana de la lateral. Faltaba:
+    cerca del objetivo `vx = kp_linear * error` cae bajo la zona muerta
+    y el robot se para ANTES de cumplir la condicion de parada.
+  - `min_linear_speed` 0.05, `max_linear_speed` 0.08,
+    `distance_tolerance` 0.01 -> 0.03 (la latencia de la tuberia se come
+    ~1.5 cm solo en lo que llega la orden de parar).
+  - `min_lateral_speed` y `min_linear_speed` como argumentos de
+    `offboard.launch.py`: se calibran sin recompilar.
+  - `foxglove_bridge` movido al portatil; stamp/frame_id de la TF en
+    `aruco_detector_node`.
+
+### Lo que hubo que devolver a mano tras el merge
+
+La recuperacion del portatil partio de un respaldo ANTERIOR a la ronda 7,
+asi que `105d832` venia sin el arreglo del giro infinito: sin la guarda
+de deteccion fresca en `get_marker_bearing()` y sin la salida por
+`lost_marker_timeout` en `ALIGN_HEADING_TO_ARUCO`. Reaplicado sobre su
+commit. Si vuelve a aparecer `state: ALIGN_HEADING_TO_ARUCO` con
+`center_error: 0.0`, es que se ha vuelto a perder.
