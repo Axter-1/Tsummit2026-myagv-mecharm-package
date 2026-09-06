@@ -75,6 +75,33 @@ def generate_launch_description():
         # debajo de esto el mando se publica y las ruedas no giran.
         DeclareLaunchArgument('min_lateral_speed', default_value='0.035'),
         DeclareLaunchArgument('min_linear_speed', default_value='0.05'),
+        # Aproximacion con punto de encare y carrot. Ver
+        # home_service_behaviors/approach_planner.py.
+        DeclareLaunchArgument(
+            'staging_standoff',
+            default_value='0.45',
+            description='Distancia del punto de encare al marcador, '
+                        'sobre su normal. Desde ahi la aproximacion '
+                        'final es una recta perpendicular.',
+        ),
+        DeclareLaunchArgument(
+            'lookahead_distance',
+            default_value='0.25',
+            description='Anticipacion del carrot. Mas alto = mas suave '
+                        'y mas lento en reaccionar; mas bajo = mas '
+                        'ceñido al camino y mas nervioso.',
+        ),
+        DeclareLaunchArgument(
+            'corridor_radius',
+            default_value='0.12',
+            description='Semiancho del pasillo. Dentro de el se va '
+                        'recto al objetivo sin rodear por el encare.',
+        ),
+        DeclareLaunchArgument(
+            'linear_accel',
+            default_value='0.25',
+            description='Frenada del perfil trapezoidal, v=sqrt(2*a*d).',
+        ),
     ]
 
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -124,6 +151,22 @@ def generate_launch_description():
             ),
             'min_linear_speed': ParameterValue(
                 LaunchConfiguration('min_linear_speed'),
+                value_type=float,
+            ),
+            'staging_standoff': ParameterValue(
+                LaunchConfiguration('staging_standoff'),
+                value_type=float,
+            ),
+            'lookahead_distance': ParameterValue(
+                LaunchConfiguration('lookahead_distance'),
+                value_type=float,
+            ),
+            'corridor_radius': ParameterValue(
+                LaunchConfiguration('corridor_radius'),
+                value_type=float,
+            ),
+            'linear_accel': ParameterValue(
+                LaunchConfiguration('linear_accel'),
                 value_type=float,
             ),
         }],

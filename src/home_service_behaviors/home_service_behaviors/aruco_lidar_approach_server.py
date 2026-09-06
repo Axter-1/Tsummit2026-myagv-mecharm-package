@@ -22,6 +22,8 @@ from sensor_msgs.msg import LaserScan
 
 from tf2_ros import Buffer, TransformListener
 
+from home_service_behaviors import approach_planner as planner
+
 from home_service_interfaces.msg import ArucoDetectionArray
 from home_service_interfaces.action import ArucoApproach
 
@@ -447,6 +449,63 @@ class ArucoLidarApproachServer(Node):
             20.0
         )
 
+
+        # -------------------------------------------------------------
+        # Aproximacion con punto de encare y carrot (approach_planner)
+        # -------------------------------------------------------------
+
+        # Distancia del punto de encare al marcador, sobre su normal.
+        # Desde ahi la aproximacion final es una recta perpendicular.
+        self.declare_parameter(
+            'staging_standoff',
+            0.45
+        )
+
+        # Anticipacion del carrot. Mas alto = mas suave y mas lento en
+        # reaccionar; mas bajo = mas ceñido al camino y mas nervioso.
+        self.declare_parameter(
+            'lookahead_distance',
+            0.25
+        )
+
+        # Semiancho del pasillo de aproximacion. Dentro de el se va
+        # recto al objetivo en vez de rodear por el punto de encare.
+        self.declare_parameter(
+            'corridor_radius',
+            0.12
+        )
+
+        # Frenada del perfil trapezoidal: v = sqrt(2*a*d).
+        self.declare_parameter(
+            'linear_accel',
+            0.25
+        )
+
+        # Filtro del estimador. Suelo del alfa adaptativo; al principio
+        # manda la media corriente 1/n porque el marcador no se mueve.
+        self.declare_parameter(
+            'estimate_alpha_position',
+            0.20
+        )
+
+        self.declare_parameter(
+            'estimate_alpha_normal',
+            0.10
+        )
+
+        # Sin detecciones durante mas de esto, se avisa: se sigue
+        # navegando a ciegas por odometria, que deriva.
+        self.declare_parameter(
+            'estimate_max_age',
+            3.0
+        )
+
+        # Parada de seguridad por LiDAR frontal.
+        self.declare_parameter(
+            'min_front_clearance',
+            0.12
+        )
+
         # =========================================================
         # State
         # =========================================================
@@ -783,6 +842,59 @@ class ArucoLidarApproachServer(Node):
             ny = -ny
 
         return nx, ny
+
+    # =============================================================
+    # Pose completa del marcador en odom
+    # =============================================================
+
+    def get_marker_pose_odom(self, target_id):
+        """(mx, my, nx, ny) del marcador en odom, normal SALIENTE.
+
+        Exige deteccion fresca por el mismo motivo que
+        get_marker_bearing(): el buffer de TF guarda 10 s y, perdido el
+        marcador, lookup_transform(..., Time()) sigue devolviendo la
+        ultima transformada como si nada.
+
+        Se consulta con Time() a proposito. tf2 evalua la cadena
+        odom -> base_link -> camera -> aruco_N en el instante comun mas
+        reciente, que lo limita el eslabon mas viejo: el del marcador.
+        O sea que compone la odometria de CUANDO se tomo la imagen, no
+        la de ahora. Para un marcador quieto eso da su posicion en odom
+        ya libre del retardo de la vision, que es justo lo que se
+        buscaba: el desfase deja de realimentarse en el lazo.
+        """
+        if self.get_detection(target_id) is None:
+            return None
+
+        normal = self.get_marker_normal(target_id)
+
+        if normal is None:
+            return None
+
+        odom_frame = self.get_parameter('odom_frame').value
+
+        try:
+
+            transform = (
+                self.tf_buffer.lookup_transform(
+                    odom_frame,
+                    f'aruco_{target_id}',
+                    Time(),
+                    timeout=Duration(seconds=0.1),
+                )
+            )
+
+        except Exception:
+            return None
+
+        mx = float(transform.transform.translation.x)
+        my = float(transform.transform.translation.y)
+
+        # get_marker_normal devuelve ROBOT -> superficie; el
+        # planificador trabaja con la SALIENTE del marcador.
+        nx, ny = planner.outward_normal(normal[0], normal[1])
+
+        return mx, my, nx, ny
 
     # =============================================================
     # Front LiDAR
@@ -1510,6 +1622,28 @@ class ArucoLidarApproachServer(Node):
         self,
         goal_handle
     ):
+        """Aproximacion con punto de encare y carrot, en el marco odom.
+
+        Sustituye a la maquina de estados secuencial anterior
+        (ALIGN_HEADING -> ALIGNING_LATERAL -> APPROACHING), que corregia
+        un grado de libertad cada vez contra el error instantaneo. En
+        una base mecanum eso se persigue la cola: corregir el
+        desplazamiento lateral cambia el rumbo, corregir el rumbo
+        cambia el lateral. De ahi el baile
+        "Target found -> Heading aligned -> Marcador perdido" de los
+        registros.
+
+        Aqui solo hay dos estados de verdad:
+
+          SEARCHING  no hay estimacion todavia: paso-y-mira.
+          PURSUING   hay estimacion: se navega hacia ella con las tres
+                     velocidades a la vez.
+
+        El marcador se fija en ODOM y el robot navega con su propia
+        odometria, que es local y sin retardo. Las detecciones pasan de
+        ser el lazo de control a ser correcciones de un estimador, asi
+        que perder el marcador un rato ya no rompe nada.
+        """
 
         target_id = int(
             goal_handle.request.target_id
@@ -1523,6 +1657,21 @@ class ArucoLidarApproachServer(Node):
             goal_handle.request.timeout_sec
         )
 
+        estimate = planner.TargetEstimate(
+            alpha_position=self.pf(
+                'estimate_alpha_position'
+            ),
+            alpha_normal=self.pf(
+                'estimate_alpha_normal'
+            ),
+        )
+
+        use_lidar = bool(
+            self.get_parameter(
+                'use_lidar_normal'
+            ).value
+        )
+
         state = 'SEARCHING'
 
         start_ns = (
@@ -1531,34 +1680,28 @@ class ArucoLidarApproachServer(Node):
             .nanoseconds
         )
 
-        lock_start_ns = None
-        normal_samples = []
-        lock_attempts = 0
-
         search_phase_start_ns = start_ns
         search_moving = True
-        lidar_normal_used = False
-        lost_since_ns = None
 
-        use_normal = bool(
-            self.get_parameter(
-                'use_marker_normal'
-            ).value
-        )
-
-        desired_heading = None
+        last_detection_ns = None
+        stale_warned = False
 
         final_distance = -1.0
+        center_error = 0.0
 
         period = 1.0 / max(
             1.0,
-            self.pf(
-                'control_rate'
-            )
+            self.pf('control_rate')
+        )
+
+        yaw_tolerance = math.radians(
+            self.pf('heading_tolerance')
         )
 
         self.get_logger().info(
-            f'Starting target ID {target_id}'
+            f'Starting target ID {target_id} '
+            f'(encare a {self.pf("staging_standoff"):.2f} m, '
+            f'parada a {stop_distance:.2f} m)'
         )
 
         while rclpy.ok():
@@ -1574,7 +1717,7 @@ class ArucoLidarApproachServer(Node):
             ) / 1e9
 
             # =====================================================
-            # Cancel / timeout
+            # Cancelacion
             # =====================================================
 
             if goal_handle.is_cancel_requested:
@@ -1582,893 +1725,341 @@ class ArucoLidarApproachServer(Node):
                 self.stop_robot()
                 goal_handle.canceled()
 
-                result = (
-                    ArucoApproach.Result()
-                )
+                result = ArucoApproach.Result()
 
                 result.success = False
                 result.status = 'CANCELED'
-                result.message = (
-                    'Goal canceled'
-                )
-
-                result.final_distance = (
-                    final_distance
-                )
+                result.message = 'Goal canceled'
+                result.final_distance = final_distance
 
                 return result
 
+            # =====================================================
+            # Tiempo agotado
+            # =====================================================
+
+            if elapsed > timeout_sec:
+
+                self.stop_robot()
+                goal_handle.abort()
+
+                result = ArucoApproach.Result()
+
+                result.success = False
+                result.status = 'TIMEOUT'
+                result.message = (
+                    f'Timeout tras {elapsed:.1f} s '
+                    f'en estado {state}'
+                )
+                result.final_distance = final_distance
+
+                return result
+
+            # =====================================================
+            # Estimador: la deteccion CORRIGE, no pilota
+            # =====================================================
+
+            detection = self.get_detection(target_id)
+
+            if detection is not None:
+
+                center_error = float(
+                    detection.center_x_normalized
+                )
+
+                pose = self.get_marker_pose_odom(target_id)
+
+                if pose is not None:
+
+                    mx, my, nx, ny = pose
+
+                    estimate.update(
+                        mx, my, nx, ny,
+                        stamp_ns=now_ns,
+                    )
+
+                    last_detection_ns = now_ns
+                    stale_warned = False
+
+                    # La normal del LiDAR es bastante mejor que la del
+                    # ArUco, que en yaw es ruidosa y ambigua de perfil.
+                    # Se mete como muestra de mas peso en vez de
+                    # sustituir: si el ajuste engancha una pared vecina,
+                    # el promedio lo diluye en lugar de creerselo.
+                    if use_lidar:
+
+                        lidar_normal = (
+                            self.get_lidar_surface_normal(
+                                target_id
+                            )
+                        )
+
+                        if lidar_normal is not None:
+
+                            lnx, lny = planner.outward_normal(
+                                lidar_normal[0],
+                                lidar_normal[1],
+                            )
+
+                            estimate.update(
+                                mx, my, lnx, lny,
+                                stamp_ns=now_ns,
+                                alpha_scale=2.0,
+                            )
+
+            # =====================================================
+            # SEARCHING: sin estimacion no hay a donde ir
+            # =====================================================
+
+            if not estimate.ready:
+
+                state = 'SEARCHING'
+
+                phase_elapsed = (
+                    now_ns - search_phase_start_ns
+                ) / 1e9
+
+                # Paso-y-mira: girando en continuo no queda ni un
+                # fotograma nitido y quieto del marcador.
+                if search_moving:
+
+                    if phase_elapsed >= self.pf('search_step_sec'):
+
+                        self.stop_robot()
+                        search_moving = False
+                        search_phase_start_ns = now_ns
+
+                    else:
+
+                        self.publish_cmd(
+                            wz=self.pf('search_angular_speed')
+                        )
+
+                else:
+
+                    self.publish_cmd()
+
+                    if phase_elapsed >= self.pf('search_dwell_sec'):
+
+                        search_moving = True
+                        search_phase_start_ns = now_ns
+
+                self.send_feedback(
+                    goal_handle, state,
+                    final_distance, center_error, elapsed,
+                )
+
+                time.sleep(period)
+                continue
+
+            # =====================================================
+            # PURSUING
+            # =====================================================
+
+            robot_pose = self.get_robot_pose()
+
+            if robot_pose is None:
+
+                # Sin odometria no se puede navegar en odom. Parar es
+                # lo unico honesto: seguir seria integrar a ciegas.
+                self.stop_robot()
+
+                self.get_logger().warn(
+                    'Sin odometria; no puedo navegar.',
+                    throttle_duration_sec=2.0,
+                )
+
+                self.send_feedback(
+                    goal_handle, state,
+                    final_distance, center_error, elapsed,
+                )
+
+                time.sleep(period)
+                continue
+
+            state = 'PURSUING'
+
+            rx, ry, ryaw = robot_pose
+            mx, my, nx, ny = estimate.pose
+
+            standoff = self.pf('staging_standoff')
+
+            path = planner.build_path(
+                rx, ry, mx, my, nx, ny,
+                standoff,
+                stop_distance,
+                corridor_radius=self.pf('corridor_radius'),
+            )
+
+            carrot_xy, remaining, off_path = planner.carrot(
+                path, rx, ry,
+                self.pf('lookahead_distance'),
+            )
+
+            along, lateral = planner.corridor_coords(
+                rx, ry, mx, my, nx, ny
+            )
+
+            target_yaw = planner.desired_heading(
+                rx, ry, mx, my, nx, ny,
+                remaining,
+                standoff * 2.0,
+            )
+
+            limits = {
+                'max_linear': self.pf('max_linear_speed'),
+                'max_lateral': self.pf('max_lateral_speed'),
+                'max_angular': self.pf('max_heading_speed'),
+                'min_linear': self.pf('min_linear_speed'),
+                'min_lateral': self.pf('min_lateral_speed'),
+                'min_angular': self.pf('min_heading_speed'),
+                'kp_angular': self.pf('kp_heading'),
+                'accel': self.pf('linear_accel'),
+                'distance_tolerance': self.pf('distance_tolerance'),
+                'yaw_tolerance': yaw_tolerance,
+            }
+
+            vx, vy, wz, yaw_error, reached = (
+                planner.holonomic_command(
+                    rx, ry, ryaw,
+                    carrot_xy,
+                    target_yaw,
+                    remaining,
+                    limits,
+                )
+            )
+
+            # -------------------------------------------------
+            # El LiDAR manda en la distancia
+            #
+            # `along` sale de la posicion del marcador por TF, que
+            # depende de que marker_length sea correcto. El LiDAR mide
+            # el plano de verdad, asi que decide la llegada y es lo que
+            # se reporta. Con el tamaño del marcador mal, la geometria
+            # se equivoca y esto lo salva.
+            # -------------------------------------------------
+
+            front = self.get_front_lidar_range()
+
+            if front is not None:
+                final_distance = front
+            else:
+                final_distance = along
+
+            aligned = abs(yaw_error) <= yaw_tolerance
+
+            centred = abs(lateral) <= self.pf('lateral_tolerance')
+
             if (
-                timeout_sec > 0.0 and
-                elapsed >= timeout_sec
+                front is not None and
+                front <= stop_distance + self.pf('distance_tolerance') and
+                aligned and
+                centred
+            ):
+                reached = True
+
+            # -------------------------------------------------
+            # Parada de seguridad
+            # -------------------------------------------------
+
+            clearance = self.pf('min_front_clearance')
+
+            if (
+                front is not None and
+                front < clearance and
+                vx > 0.0
             ):
 
                 self.stop_robot()
                 goal_handle.abort()
 
-                result = (
-                    ArucoApproach.Result()
-                )
+                result = ArucoApproach.Result()
 
                 result.success = False
-                result.status = 'TIMEOUT'
+                result.status = 'BLOCKED'
                 result.message = (
-                    'Approach timeout'
+                    f'Obstaculo a {front:.3f} m '
+                    f'(minimo {clearance:.3f} m)'
                 )
+                result.final_distance = front
 
-                result.final_distance = (
-                    final_distance
-                )
+                self.get_logger().error(result.message)
 
                 return result
 
-            detection = (
-                self.get_detection(
-                    target_id
+            # -------------------------------------------------
+            # Llegada
+            # -------------------------------------------------
+
+            if reached and aligned:
+
+                self.stop_robot()
+                goal_handle.succeed()
+
+                result = ArucoApproach.Result()
+
+                result.success = True
+                result.status = 'REACHED'
+                result.message = (
+                    f'Llegada: lidar={final_distance:.3f} m, '
+                    f'geometria={along:.3f} m, '
+                    f'lateral={lateral:+.3f} m, '
+                    f'yaw={math.degrees(yaw_error):+.1f} deg, '
+                    f'{elapsed:.1f} s'
                 )
-            )
+                result.final_distance = final_distance
 
-            center_error = 0.0
+                self.get_logger().info(result.message)
 
-            if detection is not None:
+                return result
 
-                center_error = float(
-                    detection
-                    .center_x_normalized
-                )
-
-            # =====================================================
-            # SEARCHING
-            # =====================================================
-
-            if state == 'SEARCHING':
-
-                if detection is None:
-
-                    # Paso-y-mira: girar en continuo no dejaba ni un
-                    # fotograma nitido y quieto del marcador.
-                    phase_elapsed = (
-                        now_ns -
-                        search_phase_start_ns
-                    ) / 1e9
-
-                    if search_moving:
-
-                        if phase_elapsed >= self.pf(
-                            'search_step_sec'
-                        ):
-
-                            self.stop_robot()
-
-                            search_moving = False
-                            search_phase_start_ns = now_ns
-
-                        else:
-
-                            self.publish_cmd(
-                                wz=self.pf(
-                                    'search_angular_speed'
-                                )
-                            )
-
-                    else:
-
-                        self.publish_cmd()
-
-                        if phase_elapsed >= self.pf(
-                            'search_dwell_sec'
-                        ):
-
-                            search_moving = True
-                            search_phase_start_ns = now_ns
-
-                else:
-
-                    self.stop_robot()
-
-                    search_moving = True
-                    search_phase_start_ns = now_ns
-
-                    lidar_normal_used = False
-
-                    if not use_normal:
-
-                        desired_heading = None
-
-                        state = 'ALIGNING_LATERAL'
-
-                        self.get_logger().info(
-                            'Marcador visto. Centrado + '
-                            'avance (sin perpendicular).'
-                        )
-
-                    else:
-
-                        normal_samples = []
-
-                        lock_start_ns = now_ns
-
-                        state = 'LOCK_TARGET'
-
-                        self.get_logger().info(
-                            'Target found. '
-                            'Locking marker normal.'
-                        )
-
-            # =====================================================
-            # LOCK_TARGET
-            # =====================================================
-
-            elif state == 'LOCK_TARGET':
-
-                if detection is None:
-
-                    self.stop_robot()
-
-                    state = 'SEARCHING'
-
-                else:
-
-                    normal = None
-
-                    if bool(
-                        self.get_parameter(
-                            'use_lidar_normal'
-                        ).value
-                    ):
-
-                        normal = (
-                            self
-                            .get_lidar_surface_normal(
-                                target_id
-                            )
-                        )
-
-                        if normal is not None:
-                            lidar_normal_used = True
-
-                    # La pose del ArUco solo si el lidar no da nada.
-                    if normal is None:
-
-                        normal = (
-                            self.get_marker_normal(
-                                target_id
-                            )
-                        )
-
-                    if normal is not None:
-
-                        normal_samples.append(
-                            normal
-                        )
-
-                    lock_elapsed = (
-                        now_ns -
-                        lock_start_ns
-                    ) / 1e9
-
-                    min_samples = int(
-                        self.get_parameter(
-                            'lock_min_samples'
-                        ).value
-                    )
-
-                    max_attempts = int(
-                        self.get_parameter(
-                            'lock_max_attempts'
-                        ).value
-                    )
-
-                    lock_window_over = (
-                        lock_elapsed >=
-                        self.pf(
-                            'lock_duration'
-                        )
-                    )
-
-                    # Se agoto la ventana SIN muestras suficientes. Pasa
-                    # cuando normal_min_horizontal las descarta todas,
-                    # es decir cuando la normal sale casi vertical. Sin
-                    # esta rama el estado se quedaba encallado hasta el
-                    # timeout esperando muestras que no iban a llegar.
-                    if (
-                        lock_window_over and
-                        len(normal_samples) < min_samples
-                    ):
-
-                        lock_attempts += 1
-
-                        self.get_logger().warn(
-                            'Sin superficie plana en el '
-                            'lidar y normal del ArUco '
-                            'inservible: solo '
-                            f'{len(normal_samples)}/{min_samples} '
-                            'muestras utiles, intento '
-                            f'{lock_attempts}/{max_attempts}'
-                        )
-
-                        if lock_attempts >= max_attempts:
-
-                            desired_heading = None
-
-                            self.stop_robot()
-
-                            state = 'ALIGNING_LATERAL'
-
-                            self.get_logger().warn(
-                                'Sin normal fiable. '
-                                'Aproximacion solo por '
-                                'centrado de camara.'
-                            )
-
-                        else:
-
-                            normal_samples = []
-                            lock_start_ns = now_ns
-
-                    elif (
-                        lock_window_over
-                        and
-                        len(normal_samples) >=
-                        min_samples
-                    ):
-
-                        mean_x = sum(
-                            n[0]
-                            for n in normal_samples
-                        )
-
-                        mean_y = sum(
-                            n[1]
-                            for n in normal_samples
-                        )
-
-                        norm = math.hypot(
-                            mean_x,
-                            mean_y
-                        )
-
-                        # mean_x/mean_y son SUMAS de vectores unitarios:
-                        # su modulo dividido entre el numero de muestras
-                        # mide cuanto coinciden entre si. 1.0 = todas
-                        # iguales; ~0.71 = repartidas entre dos ramas a
-                        # 90 grados, el sintoma de la ambiguedad planar.
-                        coherence = (
-                            norm /
-                            max(
-                                1,
-                                len(normal_samples)
-                            )
-                        )
-
-                        if coherence < self.pf(
-                            'lock_min_coherence'
-                        ):
-
-                            lock_attempts += 1
-
-                            self.get_logger().warn(
-                                'Normal incoherente '
-                                f'({coherence:.2f} < '
-                                f'{self.pf("lock_min_coherence"):.2f}), '
-                                f'intento {lock_attempts}/'
-                                f'{int(self.get_parameter("lock_max_attempts").value)}'
-                            )
-
-                            if lock_attempts >= int(
-                                self.get_parameter(
-                                    'lock_max_attempts'
-                                ).value
-                            ):
-
-                                # Renuncia deliberada: aproximarse
-                                # centrado es mucho mejor que girar
-                                # hacia un normal inventado.
-                                desired_heading = None
-
-                                self.stop_robot()
-
-                                state = (
-                                    'ALIGNING_LATERAL'
-                                )
-
-                                self.get_logger().warn(
-                                    'Sin normal fiable. '
-                                    'Aproximacion solo por '
-                                    'centrado de camara.'
-                                )
-
-                            else:
-
-                                normal_samples = []
-                                lock_start_ns = now_ns
-
-                        else:
-
-                            normal_x = (
-                                mean_x / norm
-                            )
-
-                            normal_y = (
-                                mean_y / norm
-                            )
-
-                            candidate = (
-                                math.atan2(
-                                    normal_y,
-                                    normal_x
-                                )
-                            )
-
-                            # ¿Es esta la superficie DEL MARCADOR?
-                            # Si el robot lo ve, no puede estar
-                            # mirandola de canto.
-                            obliquity = (
-                                self.normal_obliquity(
-                                    candidate,
-                                    target_id
-                                )
-                            )
-
-                            max_obliquity = math.radians(
-                                self.pf(
-                                    'normal_max_obliquity_deg'
-                                )
-                            )
-
-                            if (
-                                obliquity is not None and
-                                obliquity > max_obliquity
-                            ):
-
-                                lock_attempts += 1
-
-                                self.get_logger().warn(
-                                    'Normal a '
-                                    f'{math.degrees(obliquity):.0f} '
-                                    'grados de la linea de vision: '
-                                    'el ajuste cogio otra superficie, '
-                                    'no la del marcador. Intento '
-                                    f'{lock_attempts}/{max_attempts}'
-                                )
-
-                                if (
-                                    lock_attempts >=
-                                    max_attempts
-                                ):
-
-                                    desired_heading = None
-
-                                    self.stop_robot()
-
-                                    state = (
-                                        'ALIGNING_LATERAL'
-                                    )
-
-                                    self.get_logger().warn(
-                                        'Sin normal fiable. '
-                                        'Aproximacion solo por '
-                                        'centrado de camara.'
-                                    )
-
-                                else:
-
-                                    normal_samples = []
-                                    lock_start_ns = now_ns
-
-                                self.send_feedback(
-                                    goal_handle,
-                                    state,
-                                    final_distance,
-                                    center_error,
-                                    elapsed
-                                )
-
-                                time.sleep(period)
-                                continue
-
-                            desired_heading = candidate
-
-                            self.stop_robot()
-
-                            state = (
-                                'ALIGN_HEADING_TO_ARUCO'
-                            )
-
-                            self.get_logger().info(
-                                'Normal fijada por '
-                                f'{"LIDAR" if lidar_normal_used else "pose del ArUco"} '
-                                f'(coherencia {coherence:.2f}). '
-                                'Rumbo perpendicular = '
-                                f'{math.degrees(desired_heading):+.1f} deg'
-                            )
-
-            # =====================================================
-            # ENCARAR AL MARCADOR
+            # -------------------------------------------------
+            # Aviso de estimacion vieja
             #
-            # Antes este estado giraba hasta el rumbo de la NORMAL. Eso
-            # pierde el marcador por geometria, no por mala suerte: si
-            # el robot no esta ya sobre el eje normal, encararse a la
-            # normal aparta la camara del marcador exactamente el angulo
-            # que le falta para estar en el eje. Con 90 grados de
-            # desfase el marcador sale del encuadre y el unico camino de
-            # vuelta era SEARCHING. De ahi el bucle.
-            #
-            # Ahora el robot encara al MARCADOR, que lo mantiene a la
-            # vista, y la normal se usa solo para decidir HACIA DONDE
-            # desplazarse en el estado siguiente.
-            # =====================================================
+            # No se vuelve a SEARCHING: la gracia de estimar en odom es
+            # justo poder seguir con el marcador tapado un rato. Pero
+            # la odometria deriva, asi que hay que decirlo.
+            # -------------------------------------------------
 
-            elif state == (
-                'ALIGN_HEADING_TO_ARUCO'
-            ):
+            if last_detection_ns is not None:
 
-                heading_error, wz = (
-                    self.face_marker_control(
-                        target_id
-                    )
-                )
-
-                # Sin marcador no hay a que encararse. Este estado no
-                # comprobaba la deteccion: se quedaba girando para
-                # siempre contra un rumbo congelado.
-                if (
-                    heading_error is None or
-                    detection is None
-                ):
-
-                    if lost_since_ns is None:
-                        lost_since_ns = now_ns
-
-                    lost_for = (
-                        now_ns - lost_since_ns
-                    ) / 1e9
-
-                    self.stop_robot()
-
-                    if lost_for >= self.pf(
-                        'lost_marker_timeout'
-                    ):
-
-                        search_moving = True
-                        search_phase_start_ns = now_ns
-                        lost_since_ns = None
-
-                        state = 'SEARCHING'
-
-                        self.get_logger().warn(
-                            'Marcador perdido al '
-                            f'encararse ({lost_for:.1f} s). '
-                            'Volviendo a buscar.'
-                        )
-
-                elif (
-                    abs(heading_error) <=
-                    self.pf(
-                        'heading_tolerance'
-                    )
-                ):
-
-                    lost_since_ns = None
-
-                    self.stop_robot()
-
-                    state = (
-                        'ALIGNING_LATERAL'
-                    )
-
-                    self.get_logger().info(
-                        'Encarado al marcador. '
-                        'Rodeando hasta su eje normal.'
-                    )
-
-                else:
-
-                    lost_since_ns = None
-
-                    self.publish_cmd(
-                        wz=wz
-                    )
-
-            # =====================================================
-            # RODEAR HASTA EL EJE NORMAL
-            #
-            # El robot va encarado al marcador, asi que un vy puro lo
-            # desplaza TANGENCIALMENTE: describe un arco alrededor del
-            # marcador, paralelo a su plano. El giro simultaneo mantiene
-            # el marcador centrado, asi que NO se pierde de vista.
-            #
-            # El error a anular es el angulo entre la linea de vision y
-            # la normal fijada (la 'oblicuidad'): vale cero exactamente
-            # cuando el robot esta sobre el eje normal del marcador.
-            # =====================================================
-
-            elif state == (
-                'ALIGNING_LATERAL'
-            ):
-
-                heading_error, wz = (
-                    self.face_marker_control(
-                        target_id
-                    )
-                )
-
-                if heading_error is None:
-
-                    self.publish_cmd()
-
-                elif detection is None:
-
-                    # Sin camara no hay centrado lateral. Antes se
-                    # publicaba solo la correccion de rumbo, que con
-                    # desired_heading=None vale cero: el robot se
-                    # quedaba clavado hasta el timeout en vez de volver
-                    # a buscar el marcador.
-                    if lost_since_ns is None:
-                        lost_since_ns = now_ns
-
-                    lost_for = (
-                        now_ns - lost_since_ns
-                    ) / 1e9
-
-                    # Con rumbo fijado se puede insistir un poco: al
-                    # girar hacia la perpendicular el marcador se sale
-                    # del encuadre un momento y vuelve. Sin rumbo no hay
-                    # nada que hacer sin verlo. En ningun caso quedarse
-                    # clavado hasta el timeout, que era lo que pasaba.
-                    give_up = self.pf(
-                        'lost_marker_timeout'
-                    )
-
-                    if (
-                        desired_heading is None or
-                        lost_for >= give_up
-                    ):
-
-                        self.stop_robot()
-
-                        search_moving = True
-                        search_phase_start_ns = now_ns
-                        lost_since_ns = None
-
-                        state = 'SEARCHING'
-
-                        self.get_logger().warn(
-                            'Marcador perdido '
-                            f'{lost_for:.1f} s. '
-                            'Volviendo a buscar.'
-                        )
-
-                    else:
-
-                        self.publish_cmd(
-                            wz=wz
-                        )
-
-                else:
-
-                    lost_since_ns = None
-
-                    axis_error = (
-                        self.axis_error(
-                            desired_heading,
-                            target_id
-                        )
-                    )
-
-                    axis_tolerance = math.radians(
-                        self.pf(
-                            'axis_tolerance_deg'
-                        )
-                    )
-
-                    if (
-                        axis_error is None or
-                        abs(axis_error) <=
-                        axis_tolerance
-                    ):
-
-                        self.stop_robot()
-
-                        state = 'APPROACHING'
-
-                        self.get_logger().info(
-                            'Sobre el eje normal del '
-                            'marcador'
-                            + (
-                                ''
-                                if axis_error is None
-                                else f' ({math.degrees(axis_error):+.1f} deg)'
-                            )
-                            + '. Aproximacion por lidar.'
-                        )
-
-                    else:
-
-                        # axis_error > 0: el marcador queda en sentido
-                        # antihorario respecto de la normal, o sea el
-                        # robot esta desplazado a la DERECHA del eje.
-                        # Hay que ir a la IZQUIERDA, que en base_link
-                        # es +Y, o sea vy positivo.
-                        vy = (
-                            self.pf('kp_axis') *
-                            axis_error
-                        )
-
-                        vy = clamp(
-                            vy,
-                            -self.pf(
-                                'max_lateral_speed'
-                            ),
-                            self.pf(
-                                'max_lateral_speed'
-                            )
-                        )
-
-                        vy = (
-                            self
-                            .apply_lateral_deadband(
-                                vy
-                            )
-                        )
-
-                        self.publish_cmd(
-                            vy=vy,
-                            wz=wz
-                        )
-
-            # =====================================================
-            # APROXIMACION
-            #
-            # El robot ya esta sobre el eje normal y encarado al
-            # marcador, asi que avanzar de frente es avanzar por la
-            # perpendicular. El giro sigue siguiendo al marcador para no
-            # perderlo; la distancia la da el lidar.
-            # =====================================================
-
-            elif state == 'APPROACHING':
-
-                heading_error, wz = (
-                    self.face_marker_control(
-                        target_id
-                    )
-                )
-
-                if heading_error is None:
-
-                    self.publish_cmd()
-
-                    time.sleep(period)
-                    continue
-
-                # Si se sale del eje mientras avanza, volver a rodear.
-                drift = self.axis_error(
-                    desired_heading,
-                    target_id
-                )
+                stale = (
+                    now_ns - last_detection_ns
+                ) / 1e9
 
                 if (
-                    drift is not None and
-                    abs(drift) > 2.0 * math.radians(
-                        self.pf(
-                            'axis_tolerance_deg'
-                        )
-                    )
+                    stale > self.pf('estimate_max_age') and
+                    not stale_warned
                 ):
 
-                    self.stop_robot()
-
-                    state = 'ALIGNING_LATERAL'
-
-                    self.get_logger().info(
-                        'Desviado del eje '
-                        f'({math.degrees(drift):+.1f} deg). '
-                        'Rodeando otra vez.'
-                    )
-
-                    time.sleep(period)
-                    continue
-
-                lidar_range = (
-                    self.get_front_lidar_range()
-                )
-
-                if lidar_range is None:
-
-                    self.publish_cmd(
-                        wz=wz
-                    )
-
-                    self.send_feedback(
-                        goal_handle,
-                        'WAITING_LIDAR:'
-                        f'{self._lidar_fail or "?"}',
-                        -1.0,
-                        center_error,
-                        elapsed
-                    )
+                    stale_warned = True
 
                     self.get_logger().warn(
-                        'Sin distancia de lidar: '
-                        f'{self._lidar_fail or "?"}',
-                        throttle_duration_sec=2.0
+                        f'Sin detecciones desde hace {stale:.1f} s; '
+                        'navegando por odometria.'
                     )
 
-                    time.sleep(period)
-                    continue
-
-                # Preserve old semantics:
-                #
-                # goal stop_distance represents approximately
-                # camera -> target distance.
-                #
-                # LiDAR sits ~16 cm behind camera.
-
-                camera_distance = max(
-                    0.0,
-                    lidar_range -
-                    self.pf(
-                        'camera_x_minus_lidar_x'
-                    )
-                )
-
-                final_distance = (
-                    camera_distance
-                )
-
-                # -----------------------------------------------
-                # Finished
-                # -----------------------------------------------
-
-                if (
-                    camera_distance <=
-                    stop_distance +
-                    self.pf(
-                        'distance_tolerance'
-                    )
-                ):
-
-                    self.stop_robot()
-
-                    goal_handle.succeed()
-
-                    result = (
-                        ArucoApproach.Result()
-                    )
-
-                    result.success = True
-                    result.status = 'REACHED'
-                    result.message = (
-                        'Reached marker using '
-                        'locked normal + LiDAR'
-                    )
-
-                    result.final_distance = (
-                        camera_distance
-                    )
-
-                    self.get_logger().info(
-                        f'Target reached: '
-                        f'lidar={lidar_range:.3f} m, '
-                        f'camera-distance='
-                        f'{camera_distance:.3f} m'
-                    )
-
-                    return result
-
-                # -----------------------------------------------
-                # Optional lateral correction while marker
-                # remains visible.
-                # -----------------------------------------------
-
-                vy = 0.0
-
-                if (
-                    detection is not None and
-                    drift is not None
-                ):
-
-                    vy = (
-                        self.pf('kp_axis') *
-                        drift
-                    )
-
-                    vy = clamp(
-                        vy,
-                        -self.pf(
-                            'max_lateral_speed'
-                        ),
-                        self.pf(
-                            'max_lateral_speed'
-                        )
-                    )
-
-                    vy = self.apply_lateral_deadband(
-                        vy
-                    )
-
-                distance_error = (
-                    camera_distance -
-                    stop_distance
-                )
-
-                vx = (
-                    self.pf(
-                        'kp_linear'
-                    )
-                    *
-                    distance_error
-                )
-
-                vx = clamp(
-                    vx,
-                    0.0,
-                    self.pf(
-                        'max_linear_speed'
-                    )
-                )
-
-                vx = self.apply_linear_deadband(
-                    vx
-                )
-
-                self.publish_cmd(
-                    vx=vx,
-                    vy=vy,
-                    wz=wz
-                )
-
-            # =====================================================
-            # Feedback
-            # =====================================================
+            self.publish_cmd(vx, vy, wz)
 
             self.send_feedback(
-                goal_handle,
-                state,
-                final_distance,
-                center_error,
-                elapsed
+                goal_handle, state,
+                final_distance, center_error, elapsed,
             )
 
             time.sleep(period)
 
         # =========================================================
-        # Shutdown
+        # Apagado
         # =========================================================
 
         self.stop_robot()
 
-        result = (
-            ArucoApproach.Result()
-        )
+        result = ArucoApproach.Result()
 
         result.success = False
         result.status = 'SHUTDOWN'
         result.message = 'ROS shutdown'
-
-        result.final_distance = (
-            final_distance
-        )
+        result.final_distance = final_distance
 
         return result
 

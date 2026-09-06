@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""Planificador de aproximacion a un ArUco para una base HOLONOMA.
+
+Geometria y control puros: ni rclpy, ni TF, ni topics. Todo lo de aqui
+se puede probar en un portatil sin robot, que es justo lo que hacia
+falta -- el algoritmo viejo solo se podia evaluar en pista.
+
+POR QUE NO PURE PURSUIT TAL CUAL
+--------------------------------
+Pure Pursuit calcula una CURVATURA de direccion: nacio para vehiculos
+no holonomos (Ackermann, diferencial), que no pueden desplazarse de
+lado y solo controlan avance y giro. El myAGV es mecanum: controla vx,
+vy y wz de forma independiente. Reducirlo a curvatura es tirar un grado
+de libertad entero.
+
+Lo que SI vale de Pure Pursuit es el punto de anticipacion: en vez de
+apuntar al final del camino, se persigue un punto que se desliza por
+delante sobre la trayectoria. Eso da un movimiento suave, sin recortar
+esquinas y sin el latigazo de un proporcional puro cerca del objetivo.
+
+Asi que aqui: carrot de Pure Pursuit + accionamiento holonomo de 3 GDL.
+
+EL MARCO DE TRABAJO ES ODOM, NO EL ROBOT
+----------------------------------------
+El fallo de fondo del control anterior era medir el error RELATIVO al
+robot en cada ciclo. La deteccion nace en la Jetson, se comprime, cruza
+el WiFi y se procesa en el portatil: cuando llega, describe donde estaba
+el marcador hace ~200 ms. Con el robot en movimiento ese retardo se
+realimenta y produce sobreoscilacion (el "desface").
+
+Aqui el marcador se fija UNA VEZ en odom y a partir de ahi el robot
+navega con su PROPIA odometria, que es local, rapida y continua. Las
+detecciones dejan de ser el lazo de control y pasan a ser correcciones
+lentas de un estimador. Perder el marcador un segundo deja de importar.
+
+CONVENIO DE NORMALES
+--------------------
+`get_marker_normal()` y `get_lidar_surface_normal()` del servidor
+devuelven la normal en odom apuntando DEL ROBOT HACIA la superficie.
+Aqui se trabaja con la normal SALIENTE del marcador (del marcador hacia
+el espacio libre), que es la opuesta. `outward_normal()` hace la
+conversion; usala siempre en la frontera en vez de repartir signos.
+"""
+
+import math
+
+
+# ---------------------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------------------
+
+def clamp(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
+
+
+def normalize_angle(angle):
+    return math.atan2(
+        math.sin(angle),
+        math.cos(angle)
+    )
+
+
+def angle_lerp(a, b, t):
+    """Interpola de a a b por el camino corto.
+
+    Interpolar angulos linealmente es un error clasico: entre 170 y
+    -170 grados el camino corto son 20 grados, no 340. Se interpola
+    sobre la DIFERENCIA normalizada.
+    """
+    return normalize_angle(
+        a + t * normalize_angle(b - a)
+    )
+
+
+def outward_normal(nx, ny):
+    """De 'normal hacia la superficie' a 'normal saliente del marcador'."""
+    return -nx, -ny
+
+
+# ---------------------------------------------------------------------
+# Estimador del marcador en odom
+# ---------------------------------------------------------------------
+
+class TargetEstimate:
+    """Pose del marcador en odom, fusionada a lo largo del tiempo.
+
+    Filtro exponencial, no media simple: las muestras recientes valen
+    mas, pero una deteccion suelta y ruidosa no arrastra la estimacion.
+
+    La normal se promedia como VECTOR y se renormaliza, nunca como
+    angulo: promediar angulos falla en el cruce de +-pi y ahi es
+    justo donde cae un marcador visto de frente segun como quede odom.
+    """
+
+    def __init__(self, alpha_position=0.35, alpha_normal=0.25):
+        self.alpha_position = alpha_position
+        self.alpha_normal = alpha_normal
+
+        self.x = None
+        self.y = None
+        self.nx = None
+        self.ny = None
+
+        self.samples = 0
+        self.last_update_ns = None
+
+    @property
+    def ready(self):
+        return self.samples > 0 and self.x is not None
+
+    def update(self, x, y, nx, ny, stamp_ns=None, alpha_scale=1.0):
+        """Incorpora una observacion (marcador en odom, normal saliente).
+
+        `alpha_scale` permite pesar la muestra: el servidor la usa para
+        dar mas peso a la normal del LiDAR que a la del ArUco, que es
+        mucho mas ruidosa en yaw.
+        """
+        norm = math.hypot(nx, ny)
+
+        if norm < 1e-9:
+            return False
+
+        nx /= norm
+        ny /= norm
+
+        if not self.ready:
+            self.x, self.y = float(x), float(y)
+            self.nx, self.ny = nx, ny
+
+        else:
+            # Alfa adaptativo. El marcador NO se mueve, asi que al
+            # principio lo optimo es una media corriente (1/n): cada
+            # muestra pesa lo mismo y el ruido baja como 1/sqrt(n).
+            # Pasadas unas cuantas, el alfa fijo hace de suelo para
+            # poder seguir correcciones lentas (deriva de odometria,
+            # o la normal del LiDAR entrando en juego al acercarse).
+            running = 1.0 / (self.samples + 1.0)
+
+            ap = clamp(
+                max(self.alpha_position, running) * alpha_scale,
+                0.0, 1.0,
+            )
+
+            an = clamp(
+                max(self.alpha_normal, running) * alpha_scale,
+                0.0, 1.0,
+            )
+
+            self.x += ap * (float(x) - self.x)
+            self.y += ap * (float(y) - self.y)
+
+            mixed_x = self.nx + an * (nx - self.nx)
+            mixed_y = self.ny + an * (ny - self.ny)
+
+            mixed_norm = math.hypot(mixed_x, mixed_y)
+
+            # Solo puede anularse si la normal nueva es opuesta a la
+            # acumulada. Eso no es ruido, es un cambio de signo: se
+            # descarta la muestra en vez de dividir por cero.
+            if mixed_norm > 1e-6:
+                self.nx = mixed_x / mixed_norm
+                self.ny = mixed_y / mixed_norm
+
+        self.samples += 1
+
+        if stamp_ns is not None:
+            self.last_update_ns = stamp_ns
+
+        return True
+
+    @property
+    def pose(self):
+        return self.x, self.y, self.nx, self.ny
+
+    def age_sec(self, now_ns):
+        if self.last_update_ns is None:
+            return float('inf')
+
+        return (now_ns - self.last_update_ns) / 1e9
+
+
+# ---------------------------------------------------------------------
+# Poses derivadas
+# ---------------------------------------------------------------------
+
+def staging_pose(mx, my, nx, ny, standoff):
+    """Pose de encare: sobre la normal, a `standoff` del marcador.
+
+    Es el punto desde el que la aproximacion final es una recta
+    perpendicular a la superficie. `nx, ny` es la normal SALIENTE.
+    El yaw mira HACIA el marcador, o sea a lo largo de -normal.
+    """
+    return (
+        mx + nx * standoff,
+        my + ny * standoff,
+        math.atan2(-ny, -nx),
+    )
+
+
+def corridor_coords(rx, ry, mx, my, nx, ny):
+    """Coordenadas del robot en el marco del marcador.
+
+    Devuelve (avance, lateral):
+      avance  = distancia a lo largo de la normal saliente. Es la
+                separacion perpendicular real a la superficie.
+      lateral = separacion respecto a la recta de la normal, con signo.
+
+    Son las dos magnitudes que de verdad importan para aproximarse a un
+    plano, y las que el control anterior mezclaba en un unico "error de
+    centrado" normalizado a [-1, 1] sin unidades fisicas.
+    """
+    dx, dy = rx - mx, ry - my
+
+    return (
+        dx * nx + dy * ny,
+        -dx * ny + dy * nx,
+    )
+
+
+def build_path(
+    rx, ry, mx, my, nx, ny,
+    standoff, stop_distance,
+    corridor_radius=0.12,
+):
+    """Camino hasta el marcador, de uno o dos tramos.
+
+    Dos tramos (robot -> encare -> parada) mientras el robot esta fuera
+    del pasillo de aproximacion. El segundo va sobre la normal, asi que
+    la llegada es perpendicular POR CONSTRUCCION: no hace falta un
+    estado aparte que alinee, que era de donde salia el baile
+    alinear -> avanzar -> desalinear -> realinear.
+
+    Un solo tramo (recta al final) en cuanto el robot ya esta dentro
+    del pasillo: bastante centrado sobre la normal y mas cerca que el
+    punto de encare. Sin esto el camino incluiria para siempre el
+    rodeo por el punto de encare, `remaining` no bajaria nunca de
+    standoff - stop_distance, y la llegada no se declararia jamas.
+    """
+    sx, sy, _ = staging_pose(mx, my, nx, ny, standoff)
+
+    fx = mx + nx * stop_distance
+    fy = my + ny * stop_distance
+
+    along, lateral = corridor_coords(rx, ry, mx, my, nx, ny)
+
+    inside = (
+        along <= standoff + 1e-3 and
+        abs(lateral) <= corridor_radius
+    )
+
+    if inside:
+        return [(rx, ry), (fx, fy)]
+
+    if math.hypot(sx - rx, sy - ry) < 1e-3:
+        return [(sx, sy), (fx, fy)]
+
+    return [(rx, ry), (sx, sy), (fx, fy)]
+
+
+# ---------------------------------------------------------------------
+# Seguimiento del camino (el carrot de Pure Pursuit)
+# ---------------------------------------------------------------------
+
+def path_length(path):
+    total = 0.0
+
+    for i in range(len(path) - 1):
+        total += math.hypot(
+            path[i + 1][0] - path[i][0],
+            path[i + 1][1] - path[i][1],
+        )
+
+    return total
+
+
+def project_on_path(path, x, y):
+    """Punto del camino mas cercano a (x, y).
+
+    Devuelve (distancia_recorrida, distancia_lateral, (px, py)).
+    `distancia_recorrida` se mide desde el inicio del camino, y es lo
+    que permite luego avanzar el carrot una longitud de anticipacion.
+    """
+    best = None
+    travelled = 0.0
+
+    for i in range(len(path) - 1):
+
+        ax, ay = path[i]
+        bx, by = path[i + 1]
+
+        dx, dy = bx - ax, by - ay
+        seg_len2 = dx * dx + dy * dy
+
+        if seg_len2 < 1e-12:
+            continue
+
+        t = clamp(
+            ((x - ax) * dx + (y - ay) * dy) / seg_len2,
+            0.0,
+            1.0,
+        )
+
+        px, py = ax + t * dx, ay + t * dy
+        lateral = math.hypot(x - px, y - py)
+
+        seg_len = math.sqrt(seg_len2)
+        along = travelled + t * seg_len
+
+        if best is None or lateral < best[1]:
+            best = (along, lateral, (px, py))
+
+        travelled += seg_len
+
+    if best is None:
+        return 0.0, 0.0, path[0]
+
+    return best
+
+
+def point_at(path, distance):
+    """Punto del camino a `distance` del inicio, saturado en los extremos."""
+    if distance <= 0.0:
+        return path[0]
+
+    travelled = 0.0
+
+    for i in range(len(path) - 1):
+
+        ax, ay = path[i]
+        bx, by = path[i + 1]
+
+        seg_len = math.hypot(bx - ax, by - ay)
+
+        if seg_len < 1e-12:
+            continue
+
+        if travelled + seg_len >= distance:
+            t = (distance - travelled) / seg_len
+            return (ax + t * (bx - ax), ay + t * (by - ay))
+
+        travelled += seg_len
+
+    return path[-1]
+
+
+def carrot(path, rx, ry, lookahead):
+    """Punto de anticipacion y distancia que queda hasta el final.
+
+    El carrot es el corazon de Pure Pursuit: perseguir un punto que se
+    desliza por delante en vez del destino final. Cerca del objetivo la
+    anticipacion se agota contra el extremo del camino y el carrot pasa
+    a ser el destino, con lo que la llegada es limpia y sin latigazo.
+    """
+    along, lateral, _ = project_on_path(path, rx, ry)
+
+    total = path_length(path)
+    remaining = max(0.0, total - along)
+
+    return point_at(path, along + lookahead), remaining, lateral
+
+
+# ---------------------------------------------------------------------
+# Perfil de velocidad
+# ---------------------------------------------------------------------
+
+def profile_speed(remaining, v_max, a_max, v_min=0.0, tolerance=0.0):
+    """Rampa de frenado: v = sqrt(2*a*d), saturada a v_max.
+
+    Es el perfil trapezoidal de toda la vida. Sustituye al proporcional
+    puro del control anterior, cuyo problema era estructural: v = kp*e
+    se hace infinitesimal cerca del objetivo y cae bajo la zona muerta
+    de los motores, asi que el robot se paraba ANTES de llegar y el
+    estado no cerraba nunca.
+
+    Con `v_min` la velocidad nunca queda por debajo de lo que de verdad
+    mueve las ruedas... salvo dentro de la tolerancia, donde se manda
+    cero de verdad. Sin esa excepcion el robot vibraria en el destino.
+    """
+    if remaining <= tolerance:
+        return 0.0
+
+    v = min(v_max, math.sqrt(max(0.0, 2.0 * a_max * remaining)))
+
+    if v_min > 0.0:
+        v = max(v, v_min)
+
+    return min(v, v_max)
+
+
+def apply_deadband(value, minimum, tolerance_reached=False):
+    """Saca un mando de la zona muerta de los motores.
+
+    Por debajo de `minimum` las ruedas no giran: el mando se publica y
+    no pasa nada. Se eleva al minimo conservando el signo, salvo que ya
+    estemos dentro de tolerancia, donde lo correcto es cero.
+    """
+    if tolerance_reached or value == 0.0:
+        return 0.0
+
+    if abs(value) < minimum:
+        return math.copysign(minimum, value)
+
+    return value
+
+
+# ---------------------------------------------------------------------
+# Ley de control holonoma
+# ---------------------------------------------------------------------
+
+def desired_heading(rx, ry, mx, my, nx, ny, remaining, blend_distance):
+    """Yaw objetivo: lejos mira al marcador, cerca se pone perpendicular.
+
+    Mirar al marcador mientras se navega es lo que lo mantiene DENTRO
+    del campo de vision -- perderlo era el modo de fallo dominante del
+    control anterior. Y al llegar al punto de encare las dos referencias
+    coinciden solas, porque encarar el marcador desde la normal ES
+    estar perpendicular. La mezcla evita el salto entre ambas.
+    """
+    normal_yaw = math.atan2(-ny, -nx)
+
+    dx, dy = mx - rx, my - ry
+
+    if math.hypot(dx, dy) < 1e-6:
+        return normal_yaw
+
+    bearing_yaw = math.atan2(dy, dx)
+
+    if blend_distance <= 0.0:
+        return normal_yaw
+
+    weight = clamp(remaining / blend_distance, 0.0, 1.0)
+
+    return angle_lerp(normal_yaw, bearing_yaw, weight)
+
+
+def holonomic_command(
+    rx, ry, ryaw,
+    carrot_xy,
+    target_yaw,
+    remaining,
+    limits,
+):
+    """Velocidades en el marco del ROBOT hacia el carrot.
+
+    Las tres salidas se calculan a la vez: es una base mecanum y no hay
+    ninguna razon para corregir un eje cada vez, que era lo que hacia
+    que el control anterior se persiguiera la cola (corregir el lateral
+    cambia el rumbo, corregir el rumbo cambia el lateral).
+
+    `limits` es un dict con: max_linear, max_lateral, max_angular,
+    min_linear, min_lateral, min_angular, accel, distance_tolerance,
+    yaw_tolerance.
+    """
+    cx, cy = carrot_xy
+
+    dx, dy = cx - rx, cy - ry
+
+    # A cuerpo: girar el error del mundo por -yaw del robot.
+    cos_y, sin_y = math.cos(-ryaw), math.sin(-ryaw)
+
+    ex = dx * cos_y - dy * sin_y
+    ey = dx * sin_y + dy * cos_y
+
+    norm = math.hypot(ex, ey)
+
+    reached = remaining <= limits['distance_tolerance']
+
+    speed = profile_speed(
+        remaining,
+        limits['max_linear'],
+        limits['accel'],
+        v_min=0.0,
+        tolerance=limits['distance_tolerance'],
+    )
+
+    if norm > 1e-9 and speed > 0.0:
+        ux, uy = ex / norm, ey / norm
+    else:
+        ux, uy = 0.0, 0.0
+
+    vx = speed * ux
+    vy = speed * uy
+
+    # El tope lateral es mas bajo que el frontal (mas friccion en
+    # mecanum al desplazarse). Se escala el VECTOR completo, no cada
+    # componente por separado: recortar solo vy torceria la direccion
+    # del movimiento y el robot dejaria de seguir el camino.
+    scale = 1.0
+
+    if abs(vx) > limits['max_linear']:
+        scale = min(scale, limits['max_linear'] / abs(vx))
+
+    if abs(vy) > limits['max_lateral']:
+        scale = min(scale, limits['max_lateral'] / abs(vy))
+
+    vx *= scale
+    vy *= scale
+
+    if not reached:
+        vx = apply_deadband(vx, limits['min_linear']) if abs(vx) > 1e-9 else 0.0
+        vy = apply_deadband(vy, limits['min_lateral']) if abs(vy) > 1e-9 else 0.0
+    else:
+        vx = vy = 0.0
+
+    yaw_error = normalize_angle(target_yaw - ryaw)
+
+    if abs(yaw_error) <= limits['yaw_tolerance']:
+        wz = 0.0
+    else:
+        wz = clamp(
+            limits['kp_angular'] * yaw_error,
+            -limits['max_angular'],
+            limits['max_angular'],
+        )
+
+        wz = apply_deadband(wz, limits['min_angular'])
+
+    return vx, vy, wz, yaw_error, reached
+
+
+# ---------------------------------------------------------------------
+# Compensacion de latencia
+# ---------------------------------------------------------------------
+
+def predict_pose(x, y, yaw, vx, vy, wz, dt):
+    """Avanza la pose por integracion con las velocidades mandadas.
+
+    Sirve para dos cosas:
+
+      1. Anclar una deteccion que llega con retardo a la pose que el
+         robot TENIA cuando se tomo la imagen, no a la de ahora
+         (dt negativo).
+      2. Adelantar la pose actual al instante en que el mando hara
+         efecto (dt positivo).
+
+    Integracion de primer orden: a 20 Hz y a 0.08 m/s el error de
+    truncamiento es de micras, muy por debajo del ruido de la
+    odometria. No merece la pena algo mas fino.
+    """
+    nyaw = normalize_angle(yaw + wz * dt)
+
+    mid = normalize_angle(yaw + 0.5 * wz * dt)
+
+    cos_y, sin_y = math.cos(mid), math.sin(mid)
+
+    nx = x + (vx * cos_y - vy * sin_y) * dt
+    ny = y + (vx * sin_y + vy * cos_y) * dt
+
+    return nx, ny, nyaw
+
+
+def compose(base_x, base_y, base_yaw, local_x, local_y):
+    """Lleva un punto del marco del robot a odom."""
+    cos_y, sin_y = math.cos(base_yaw), math.sin(base_yaw)
+
+    return (
+        base_x + local_x * cos_y - local_y * sin_y,
+        base_y + local_x * sin_y + local_y * cos_y,
+    )
