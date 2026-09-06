@@ -9,7 +9,22 @@ al reimportar. Por eso los cambios locales viven aquí como parche.
 
 ## `myagv_odometry-local-changes.patch`
 
-Lo importante que contiene es el **watchdog de `/cmd_vel`**.
+Contiene tres cambios sobre el `myagv_odometry` del fabricante:
+
+1. **Watchdog de `/cmd_vel`** (300 ms) — abajo.
+2. **`restoreRun()` sin terminal** — abajo.
+3. **La TF `odom -> base_footprint`**. El fabricante la publica
+   comentada:
+
+   ```cpp
+   // odomBroadcaster->sendTransform(odom_trans); // Use the Robot Localization ros package instead.
+   ```
+
+   Aquí se descomenta. Sin esa línea **no hay TF de odom**, y sin TF de
+   odom la aproximación a ArUco no puede funcionar: el servidor fija el
+   marcador en `odom` y navega con esa cadena. Un `vcs import` fresco sin
+   este patch deja el robot sin odom TF y sin ningún error visible —
+   `check` de `run_robot_routine.sh` lo detecta desde `044d949`.
 
 ### Por qué existe
 
