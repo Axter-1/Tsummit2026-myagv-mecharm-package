@@ -496,3 +496,66 @@ def test_el_techo_de_velocidad_debe_superar_la_zona_muerta():
     assert limits['max_linear'] > limits['min_linear'] * 1.5
     assert limits['max_lateral'] > limits['min_lateral'] * 1.5
     assert limits['max_angular'] > limits['min_angular'] * 1.5
+
+
+def test_la_zona_muerta_no_tuerce_la_direccion():
+    """La zona muerta es una ELIPSE, no una caja.
+
+    Aplicarla eje por eje destroza la direccion del movimiento: con el
+    objetivo muy a un lado, vy es grande y vx minusculo, pero el minimo
+    de avance eleva ese vx y el robot sale en diagonal en vez de de
+    lado. Medido antes del arreglo: hasta 26 grados de desvio, con el
+    robot abandonando el camino.
+    """
+    limits = dict(LIMITS)
+    limits['min_linear'] = 0.12
+    limits['min_lateral'] = 0.13
+    limits['max_linear'] = 0.22
+    limits['max_lateral'] = 0.20
+
+    for grados in (5, 15, 30, 45, 60, 80, 120, 200, 330):
+
+        a = math.radians(grados)
+
+        vx, vy, _, _, _, _ = holonomic_command(
+            0.0, 0.0, 0.0,
+            (math.cos(a), math.sin(a)),
+            0.0, 1.0, limits,
+        )
+
+        salida = math.degrees(math.atan2(vy, vx))
+
+        desvio = abs(normalize_angle(math.radians(grados - salida)))
+
+        assert desvio < math.radians(1.0), (grados, salida)
+
+
+def test_la_zona_muerta_eleva_el_modulo_lo_justo():
+    """Un mando pequeño se sube al borde de la elipse, y no mas.
+
+    El modulo lo fija `remaining` por la rampa, no la distancia al
+    carrot, que solo da DIRECCION. Con la aceleracion y la tolerancia
+    por defecto la rampa nunca baja del suelo antes de entrar en
+    tolerancia -- una propiedad buena, no un accidente -- asi que para
+    ejercitar el suelo hay que apretar la tolerancia.
+    """
+    limits = dict(LIMITS)
+    limits['min_linear'] = 0.12
+    limits['min_lateral'] = 0.13
+    limits['distance_tolerance'] = 0.005
+
+    # a 1 cm la rampa pide sqrt(2*0.25*0.01) = 0.071, bajo el suelo
+    vx, vy, _, _, reached, _ = holonomic_command(
+        0.0, 0.0, 0.0, (1.0, 0.0), 0.0, 0.01, limits,
+    )
+
+    assert not reached
+    assert abs(math.hypot(vx, vy) - 0.12) < 1e-6
+
+    # y dentro de tolerancia se manda CERO de verdad, no el suelo
+    vx, vy, _, _, reached, _ = holonomic_command(
+        0.0, 0.0, 0.0, (1.0, 0.0), 0.0, 0.001, limits,
+    )
+
+    assert reached
+    assert vx == 0.0 and vy == 0.0

@@ -555,11 +555,40 @@ def holonomic_command(
     vx *= scale
     vy *= scale
 
-    if not reached:
-        vx = apply_deadband(vx, limits['min_linear']) if abs(vx) > 1e-9 else 0.0
-        vy = apply_deadband(vy, limits['min_lateral']) if abs(vy) > 1e-9 else 0.0
-    else:
+    # Zona muerta SOBRE EL VECTOR, no eje por eje.
+    #
+    # Aplicarla por separado a vx y a vy destroza la DIRECCION del
+    # movimiento: si el objetivo esta muy a un lado, vy es grande y vx
+    # minusculo, pero el minimo de avance eleva ese vx a min_linear y
+    # el robot sale en diagonal en vez de de lado. Medido: hasta 26
+    # grados de desvio, y el robot abandonando el camino.
+    #
+    # La zona muerta es una ELIPSE en el plano (vx, vy), con semiejes
+    # min_linear y min_lateral, no un rectangulo. Se escala el vector
+    # entero hasta el borde de esa elipse en la direccion pedida, con
+    # lo que el modulo sube y la direccion se conserva exacta.
+    if reached:
         vx = vy = 0.0
+
+    else:
+
+        speed_norm = math.hypot(vx, vy)
+
+        if speed_norm > 1e-9:
+
+            dx, dy = vx / speed_norm, vy / speed_norm
+
+            floor_speed = math.hypot(
+                limits['min_linear'] * dx,
+                limits['min_lateral'] * dy,
+            )
+
+            if speed_norm < floor_speed:
+                vx = floor_speed * dx
+                vy = floor_speed * dy
+
+        else:
+            vx = vy = 0.0
 
     yaw_error = normalize_angle(target_yaw - ryaw)
 
