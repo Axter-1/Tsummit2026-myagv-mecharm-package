@@ -29,6 +29,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -62,6 +63,18 @@ def generate_launch_description():
         DeclareLaunchArgument('start_object_grasp', default_value='false'),
         DeclareLaunchArgument('grasp_enable_arm', default_value='true'),
         DeclareLaunchArgument('grasp_enable_approach', default_value='true'),
+        # foxglove_bridge AQUI, no en la Jetson: en la Nano se comia CPU
+        # serializando cada topic a CBOR, y mirar /aruco/image_annotated
+        # (Image cruda que publica ESTA maquina) mandaba el frame de
+        # vuelta a la Jetson solo para re-serializarlo. Local es casi
+        # gratis. tsummit_offboard.sh lo activa en 'run' salvo FOXGLOVE=0.
+        DeclareLaunchArgument('start_foxglove', default_value='false'),
+        DeclareLaunchArgument('foxglove_port', default_value='8765'),
+        # Zona muerta de los motores: velocidad minima que de verdad
+        # mueve el robot. Calibrar (2 min, ver HANDOFF_OFFBOARD.md); por
+        # debajo de esto el mando se publica y las ruedas no giran.
+        DeclareLaunchArgument('min_lateral_speed', default_value='0.035'),
+        DeclareLaunchArgument('min_linear_speed', default_value='0.05'),
     ]
 
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -105,6 +118,14 @@ def generate_launch_description():
             'detection_timeout': 0.8,
             'scan_timeout': 0.8,
             'control_rate': 20.0,
+            'min_lateral_speed': ParameterValue(
+                LaunchConfiguration('min_lateral_speed'),
+                value_type=float,
+            ),
+            'min_linear_speed': ParameterValue(
+                LaunchConfiguration('min_linear_speed'),
+                value_type=float,
+            ),
         }],
         condition=IfCondition(LaunchConfiguration('start_aruco_approach')),
     )
@@ -123,6 +144,23 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('start_object_grasp')),
     )
 
+    foxglove = Node(
+        package='foxglove_bridge',
+        executable='foxglove_bridge',
+        name='foxglove_bridge',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'port': ParameterValue(
+                LaunchConfiguration('foxglove_port'),
+                value_type=int,
+            ),
+            'address': '0.0.0.0',
+            'use_compression': False,
+        }],
+        condition=IfCondition(LaunchConfiguration('start_foxglove')),
+    )
+
     return LaunchDescription(
-        args + [aruco_detector, aruco_approach, object_grasp]
+        args + [aruco_detector, aruco_approach, object_grasp, foxglove]
     )

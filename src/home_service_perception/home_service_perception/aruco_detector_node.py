@@ -623,7 +623,12 @@ class ArucoDetector(Node):
 
             tf_msg = TransformStamped()
 
-            tf_header = header
+            # El padre y el sello salen de la cabecera de la imagen
+            # (camera_link). Sin esto TF descarta la transformada con
+            # "TF_NO_FRAME_ID: ... because frame_id not set" y la
+            # aproximacion nunca localiza el marcador.
+            tf_msg.header.stamp = header.stamp
+            tf_msg.header.frame_id = header.frame_id
 
             tf_msg.child_frame_id = (
                 f'aruco_{marker_id}'

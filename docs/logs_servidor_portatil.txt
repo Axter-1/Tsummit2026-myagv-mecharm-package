@@ -1,0 +1,551 @@
+===============================================================
+ LOGS DEL aruco_lidar_approach_server  (PORTATIL 10.24.15.54)
+ Para la sesion de la Jetson. El servidor corre AQUI, por eso
+ alli solo hay logs de camara, lidar y base.
+ Actualizado tras la corrida de las 23:14.
+===============================================================
+
+
+>>> TITULAR: LA CORRIDA DE LAS 23:14 COMPLETO LA APROXIMACION <<<
+
+    23:14:31  Starting target ID 4
+    23:14:57  Target found                       (25.7 s buscando)
+    23:14:58  WARN Normal a 99 grados de la linea de vision ... Intento 1/3
+    23:14:59  WARN ... Intento 2/3
+    23:15:00  WARN ... Intento 3/3
+    23:15:00  WARN Sin normal fiable. Aproximacion solo por centrado de camara.
+    23:15:00  Sobre el eje normal del marcador. Aproximacion por lidar.
+    23:15:00  Frente del robot en laser_frame: -180.0 grados (deducido de la TF)
+    23:15:06  WARN Sin distancia de lidar: SECTOR_VACIO(frente=-180deg)
+    23:15:08  Target reached: lidar=0.277 m, camera-distance=0.182 m
+
+ 0.277 - 0.095 = 0.182: la aritmetica cuadra. Primera vez que se
+ llega a REACHED en todo el historial.
+
+
+1) CONFIRMADO: EL ERROR DE ~90 GRADOS ES REAL, Y LA GUARDA LO CAZA
+------------------------------------------------------------------
+ "Normal a 99 grados de la linea de vision"
+
+ Antes (22:54-23:08) ese error entraba sin filtro y producia un bucle
+ infinito, 11 veces seguidas, que nunca llegaba a APPROACHING:
+
+     Target found -> Normal fijada por LIDAR (coherencia 1.00)
+                  -> Heading aligned -> Marcador perdido 3.0 s -> buscar
+
+ Rumbos calculados en ese bucle:
+     -68.9 -69.9 -71.7 -72.9 -82.5 -83.7 -86.3 -87.7 -89.4 -90.7
+
+ Girar ~90 grados saca el marcador del campo de vision: de ahi el
+ "Marcador perdido" exactamente 3 s despues de cada alineacion.
+
+ PERO LA GUARDA DESCARTA LA NORMAL EN VEZ DE CORREGIRLA.
+ Si el ajuste sale CONSISTENTEMENTE a 90 +-9 grados de la linea de
+ vision, no es que "cogio otra superficie": es la TANGENTE de la
+ superficie correcta. Ajustar una recta a los puntos del LiDAR da la
+ direccion de la superficie; la normal es esa direccion girada 90
+ grados. La coherencia 1.00 lo respalda: la recta ajusta perfecto,
+ solo que es la direccion equivocada.
+
+ SUGERENCIA: en get_lidar_surface_normal(), rotar el resultado 90
+ grados (o revisar el orden de los argumentos del atan2) en vez de
+ renunciar. Asi habria normal utilizable en lugar de caer siempre al
+ centrado de camara.
+
+ Comprobacion barata: robot quieto y de frente al marcador -> el rumbo
+ deberia salir ~0 grados. Si sale ~90, es esto.
+
+
+2) EL WRAP DE +-PI YA ESTA ARREGLADO (bien visto)
+--------------------------------------------------
+ normalize_angle(angle - front_angle) en get_front_lidar_range().
+ "Frente del robot en laser_frame: -180.0 grados" significa que el
+ LiDAR va montado girado 180 grados, o sea el sector frontal cae justo
+ en la costura del scan. Zona de riesgo para cualquier cambio ahi.
+
+
+3) EL EXITO ES FRAGIL: NO PRUEBA UNA APROXIMACION DESDE DISTANCIA
+------------------------------------------------------------------
+ De entrar en aproximacion (23:15:00) a REACHED (23:15:08) pasaron
+ 7.3 s, y 5.4 de ellos con SECTOR_VACIO. El robot avanzo efectivamente
+ ~2 s. Empezo ya muy cerca (~0.35 m).
+
+ Esto demuestra que la cadena CIERRA cuando el marcador ya esta
+ delante y el LiDAR lo ve. No demuestra que aproxime desde 1 m.
+ Repetir desde ~1 m y comprobar vx sostenido antes de darlo por bueno.
+
+
+4) LA CORRIDA SIGUIENTE (23:16) VUELVE AL PROBLEMA VIEJO
+---------------------------------------------------------
+     Normal fijada por pose del ArUco (coherencia 0.96).
+     Rumbo perpendicular = -36.4 deg
+
+ Sin normal de LiDAR cae a la pose del ArUco y ahi reaparece la
+ ambiguedad planar de siempre (-36 grados, el primo del giro de 45).
+
+
+5) BUSQUEDA LENTA
+------------------
+ 25.7 s hasta encontrar el marcador (paso-y-mira).
+
+
+6) BUILDS DESINCRONIZADOS ENTRE LAS DOS SESIONES
+-------------------------------------------------
+     Invalid access to undeclared parameter(s): min_lateral_speed
+     Invalid access to undeclared parameter(s): normal_max_obliquity_deg
+     Invalid access to undeclared parameter(s): kp_axis
+     Invalid access to undeclared parameter(s): axis_tolerance_deg
+
+ Cada vez que se anaden parametros hay que RECOMPILAR EN EL PORTATIL
+ antes de probar, o las pruebas miden codigo viejo.
+
+
+7) ZONA MUERTA (ronda anterior, sigue en pie)
+----------------------------------------------
+ Con kp_lateral=0.08 y max_lateral_speed=0.04 el mando lateral MAXIMO
+ posible (0.04 m/s) estaba por debajo de la zona muerta (~0.05 m/s):
+ el robot no podia desplazarse lateralmente con NINGUN center_error.
+ Corregido con escape_deadband() + min_lateral_speed / min_linear_speed.
+ Los valores 0.055 / 0.05 son estimaciones: calibrar con
+     ros2 topic pub -r 10 /cmd_vel_aruco geometry_msgs/msg/Twist \
+         '{linear: {x: 0.0, y: 0.04}}'
+ subiendo de 0.01 en 0.01 hasta que las ruedas arranquen.
+
+---------------------------------------------------------------
+VOLCADO COMPLETO
+---------------------------------------------------------------
+
+########## python3_11936_1788664330774.log   (2026-09-05 21:22:05) ##########
+[INFO] [1788664330.869306388] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788664344.863867879] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788664344.925466052] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[WARN] [1788664346.110667442] [aruco_lidar_approach_server]: Normal incoherente (0.76 < 0.93), intento 1/3
+[WARN] [1788664347.344974074] [aruco_lidar_approach_server]: Normal incoherente (0.73 < 0.93), intento 2/3
+[WARN] [1788664348.589247246] [aruco_lidar_approach_server]: Normal incoherente (0.75 < 0.93), intento 3/3
+[WARN] [1788664348.651019977] [aruco_lidar_approach_server]: Sin normal fiable. Aproximacion solo por centrado de camara.
+[INFO] [1788664371.624602714] [aruco_lidar_approach_server]: Lateral alignment complete. Starting LiDAR approach.
+[INFO] [1788664389.965512458] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788664390.027252276] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788664391.262644471] [aruco_lidar_approach_server]: Marker normal locked (coherencia 1.00). Heading=1.035 rad
+[INFO] [1788664392.503753321] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788664419.213907768] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788664430.559152671] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788664457.900508265] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788664459.137337782] [aruco_lidar_approach_server]: Marker normal locked (coherencia 1.00). Heading=1.157 rad
+[WARN] [1788664872.431523022] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'use_marker_normal')
+[WARN] [1788664875.005509070] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'search_dwell_sec')
+[WARN] [1788664877.504884320] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'search_step_sec')
+[WARN] [1788664885.199501622] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'normal_min_horizontal')
+[WARN] [1788664921.417828534] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'normal_min_horizontal')
+
+########## python3_4803_1788649208988.log   (2026-09-05 17:47:24) ##########
+[INFO] [1788649209.088437050] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788649699.090571478] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788649699.151910250] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788649699.668014687] [aruco_lidar_approach_server]: Marker normal locked. Heading=0.431 rad
+[INFO] [1788649800.853306046] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788649800.914530704] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788649801.429958094] [aruco_lidar_approach_server]: Marker normal locked. Heading=0.480 rad
+[INFO] [1788649838.334058506] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651928.830316333] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788651928.896251473] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788651929.415350129] [aruco_lidar_approach_server]: Marker normal locked. Heading=-0.064 rad
+[INFO] [1788651930.286954026] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651931.830002301] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651933.877130318] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651951.237000368] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651951.398859602] [aruco_lidar_approach_server]: Lateral alignment complete. Starting LiDAR approach.
+[INFO] [1788651952.279334248] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651952.399992560] [aruco_lidar_approach_server]: Lateral alignment complete. Starting LiDAR approach.
+[INFO] [1788651953.736918058] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652020.413206676] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788652020.474374377] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788652020.997581093] [aruco_lidar_approach_server]: Marker normal locked. Heading=-0.359 rad
+[INFO] [1788652024.360249816] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652030.573572614] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652036.022173200] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652037.869212104] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652039.106352582] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652041.209848819] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+
+########## python3_16846_1788670488942.log   (2026-09-05 23:08:09) ##########
+[INFO] [1788670489.114673306] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788670507.472916741] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788670509.447413936] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788670510.648781778] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -82.5 deg
+[INFO] [1788670513.716771170] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788670516.846559164] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[INFO] [1788670540.074844861] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788670541.275860839] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -83.7 deg
+[INFO] [1788670544.497688815] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788670547.634461115] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[INFO] [1788670577.983995071] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788670579.239439677] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -86.3 deg
+[INFO] [1788670582.528210384] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788670585.660044886] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[INFO] [1788670611.292867016] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788670612.498976261] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -87.7 deg
+[INFO] [1788670615.882519431] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788670619.008844828] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[INFO] [1788670641.040620215] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788670642.245882941] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -89.4 deg
+[INFO] [1788670645.533473547] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788670648.667596108] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[INFO] [1788670679.057196798] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788670680.309813732] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -90.7 deg
+[INFO] [1788670683.655863696] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788670686.783075424] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[WARN] [1788671281.416788693] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'normal_max_obliquity_deg')
+[WARN] [1788671284.023220943] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'kp_axis')
+[WARN] [1788671286.680816969] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'axis_tolerance_deg')
+
+########## python3_14487_1788667892402.log   (2026-09-05 22:37:22) ##########
+[INFO] [1788667892.564191945] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788667924.315627460] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788667928.655044417] [aruco_lidar_approach_server]: Marcador visto. Centrado + avance (sin perpendicular).
+[INFO] [1788668654.151029003] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788668654.212949666] [aruco_lidar_approach_server]: Marcador visto. Centrado + avance (sin perpendicular).
+[WARN] [1788668674.969224086] [aruco_lidar_approach_server]: Marcador perdido. Volviendo a buscar.
+[INFO] [1788668681.643699457] [aruco_lidar_approach_server]: Marcador visto. Centrado + avance (sin perpendicular).
+[INFO] [1788668690.149292831] [aruco_lidar_approach_server]: Lateral alignment complete. Starting LiDAR approach.
+[INFO] [1788668855.550650346] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788668865.794705059] [aruco_lidar_approach_server]: Marcador visto. Centrado + avance (sin perpendicular).
+[INFO] [1788668871.471277221] [aruco_lidar_approach_server]: Lateral alignment complete. Starting LiDAR approach.
+[WARN] [1788669400.199569181] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'use_lidar_normal')
+[WARN] [1788669405.415928633] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'lidar_normal_half_angle_deg')
+[WARN] [1788669408.076904192] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'lidar_normal_depth_band')
+[WARN] [1788669410.743065015] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'lidar_normal_max_residual')
+[WARN] [1788669413.397382288] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'lidar_normal_min_points')
+[WARN] [1788669415.977451971] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'lost_marker_timeout')
+[WARN] [1788669438.747631088] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'lidar_normal_min_points')
+[WARN] [1788669441.336622470] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'lost_marker_timeout')
+
+########## python3_9077_1788661971973.log   (2026-09-05 20:41:51) ##########
+[INFO] [1788661972.082519353] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788661972.258657840] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788661972.355292592] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788661972.568690593] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788661972.572498795] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788661973.095248911] [aruco_lidar_approach_server]: Marker normal locked. Heading=0.631 rad
+[INFO] [1788661973.097340724] [aruco_lidar_approach_server]: Marker normal locked. Heading=0.631 rad
+[INFO] [1788662065.249010204] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788662065.310666081] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788662065.834800289] [aruco_lidar_approach_server]: Marker normal locked. Heading=0.498 rad
+[INFO] [1788662067.215978651] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662068.251795568] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662069.187308132] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662072.769687466] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662073.703755711] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662074.791851140] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662075.825133699] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662077.787464254] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662078.921835128] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662080.871443454] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662081.909857073] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662083.048490202] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662084.136259805] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662085.329787585] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662086.314922317] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662087.353432563] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662088.492184603] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662089.583189768] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662090.621771485] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662091.607151505] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662092.745832091] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662093.830851766] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662094.967043309] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662306.061352674] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788662346.725051007] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788662357.585661452] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788662358.105233831] [aruco_lidar_approach_server]: Marker normal locked. Heading=0.174 rad
+[INFO] [1788662361.581747878] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662362.668526559] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662363.657995001] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662364.644268713] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662365.680889629] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662366.612681926] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662367.598430135] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662368.687263263] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662369.722234079] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662370.762144089] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662371.799139007] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662372.886512587] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662373.822442320] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662374.755373213] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662376.498633216] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662382.685008762] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788662409.933977987] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788662410.460406371] [aruco_lidar_approach_server]: Marker normal locked. Heading=-1.041 rad
+[INFO] [1788662412.206447851] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662425.546884288] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788662428.731636307] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788662429.250355287] [aruco_lidar_approach_server]: Marker normal locked. Heading=-1.296 rad
+[INFO] [1788662432.867866880] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662433.859372768] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662434.796792844] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662439.653113096] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662440.642371399] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662441.780420523] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662442.865190105] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662443.899413846] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662445.805033148] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662446.996670759] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662448.030105122] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662449.116411361] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662450.201372900] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662451.347266837] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662452.544579293] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662453.680190108] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662454.817828079] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662477.542359307] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788662477.603804903] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788662478.123023594] [aruco_lidar_approach_server]: Marker normal locked. Heading=-1.025 rad
+[INFO] [1788662480.615786227] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662483.488321002] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662484.528932135] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662485.464172712] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662486.498038831] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662488.704170309] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662489.895814338] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662490.980414094] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662492.950452340] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662494.869174710] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662496.774478539] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662497.866040607] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662499.764270198] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662500.697299174] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662502.604890400] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662504.410016482] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662506.370232383] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788662507.355551707] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+
+########## python3_15976_1788669555072.log   (2026-09-05 22:49:55) ##########
+[INFO] [1788669555.239637164] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788669582.464312171] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788669591.552685070] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788669592.785703267] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -68.9 deg
+[INFO] [1788669595.887056410] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788669599.021649357] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[INFO] [1788669641.276208267] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788669642.522761520] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -69.9 deg
+[INFO] [1788669645.494545059] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788669648.626331102] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[INFO] [1788669692.040158094] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788669693.290813377] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -71.7 deg
+[INFO] [1788669696.365144473] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788669699.496891857] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[INFO] [1788669752.368887543] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788669753.571301948] [aruco_lidar_approach_server]: Normal fijada por LIDAR (coherencia 1.00). Rumbo perpendicular = -72.9 deg
+[INFO] [1788669756.491503315] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[WARN] [1788669759.618597591] [aruco_lidar_approach_server]: Marcador perdido 3.0 s. Volviendo a buscar.
+[WARN] [1788670150.963340414] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'min_lateral_speed')
+[WARN] [1788670191.740615159] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'min_lateral_speed')
+
+########## 2026-09-05-22-39-14-735576-AlexPC-15940/launch.log   (2026-09-05 22:54:25) ##########
+1788669554.7376142 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-22-39-14-735576-AlexPC-15940
+1788669554.7377582 [INFO] [launch]: Default logging verbosity is set to INFO
+1788669554.7879763 [INFO] [aruco_detector_node-1]: process started with pid [15974]
+1788669554.7881377 [INFO] [aruco_lidar_approach_server-2]: process started with pid [15976]
+1788669554.7882893 [INFO] [foxglove_bridge-3]: process started with pid [15978]
+1788669555.1668980 [ERROR] [foxglove_bridge-3]: process has died [pid 15978, exit code -6, cmd '/opt/ros/humble/lib/foxglove_bridge/foxglove_bridge --ros-args -r __node:=foxglove_bridge --params-file /tmp/launch_params_70xlxrzi'].
+1788670465.5028334 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788670465.7820339 [INFO] [aruco_lidar_approach_server-2]: process has finished cleanly [pid 15976]
+1788670465.8330739 [ERROR] [aruco_detector_node-1]: process has died [pid 15974, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_zrbc364o'].
+
+########## 2026-09-05-23-14-20-776721-AlexPC-18464/launch.log   (2026-09-05 23:14:20) ##########
+1788671660.7784555 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-23-14-20-776721-AlexPC-18464
+1788671660.7786424 [INFO] [launch]: Default logging verbosity is set to INFO
+1788671660.8410158 [INFO] [aruco_detector_node-1]: process started with pid [18498]
+1788671660.8413639 [INFO] [aruco_lidar_approach_server-2]: process started with pid [18500]
+1788671660.8414919 [INFO] [foxglove_bridge-3]: process started with pid [18502]
+
+########## 2026-09-05-20-32-51-604075-AlexPC-9048/launch.log   (2026-09-05 20:53:14) ##########
+1788661971.6048524 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-20-32-51-604075-AlexPC-9048
+1788661971.6049871 [INFO] [launch]: Default logging verbosity is set to INFO
+1788661971.6479545 [INFO] [aruco_detector_node-1]: process started with pid [9075]
+1788661971.6480942 [INFO] [aruco_lidar_approach_server-2]: process started with pid [9077]
+1788661971.6481776 [INFO] [foxglove_bridge-3]: process started with pid [9079]
+1788661971.9551647 [ERROR] [foxglove_bridge-3]: process has died [pid 9079, exit code -6, cmd '/opt/ros/humble/lib/foxglove_bridge/foxglove_bridge --ros-args -r __node:=foxglove_bridge --params-file /tmp/launch_params_4xtab0lq'].
+1788663194.5552456 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788663194.8378053 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 9077, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_bshwd8pn'].
+1788663194.8716631 [ERROR] [aruco_detector_node-1]: process has died [pid 9075, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_3pzv_cnx'].
+
+########## python3_12620_1788665337260.log   (2026-09-05 22:04:52) ##########
+[INFO] [1788665337.347890702] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788665342.843203333] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788666133.700476775] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788666646.211942085] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788666694.226956521] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788666782.111488960] [aruco_lidar_approach_server]: Marcador visto. Centrado + avance (sin perpendicular).
+[INFO] [1788666782.127340882] [aruco_lidar_approach_server]: Marcador visto. Centrado + avance (sin perpendicular).
+[INFO] [1788666809.277638039] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788666809.339804458] [aruco_lidar_approach_server]: Marcador visto. Centrado + avance (sin perpendicular).
+[INFO] [1788666854.441849399] [aruco_lidar_approach_server]: Lateral alignment complete. Starting LiDAR approach.
+[INFO] [1788666854.462331958] [aruco_lidar_approach_server]: Lateral alignment complete. Starting LiDAR approach.
+[INFO] [1788667033.937245776] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788667059.591190183] [aruco_lidar_approach_server]: Marcador visto. Centrado + avance (sin perpendicular).
+[INFO] [1788667065.729374027] [aruco_lidar_approach_server]: Lateral alignment complete. Starting LiDAR approach.
+[WARN] [1788667491.335608072] [aruco_lidar_approach_server]: Failed to get parameters: ('Invalid access to undeclared parameter(s)', 'lidar_front_angle_deg')
+
+########## python3_18500_1788671661245.log   (2026-09-05 23:16:11) ##########
+[INFO] [1788671661.392946134] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788671671.336924917] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788671697.027208910] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[WARN] [1788671698.212925686] [aruco_lidar_approach_server]: Normal a 99 grados de la linea de vision: el ajuste cogio otra superficie, no la del marcador. Intento 1/3
+[WARN] [1788671699.457639420] [aruco_lidar_approach_server]: Normal a 99 grados de la linea de vision: el ajuste cogio otra superficie, no la del marcador. Intento 2/3
+[WARN] [1788671700.699040391] [aruco_lidar_approach_server]: Normal a 99 grados de la linea de vision: el ajuste cogio otra superficie, no la del marcador. Intento 3/3
+[WARN] [1788671700.760877695] [aruco_lidar_approach_server]: Sin normal fiable. Aproximacion solo por centrado de camara.
+[INFO] [1788671700.873212108] [aruco_lidar_approach_server]: Sobre el eje normal del marcador. Aproximacion por lidar.
+[INFO] [1788671700.925491145] [aruco_lidar_approach_server]: Frente del robot en el frame laser_frame: -180.0 grados (deducido de la TF)
+[WARN] [1788671706.290690854] [aruco_lidar_approach_server]: Sin distancia de lidar: SECTOR_VACIO(frente=-180deg)
+[INFO] [1788671708.166916023] [aruco_lidar_approach_server]: Target reached: lidar=0.277 m, camera-distance=0.182 m
+[INFO] [1788671761.202261029] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788671765.712041186] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788671766.957103187] [aruco_lidar_approach_server]: Normal fijada por pose del ArUco (coherencia 0.96). Rumbo perpendicular = -36.4 deg
+
+########## 2026-09-05-21-12-10-465180-AlexPC-11902/launch.log   (2026-09-05 21:27:11) ##########
+1788664330.4666378 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-21-12-10-465180-AlexPC-11902
+1788664330.4668005 [INFO] [launch]: Default logging verbosity is set to INFO
+1788664330.5122747 [INFO] [aruco_detector_node-1]: process started with pid [11934]
+1788664330.5124652 [INFO] [aruco_lidar_approach_server-2]: process started with pid [11936]
+1788664330.5144045 [INFO] [foxglove_bridge-3]: process started with pid [11938]
+1788665231.1558123 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788665231.5760579 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 11936, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_6rhaq8qy'].
+1788665231.6069334 [ERROR] [aruco_detector_node-1]: process has died [pid 11934, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_415cr4tl'].
+1788665231.6752696 [INFO] [foxglove_bridge-3]: process has finished cleanly [pid 11938]
+
+########## 2026-09-05-17-00-08-720202-AlexPC-4770/launch.log   (2026-09-05 20:21:58) ##########
+1788649208.7217259 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-17-00-08-720202-AlexPC-4770
+1788649208.7218428 [INFO] [launch]: Default logging verbosity is set to INFO
+1788649208.7603192 [INFO] [aruco_detector_node-1]: process started with pid [4801]
+1788649208.7604642 [INFO] [aruco_lidar_approach_server-2]: process started with pid [4803]
+1788661317.1004832 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788661318.3137960 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 4803, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_mn4jrn6e'].
+1788661318.4226320 [ERROR] [aruco_detector_node-1]: process has died [pid 4801, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_fpbhzcgf'].
+
+########## 2026-09-05-15-35-07-710390-AlexPC-2723/launch.log   (2026-09-05 16:33:18) ##########
+1788644107.7118075 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-15-35-07-710390-AlexPC-2723
+1788644107.7119374 [INFO] [launch]: Default logging verbosity is set to INFO
+1788644107.7698243 [INFO] [aruco_detector_node-1]: process started with pid [2754]
+1788644107.7699533 [INFO] [aruco_lidar_approach_server-2]: process started with pid [2756]
+1788647598.5596347 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788647598.8373909 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 2756, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_4tqmjr14'].
+1788647598.9162741 [ERROR] [aruco_detector_node-1]: process has died [pid 2754, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_ubu39f_n'].
+
+########## 2026-09-05-21-02-46-793505-AlexPC-11085/launch.log   (2026-09-05 21:12:07) ##########
+1788663766.7951837 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-21-02-46-793505-AlexPC-11085
+1788663766.7953155 [INFO] [launch]: Default logging verbosity is set to INFO
+1788663766.8280647 [INFO] [aruco_detector_node-1]: process started with pid [11118]
+1788663766.8282347 [INFO] [aruco_lidar_approach_server-2]: process started with pid [11120]
+1788664327.4566565 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788664327.7223279 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 11120, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_ejhhuqw4'].
+1788664327.7398057 [ERROR] [aruco_detector_node-1]: process has died [pid 11118, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_k3vtbdop'].
+
+########## 2026-09-05-20-54-10-572706-AlexPC-10588/launch.log   (2026-09-05 20:57:47) ##########
+1788663250.5772252 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-20-54-10-572706-AlexPC-10588
+1788663250.5774031 [INFO] [launch]: Default logging verbosity is set to INFO
+1788663250.6203592 [INFO] [aruco_detector_node-1]: process started with pid [10619]
+1788663250.6207883 [INFO] [aruco_lidar_approach_server-2]: process started with pid [10621]
+1788663467.0010226 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788663467.2580769 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 10621, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_u4tp4t_o'].
+1788663467.2722199 [ERROR] [aruco_detector_node-1]: process has died [pid 10619, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_eie2conv'].
+
+########## 2026-09-05-20-59-05-455220-AlexPC-10906/launch.log   (2026-09-05 21:00:04) ##########
+1788663545.4566352 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-20-59-05-455220-AlexPC-10906
+1788663545.4567730 [INFO] [launch]: Default logging verbosity is set to INFO
+1788663545.5020516 [INFO] [aruco_detector_node-1]: process started with pid [10937]
+1788663545.5024028 [INFO] [aruco_lidar_approach_server-2]: process started with pid [10939]
+1788663603.9297826 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788663604.2089882 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 10939, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_i91rxivx'].
+1788663604.2453539 [ERROR] [aruco_detector_node-1]: process has died [pid 10937, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_u9mx08i3'].
+
+########## 2026-09-05-22-54-48-479709-AlexPC-16810/launch.log   (2026-09-05 23:13:23) ##########
+1788670488.4849751 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-22-54-48-479709-AlexPC-16810
+1788670488.4852083 [INFO] [launch]: Default logging verbosity is set to INFO
+1788670488.5528867 [INFO] [aruco_detector_node-1]: process started with pid [16844]
+1788670488.5532095 [INFO] [aruco_lidar_approach_server-2]: process started with pid [16846]
+1788670488.5533721 [INFO] [foxglove_bridge-3]: process started with pid [16848]
+1788671602.9533675 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788671603.6098256 [INFO] [aruco_lidar_approach_server-2]: process has finished cleanly [pid 16846]
+1788671603.6635437 [INFO] [foxglove_bridge-3]: process has finished cleanly [pid 16848]
+1788671603.6718030 [ERROR] [aruco_detector_node-1]: process has died [pid 16844, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_adh6_42s'].
+
+########## 2026-09-05-18-07-07-264280-AlexPC-6324/launch.log   (2026-09-05 20:22:20) ##########
+1788653227.2656031 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-18-07-07-264280-AlexPC-6324
+1788653227.2657461 [INFO] [launch]: Default logging verbosity is set to INFO
+1788653227.3150203 [INFO] [aruco_detector_node-1]: process started with pid [6356]
+1788653227.3154109 [INFO] [aruco_lidar_approach_server-2]: process started with pid [6358]
+1788653227.3155730 [INFO] [foxglove_bridge-3]: process started with pid [6360]
+1788653227.5582275 [ERROR] [foxglove_bridge-3]: process has died [pid 6360, exit code -6, cmd '/opt/ros/humble/lib/foxglove_bridge/foxglove_bridge --ros-args -r __node:=foxglove_bridge --params-file /tmp/launch_params_shtiff08'].
+1788661339.6720088 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788661340.0041959 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 6358, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_0myzj3ky'].
+1788661340.0812557 [ERROR] [aruco_detector_node-1]: process has died [pid 6356, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_9_mmznjd'].
+
+########## 2026-09-05-20-57-52-848344-AlexPC-10823/launch.log   (2026-09-05 20:59:14) ##########
+1788663472.8498929 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-20-57-52-848344-AlexPC-10823
+1788663472.8500400 [INFO] [launch]: Default logging verbosity is set to INFO
+1788663472.8925710 [INFO] [aruco_detector_node-1]: process started with pid [10854]
+1788663472.8928614 [INFO] [aruco_lidar_approach_server-2]: process started with pid [10856]
+1788663554.1965351 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788663554.4601717 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 10856, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_xn0mixn8'].
+1788663554.5747995 [ERROR] [aruco_detector_node-1]: process has died [pid 10854, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_7hlg91wp'].
+
+########## 2026-09-05-17-43-52-799362-AlexPC-5671/launch.log   (2026-09-05 20:22:06) ##########
+1788651832.8009052 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-17-43-52-799362-AlexPC-5671
+1788651832.8010354 [INFO] [launch]: Default logging verbosity is set to INFO
+1788651832.8462164 [INFO] [aruco_detector_node-1]: process started with pid [5702]
+1788651832.8464036 [INFO] [aruco_lidar_approach_server-2]: process started with pid [5704]
+1788661325.6006784 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788661326.8229661 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 5704, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_l2db3cbc'].
+1788661326.9050670 [ERROR] [aruco_detector_node-1]: process has died [pid 5702, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_3ch3ueyo'].
+
+########## 2026-09-05-21-28-56-964770-AlexPC-12587/launch.log   (2026-09-05 22:10:39) ##########
+1788665336.9656141 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-21-28-56-964770-AlexPC-12587
+1788665336.9657435 [INFO] [launch]: Default logging verbosity is set to INFO
+1788665337.0125914 [INFO] [aruco_detector_node-1]: process started with pid [12618]
+1788665337.0127718 [INFO] [aruco_lidar_approach_server-2]: process started with pid [12620]
+1788667838.9448118 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788667839.2230756 [INFO] [aruco_lidar_approach_server-2]: process has finished cleanly [pid 12620]
+1788667839.3909636 [ERROR] [aruco_detector_node-1]: process has died [pid 12618, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_nos1kx57'].
+
+########## 2026-09-05-16-44-27-683767-AlexPC-4618/launch.log   (2026-09-05 17:00:20) ##########
+1788648267.6848881 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-16-44-27-683767-AlexPC-4618
+1788648267.6850092 [INFO] [launch]: Default logging verbosity is set to INFO
+1788648267.7385554 [INFO] [aruco_detector_node-1]: process started with pid [4649]
+1788648267.7386780 [INFO] [aruco_lidar_approach_server-2]: process started with pid [4651]
+1788649220.0570900 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788649220.3076365 [ERROR] [aruco_lidar_approach_server-2]: process has died [pid 4651, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_behaviors/lib/home_service_behaviors/aruco_lidar_approach_server --ros-args -r __node:=aruco_lidar_approach_server --params-file /tmp/launch_params_24wu6jxf'].
+1788649220.4101474 [ERROR] [aruco_detector_node-1]: process has died [pid 4649, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_okxj4gqk'].
+
+########## python3_5704_1788651833081.log   (2026-09-05 17:47:23) ##########
+[INFO] [1788651833.168754308] [aruco_lidar_approach_server]: ArUco + LiDAR geometric approach server started
+[INFO] [1788651928.826303726] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788651928.887610036] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788651929.403191032] [aruco_lidar_approach_server]: Marker normal locked. Heading=-0.117 rad
+[INFO] [1788651930.371238666] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651932.780024456] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651934.975308652] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651951.170931046] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651952.419484542] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788651955.127910238] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652020.414764068] [aruco_lidar_approach_server]: Starting target ID 4
+[INFO] [1788652020.475699009] [aruco_lidar_approach_server]: Target found. Locking marker normal.
+[INFO] [1788652021.000510171] [aruco_lidar_approach_server]: Marker normal locked. Heading=-0.359 rad
+[INFO] [1788652024.359892764] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652030.561415751] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652036.006075803] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652037.856941521] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652039.103900631] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+[INFO] [1788652041.210159685] [aruco_lidar_approach_server]: Heading aligned with marker normal.
+
+########## 2026-09-05-22-11-31-758941-AlexPC-14451/launch.log   (2026-09-05 22:39:12) ##########
+1788667891.7619922 [INFO] [launch]: All log files can be found below /home/alex/.ros/log/2026-09-05-22-11-31-758941-AlexPC-14451
+1788667891.7621694 [INFO] [launch]: Default logging verbosity is set to INFO
+1788667891.8199933 [INFO] [aruco_detector_node-1]: process started with pid [14485]
+1788667891.8201551 [INFO] [aruco_lidar_approach_server-2]: process started with pid [14487]
+1788667891.8202074 [INFO] [foxglove_bridge-3]: process started with pid [14489]
+1788667892.1773355 [ERROR] [foxglove_bridge-3]: process has died [pid 14489, exit code -6, cmd '/opt/ros/humble/lib/foxglove_bridge/foxglove_bridge --ros-args -r __node:=foxglove_bridge --params-file /tmp/launch_params_edlro6mn'].
+1788669551.9978452 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1788669552.2812772 [INFO] [aruco_lidar_approach_server-2]: process has finished cleanly [pid 14487]
+1788669552.5819180 [ERROR] [aruco_detector_node-1]: process has died [pid 14485, exit code 1, cmd '/home/alex/myagv_home_service_ws/install/home_service_perception/lib/home_service_perception/aruco_detector_node --ros-args -r __node:=aruco_detector --params-file /tmp/launch_params_jc783k4x'].
+

@@ -31,6 +31,23 @@
 #
 #      # imprimir los exports para usar ros2 a mano en otra terminal
 #      eval "$(ROBOT_IP=... LAPTOP_IP=... ./scripts/tsummit_offboard.sh env)"
+#
+#      # 3. aproximacion a un ArUco (MUEVE EL ROBOT)
+#      ALLOW_MOTION=1 ROBOT_IP=... LAPTOP_IP=... \
+#          ./scripts/tsummit_offboard.sh approach 4 0.20
+#
+#      # solo el puente Foxglove (la pila ya corre en otra terminal)
+#      ROBOT_IP=... LAPTOP_IP=... ./scripts/tsummit_offboard.sh viz
+#
+#  FOXGLOVE
+#    El puente corre AQUI, no en la Jetson: en la Nano se comia CPU
+#    serializando cada topic a CBOR, y mirar /aruco/image_annotated
+#    mandaba un frame crudo de vuelta a la Jetson solo para
+#    re-serializarlo. Local no cuesta casi nada. 'run' lo levanta salvo
+#    FOXGLOVE=0. Conecta la app (Windows) a  ws://<LAPTOP_IP>:8765  o
+#    ws://localhost:8765. En distribuido NO existe /camera/image_raw
+#    (cruda): en el panel usa /camera/image_raw/compressed  o
+#    /aruco/image_annotated (con recuadro).
 # =====================================================================
 set -euo pipefail
 
@@ -53,6 +70,9 @@ if [ -n "${ROS_DOMAIN_ID:-}" ] \
 fi
 ROS_DOMAIN_ID="${ROBOT_DOMAIN_ID}"
 RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+
+# Puente Foxglove. FOXGLOVE=0 lo desactiva en 'run'.
+FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
 
 # IPs en la red 5 GHz. Sin esto no hay descubrimiento fiable.
 ROBOT_IP="${ROBOT_IP:-}"
@@ -157,12 +177,15 @@ bundle() {
     tar czf "${out}" -C "${ROOT}" \
         --exclude='__pycache__' --exclude='*.pyc' \
         $(for p in ${pkgs}; do printf 'src/%s ' "${p}"; done) \
-        scripts/tsummit_offboard.sh
+        scripts/tsummit_offboard.sh \
+        scripts/aruco_normal_report.py \
+        docs/HANDOFF_OFFBOARD.md
 
     say "Paquete listo: ${out}"
     cat <<EOF
 Contiene: ${pkgs}
           scripts/tsummit_offboard.sh
+          docs/HANDOFF_OFFBOARD.md  <- LEELO, o pasaselo a una sesion nueva
 
 En el PORTATIL:
     mkdir -p ~/tsummit_ws && cd ~/tsummit_ws
@@ -297,7 +320,125 @@ run() {
     CYCLONEDDS_URI="$(dds_uri | tr -d '\n')"
     export CYCLONEDDS_URI
 
-    exec ros2 launch home_service_behaviors offboard.launch.py "$@"
+    local args=("$@")
+    if [ "${FOXGLOVE:-1}" = "1" ]; then
+        if ! ros2 pkg prefix foxglove_bridge >/dev/null 2>&1; then
+            printf 'AVISO: foxglove_bridge no instalado; sigo sin el.\n' >&2
+            printf '       sudo apt install ros-%s-foxglove-bridge\n' \
+                "${ROS_DISTRO_USED}" >&2
+        elif ros2 launch home_service_behaviors offboard.launch.py --show-args \
+                2>/dev/null | grep -q 'start_foxglove'; then
+            args+=("start_foxglove:=true" "foxglove_port:=${FOXGLOVE_PORT}")
+            say "Foxglove LOCAL: ws://${LAPTOP_IP}:${FOXGLOVE_PORT}  (o ws://localhost:${FOXGLOVE_PORT})"
+        else
+            printf 'AVISO: offboard.launch.py sin arg start_foxglove; arranca el\n' >&2
+            printf '       puente aparte con:  %s viz\n' "$0" >&2
+        fi
+    fi
+
+    exec ros2 launch home_service_behaviors offboard.launch.py "${args[@]}"
+}
+
+# Informe de calidad de la normal de un ArUco: dice si la alineacion
+# perpendicular es viable con esta camara y este marcador, o si su rumbo
+# es ruido. No mueve el robot. Requiere el marcador a la vista y 'run'
+# corriendo en otra terminal.
+analyze() {
+    local marker_id="${1:-4}"
+    local seconds="${2:-12}"
+
+    require_ips
+    set +u
+    # shellcheck disable=SC1090,SC1091
+    source "/opt/ros/${ROS_DISTRO_USED}/setup.bash"
+    # shellcheck disable=SC1090,SC1091
+    [ -f "${ROOT}/install/setup.bash" ] && source "${ROOT}/install/setup.bash"
+    set -u
+
+    export ROS_DOMAIN_ID RMW_IMPLEMENTATION
+    CYCLONEDDS_URI="$(dds_uri | tr -d '\n')"; export CYCLONEDDS_URI
+
+    exec python3 "${ROOT}/scripts/aruco_normal_report.py" \
+        "${marker_id}" "${seconds}"
+}
+
+# Solo el puente Foxglove, para cuando la pila ya corre en otra terminal.
+# Lanza el nodo directamente (no via offboard.launch.py): asi funciona
+# aunque el workspace no este compilado y aunque el launch no traiga el
+# arg start_foxglove.
+viz() {
+    require_ips
+    [ -f "/opt/ros/${ROS_DISTRO_USED}/setup.bash" ] \
+        || die "no existe /opt/ros/${ROS_DISTRO_USED}"
+
+    set +u
+    # shellcheck disable=SC1090,SC1091
+    source "/opt/ros/${ROS_DISTRO_USED}/setup.bash"
+    # shellcheck disable=SC1090,SC1091
+    [ -f "${ROOT}/install/setup.bash" ] && source "${ROOT}/install/setup.bash"
+    set -u
+
+    export ROS_DOMAIN_ID RMW_IMPLEMENTATION
+    CYCLONEDDS_URI="$(dds_uri | tr -d '\n')"
+    export CYCLONEDDS_URI
+
+    ros2 pkg prefix foxglove_bridge >/dev/null 2>&1 \
+        || die "instala foxglove_bridge: sudo apt install ros-${ROS_DISTRO_USED}-foxglove-bridge"
+
+    say "Foxglove LOCAL: ws://${LAPTOP_IP}:${FOXGLOVE_PORT}  (o ws://localhost:${FOXGLOVE_PORT})"
+    printf 'Panel de imagen: /camera/image_raw/compressed  o  /aruco/image_annotated\n'
+    printf '(en distribuido /camera/image_raw cruda NO existe).\n'
+
+    exec ros2 run foxglove_bridge foxglove_bridge --ros-args \
+        -p "port:=${FOXGLOVE_PORT}" -p address:=0.0.0.0 -p use_compression:=false
+}
+
+
+# ---------------------------------------------------------------------
+# approach: manda el goal de aproximacion DESDE EL PORTATIL.
+#
+# Aqui el servidor de aproximacion es local, asi que el goal no cruza la
+# red: solo la cruzan las imagenes (hacia aca) y /cmd_vel (hacia alla).
+# Lanzarlo desde la Jetson exige DISTRIBUTED=1 o el goal sale por
+# loopback y no encuentra al servidor, sin ningun error.
+#
+# MUEVE EL ROBOT. Exige ALLOW_MOTION=1 en cada llamada.
+# ---------------------------------------------------------------------
+approach() {
+    local marker_id="${1:?uso: approach <id_aruco> [stop_distance_m] [timeout_s]}"
+    local stop_dist="${2:-0.20}"
+    # 40 s no daban ni para una vuelta de busqueda paso-y-mira: cada
+    # paso son ~1.15 s y hacen falta bastantes para barrer 360 grados.
+    local timeout_s="${3:-${APPROACH_TIMEOUT:-180.0}}"
+
+    if [ "${ALLOW_MOTION:-0}" != "1" ]; then
+        printf 'ESTO MUEVE EL ROBOT.\n'
+        printf 'Despeja el paso, asegurate de que las ruedas tocan el\n'
+        printf 'suelo y de que puedes cortarlo, y repite con:\n'
+        printf '    ALLOW_MOTION=1 %s approach %s %s\n' \
+            "$0" "${marker_id}" "${stop_dist}"
+        exit 1
+    fi
+
+    require_ips
+    set +u
+    source "/opt/ros/${ROS_DISTRO_USED}/setup.bash"
+    [ -f "${ROOT}/install/setup.bash" ] && source "${ROOT}/install/setup.bash"
+    set -u
+    export ROS_DOMAIN_ID RMW_IMPLEMENTATION
+    CYCLONEDDS_URI="$(dds_uri | tr -d '\n')"; export CYCLONEDDS_URI
+
+    if ! timeout 15 ros2 action list 2>/dev/null | grep -q '/aruco_lidar_approach'; then
+        printf 'ERROR: /aruco_lidar_approach no aparece.\n'
+        printf '       Arranca antes el procesamiento:  %s run\n' "$0"
+        exit 1
+    fi
+
+    say "Goal de aproximacion (id=${marker_id}, parada=${stop_dist} m, timeout=${timeout_s} s)"
+    ros2 action send_goal /aruco_lidar_approach \
+        home_service_interfaces/action/ArucoApproach \
+        "{target_id: ${marker_id}, stop_distance: ${stop_dist}, timeout_sec: ${timeout_s}}" \
+        --feedback
 }
 
 case "${1:-help}" in
@@ -305,8 +446,11 @@ case "${1:-help}" in
     bundle) shift; bundle "${1:-/tmp/tsummit_offboard.tar.gz}" ;;
     run)    shift; run "$@" ;;
     env)    print_env ;;
+    approach) shift; approach "$@" ;;
+    viz)    viz ;;
+    analyze) shift; analyze "$@" ;;
     help|-h|--help)
-        sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         ;;
-    *) die "comando desconocido: $1  (check | run | bundle | env | help)" ;;
+    *) die "comando desconocido: $1  (check | run | viz | analyze | approach | bundle | env | help)" ;;
 esac

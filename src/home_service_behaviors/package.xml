@@ -17,6 +17,10 @@
        en este mismo paquete-launch cuando el procesamiento va fuera
        del robot. -->
   <exec_depend>home_service_perception</exec_depend>
+  <!-- offboard.launch.py con start_foxglove:=true levanta el puente
+       Foxglove en el portatil. Opcional: nodo condicionado, off por
+       defecto. -->
+  <exec_depend>foxglove_bridge</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
