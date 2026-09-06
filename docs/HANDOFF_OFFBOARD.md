@@ -659,3 +659,53 @@ divergen se dispara, y son ajustables desde el launch:
 
 Un suelo 3.4 veces mas alto del pedido es exactamente el tiron que bajar
 los minimos pretende evitar. Cubierto por tres pruebas.
+
+---
+
+## DECISION: el procesamiento va en el portatil (2026-09-06)
+
+Acordado explicitamente entre las dos sesiones que trabajaban sobre este
+arbol. Se escribe aqui porque es el tipo de reparto que la siguiente
+sesion "optimiza" sin saber por que existe -- y ya se rompio una vez.
+
+### El reparto
+
+| maquina | que corre |
+|---|---|
+| **Portatil** | detector ArUco **y** servidor de aproximacion |
+| **Jetson** | drivers: base, LiDAR, camara, `robot_state_publisher`, `twist_mux` |
+
+### Las reglas
+
+1. **El procesamiento va en el portatil**, en modo distribuido. Los dos:
+   detector y servidor.
+
+2. **Nadie mueve ese reparto sin decirselo al otro.** Se rompio el
+   2026-09-06 metiendo los dos en la Jetson para esquivar un corte de red
+   (el DHCP movio la subred de `10.24.15.x` a `10.53.98.x` y el portatil
+   quedo inalcanzable). El resultado, medido: `load` de 12-21 en 4
+   nucleos, 500 MB en swap, y la pila ROS cayendose sola a los minutos.
+
+3. **El que no cabe es el DETECTOR**, que come ~1.6 nucleos. Esa es la
+   razon de ser del modo distribuido. Con solo drivers la Jetson esta en
+   `load` ~3, asi que **servidor + drivers en la Jetson cabe de sobra**.
+   La regla no es "no metas nada en la Jetson".
+
+4. **La unica variante contemplada**, y solo si la perpendicularidad de
+   llegada no basta para el agarre: **servidor en la Jetson (con
+   `taskset`) y detector en el portatil**. Nunca los dos en la misma
+   maquina. Hablarlo antes de probarla.
+
+5. **El coste esta aceptado, no es un descuido.** Tener el servidor en el
+   portatil son ~200 ms de retardo, que con el suelo de giro de la base
+   (0.37 rad/s, medido) obligan a `heading_tolerance` 0.15, o sea 8.6
+   grados de perpendicularidad. El invariante de `a060ba6` lo comprueba
+   al arrancar el nodo. Si algun dia esos 8.6 grados no bastan, la salida
+   es el punto 4, no volver a juntarlo todo.
+
+### Por que el punto 3 esta redactado asi
+
+Con la regla escrita como "el procesamiento va fuera de la Jetson" a
+secas, cualquiera descarta la variante del punto 4, que es justamente la
+buena si hace falta bajar el retardo. El numero importa: **drivers ~3,
+detector +1.6 y ahi es donde revienta.**
