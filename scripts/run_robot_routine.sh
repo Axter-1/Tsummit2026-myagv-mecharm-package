@@ -114,9 +114,45 @@ require_container() {
     fi
 }
 
+# rm de guardia: borra el log ANTES de arrancar el nodo que lo escribe.
+#
+# Por que existe. El 2026-09-06 la placa de la base entro en su bucle de
+# "if you want restore run, pls input 1, then press enter" y
+# myagv_odometry_node lo escupio 63 millones de veces: 1.97 GB en media
+# hora, con la tarjeta al 94% de partida. Ese mensaje no esta limitado en
+# ritmo, asi que escribe tan rapido como el disco aguante. Llenar la SD en
+# mitad de un reto tumba la Jetson entera.
+#
+# Avisa del tamaño al borrar, porque un log gigante del arranque anterior
+# es la unica pista de que la placa se desbocó: el nodo dice "myAGV
+# initialized successful" igual, y reiniciarlo lo arregla, asi que sin
+# este aviso el incidente pasa desapercibido.
+#
+# OJO: esto protege entre arranques, NO durante uno. Un desbocamiento
+# dentro de la misma sesion crece sin freno igual.
+guard_log() {
+    local log="$1"
+
+    local bytes
+    bytes="$("${DOCKER[@]}" exec "${CONTAINER}" \
+        stat -c %s "${log}" 2>/dev/null || echo 0)"
+
+    if [ "${bytes:-0}" -gt 104857600 ]; then
+        printf 'AVISO: %s ocupaba %s MB del arranque anterior.\n' \
+            "${log}" "$(( bytes / 1048576 ))" >&2
+        printf '       Un log asi es sintoma de un nodo desbocado (la placa\n' >&2
+        printf '       de la base lo hace al perder el puerto serie). Se borra.\n' >&2
+    fi
+
+    "${DOCKER[@]}" exec "${CONTAINER}" rm -f "${log}" 2>/dev/null || true
+}
+
 run_bg() {
     local name="$1"
     local command="$2"
+
+    guard_log "${LOG_DIR}/${name}.log"
+
     "${DOCKER[@]}" exec -d -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" bash -lc \
         "mkdir -p '${LOG_DIR}'; ${source_env}; ${command} >'${LOG_DIR}/${name}.log' 2>&1"
     printf '%s iniciado. Log: %s/%s.log\n' "${name}" "${LOG_DIR}" "${name}"
@@ -460,6 +496,7 @@ run_gui() {
     # corruptos en el mapa.
     local name="$1" command="$2"
     cpu_budget
+    guard_log "${LOG_DIR}/${name}.log"
     xhost "+SI:localuser:root" >/dev/null 2>&1 || true
     "${DOCKER[@]}" exec -d \
         -e "DISPLAY=${VIZ_DISPLAY}" \
