@@ -92,9 +92,34 @@ class TargetEstimate:
     justo donde cae un marcador visto de frente segun como quede odom.
     """
 
-    def __init__(self, alpha_position=0.35, alpha_normal=0.25):
+    def __init__(
+        self,
+        alpha_position=0.35,
+        alpha_normal=0.25,
+        max_normal_jump=None,
+        gate_after=5,
+        relock_after=12,
+    ):
         self.alpha_position = alpha_position
         self.alpha_normal = alpha_normal
+
+        # Rechazo de valores atipicos en la normal. La pose de un ArUco
+        # plano es AMBIGUA: para un marcador visto casi de frente hay
+        # dos soluciones simetricas respecto a la linea de vision, y el
+        # estimador de OpenCV salta entre ellas de un fotograma a otro.
+        # Su eje Z -- la normal -- salta con ellas, el rumbo objetivo
+        # salta detras, y el robot gira a izquierda y derecha
+        # intermitentemente persiguiendolo. Corregir el signo no basta:
+        # las dos soluciones apuntan hacia el robot.
+        self.max_normal_jump = max_normal_jump
+
+        # No se filtra desde la primera muestra: hasta tener unas
+        # cuantas, la estimacion es tan provisional como lo que llega.
+        self.gate_after = gate_after
+
+        # Si se rechaza demasiado seguido, la equivocada es la
+        # estimacion. Se reinicia en vez de atrincherarse en el error.
+        self.relock_after = relock_after
 
         self.x = None
         self.y = None
@@ -102,6 +127,8 @@ class TargetEstimate:
         self.ny = None
 
         self.samples = 0
+        self.rejected = 0
+        self.consecutive_rejected = 0
         self.last_update_ns = None
 
     @property
@@ -122,6 +149,37 @@ class TargetEstimate:
 
         nx /= norm
         ny /= norm
+
+        if (
+            self.ready and
+            self.max_normal_jump is not None and
+            self.samples >= self.gate_after
+        ):
+
+            dot = clamp(self.nx * nx + self.ny * ny, -1.0, 1.0)
+
+            if math.acos(dot) > self.max_normal_jump:
+
+                self.rejected += 1
+                self.consecutive_rejected += 1
+
+                # Rechazar sin fin significaria que la equivocada es la
+                # estimacion, no las muestras. Reengancharse a la nueva
+                # es mejor que atrincherarse en la vieja.
+                if self.consecutive_rejected >= self.relock_after:
+                    self.x, self.y = float(x), float(y)
+                    self.nx, self.ny = nx, ny
+                    self.samples = 1
+                    self.consecutive_rejected = 0
+
+                    if stamp_ns is not None:
+                        self.last_update_ns = stamp_ns
+
+                    return True
+
+                return False
+
+        self.consecutive_rejected = 0
 
         if not self.ready:
             self.x, self.y = float(x), float(y)
@@ -439,6 +497,7 @@ def holonomic_command(
     target_yaw,
     remaining,
     limits,
+    yaw_settled=False,
 ):
     """Velocidades en el marco del ROBOT hacia el carrot.
 
@@ -504,7 +563,30 @@ def holonomic_command(
 
     yaw_error = normalize_angle(target_yaw - ryaw)
 
-    if abs(yaw_error) <= limits['yaw_tolerance']:
+    # Histeresis (disparador Schmitt) en el giro.
+    #
+    # Sin ella el giro castañea: la zona muerta obliga a mandar
+    # min_angular en cuanto se sale de tolerancia, ese minimo se pasa
+    # de largo, y al ciclo siguiente hay que corregir al otro lado. El
+    # robot gira a izquierda y derecha sin asentarse nunca.
+    #
+    # Con dos umbrales: se ENTRA en asentado con la tolerancia fina, y
+    # solo se SALE si el error supera un umbral bastante mayor. Entre
+    # los dos no se manda nada, que es justo lo que hay que hacer
+    # cuando el error es menor que el escalon minimo que sabes dar.
+    release = (
+        limits['yaw_tolerance'] *
+        limits.get('yaw_hysteresis', 2.5)
+    )
+
+    if yaw_settled:
+        if abs(yaw_error) > release:
+            yaw_settled = False
+
+    elif abs(yaw_error) <= limits['yaw_tolerance']:
+        yaw_settled = True
+
+    if yaw_settled:
         wz = 0.0
     else:
         wz = clamp(
@@ -515,7 +597,7 @@ def holonomic_command(
 
         wz = apply_deadband(wz, limits['min_angular'])
 
-    return vx, vy, wz, yaw_error, reached
+    return vx, vy, wz, yaw_error, reached, yaw_settled
 
 
 # ---------------------------------------------------------------------

@@ -206,7 +206,7 @@ class ArucoLidarApproachServer(Node):
 
         self.declare_parameter(
             'max_heading_speed',
-            0.30
+            0.90
         )
 
         # Velocidad angular minima EFECTIVA. Por debajo de esto los
@@ -216,7 +216,7 @@ class ArucoLidarApproachServer(Node):
         # otro lado). Cualquier wz no nulo se eleva a este valor.
         self.declare_parameter(
             'min_heading_speed',
-            0.12
+            0.25
         )
 
         # 0.02 rad = 1.15 grados era inalcanzable: en ese borde wz vale
@@ -224,7 +224,7 @@ class ArucoLidarApproachServer(Node):
         # grados sobra para una aproximacion perpendicular.
         self.declare_parameter(
             'heading_tolerance',
-            0.12
+            0.08
         )
 
         # 0.05 rad = 2.9 grados: el desplazamiento lateral en mecanum
@@ -246,7 +246,7 @@ class ArucoLidarApproachServer(Node):
 
         self.declare_parameter(
             'max_lateral_speed',
-            0.06
+            0.20
         )
 
         # Zona muerta lateral. Desplazarse de lado en mecanum exige MAS
@@ -256,7 +256,7 @@ class ArucoLidarApproachServer(Node):
         # ciclo limite de tirones que tenia el rumbo.
         self.declare_parameter(
             'min_lateral_speed',
-            0.035
+            0.13
         )
 
         self.declare_parameter(
@@ -293,7 +293,7 @@ class ArucoLidarApproachServer(Node):
 
         self.declare_parameter(
             'max_linear_speed',
-            0.08
+            0.22
         )
 
         # Zona muerta hacia delante, hermana de min_lateral_speed.
@@ -301,7 +301,7 @@ class ArucoLidarApproachServer(Node):
         # llegar a cumplir la condicion de parada.
         self.declare_parameter(
             'min_linear_speed',
-            0.05
+            0.12
         )
 
         # 0.01 m no es alcanzable con la latencia de la tuberia
@@ -498,6 +498,26 @@ class ArucoLidarApproachServer(Node):
         self.declare_parameter(
             'estimate_max_age',
             3.0
+        )
+
+        # Histeresis del giro. La tolerancia fina hace de umbral de
+        # ENTRADA en asentado, y esta por el de SALIDA. Sin los dos
+        # umbrales el giro castañea: la zona muerta obliga a mandar el
+        # minimo en cuanto se sale de tolerancia, ese minimo se pasa de
+        # largo, y al ciclo siguiente hay que corregir al otro lado.
+        self.declare_parameter(
+            'yaw_hysteresis',
+            1.5
+        )
+
+        # Salto maximo admisible en la normal entre muestras. La pose de
+        # un ArUco plano es AMBIGUA: hay dos soluciones simetricas
+        # respecto a la linea de vision y OpenCV salta entre ellas de un
+        # fotograma a otro, con lo que la normal salta y el robot gira a
+        # izquierda y derecha persiguiendola.
+        self.declare_parameter(
+            'max_normal_jump_deg',
+            35.0
         )
 
         # Parada de seguridad por LiDAR frontal.
@@ -1664,6 +1684,9 @@ class ArucoLidarApproachServer(Node):
             alpha_normal=self.pf(
                 'estimate_alpha_normal'
             ),
+            max_normal_jump=math.radians(
+                self.pf('max_normal_jump_deg')
+            ),
         )
 
         use_lidar = bool(
@@ -1685,6 +1708,7 @@ class ArucoLidarApproachServer(Node):
 
         last_detection_ns = None
         stale_warned = False
+        yaw_settled = False
 
         final_distance = -1.0
         center_error = 0.0
@@ -1969,15 +1993,17 @@ class ArucoLidarApproachServer(Node):
                 'accel': self.pf('linear_accel'),
                 'distance_tolerance': self.pf('distance_tolerance'),
                 'yaw_tolerance': yaw_tolerance,
+                'yaw_hysteresis': self.pf('yaw_hysteresis'),
             }
 
-            vx, vy, wz, yaw_error, reached = (
+            vx, vy, wz, yaw_error, reached, yaw_settled = (
                 planner.holonomic_command(
                     rx, ry, ryaw,
                     carrot_xy,
                     target_yaw,
                     remaining,
                     limits,
+                    yaw_settled=yaw_settled,
                 )
             )
 
@@ -1998,7 +2024,14 @@ class ArucoLidarApproachServer(Node):
             else:
                 final_distance = along
 
-            aligned = abs(yaw_error) <= yaw_tolerance
+            # Coherente con la histeresis, a proposito. Exigir la
+            # tolerancia FINA aqui produce bloqueo: el robot se asienta
+            # dentro de ella, avanza, el rumbo objetivo deriva unos
+            # grados, y como sigue asentado ya no corrige -- pero la
+            # llegada nunca se declara. La precision alcanzable es la
+            # banda de la histeresis, no la de entrada; decir otra cosa
+            # seria mentir sobre lo que el robot sabe hacer.
+            aligned = yaw_settled or abs(yaw_error) <= yaw_tolerance
 
             centred = abs(lateral) <= self.pf('lateral_tolerance')
 

@@ -41,6 +41,7 @@ LIMITS = {
     'accel': 0.25,
     'distance_tolerance': 0.03,
     'yaw_tolerance': math.radians(4.0),
+    'yaw_hysteresis': 1.5,
 }
 
 
@@ -202,7 +203,7 @@ def test_el_promedio_NO_diluye_un_sesgo_sistematico():
 
 def test_mueve_los_tres_ejes_a_la_vez():
     """Sobre una base mecanum no hay que corregir un eje cada vez."""
-    vx, vy, wz, _, _ = holonomic_command(
+    vx, vy, wz, _, _, _ = holonomic_command(
         0.0, 0.0, 0.0,
         (1.0, 1.0),
         math.radians(45),
@@ -259,6 +260,7 @@ def _simulate(marker, normal_yaw, start, seed):
     est = TargetEstimate(alpha_position=0.20, alpha_normal=0.10)
 
     history = []
+    settled = False
     t = 0.0
 
     while t < 60.0:
@@ -287,11 +289,12 @@ def _simulate(marker, normal_yaw, start, seed):
         tyaw = desired_heading(rx, ry, ex, ey, enx, eny,
                                remaining, standoff * 2.0)
 
-        vx, vy, wz, yaw_err, reached = holonomic_command(
-            rx, ry, ryaw, cxy, tyaw, remaining, LIMITS
+        vx, vy, wz, yaw_err, reached, settled = holonomic_command(
+            rx, ry, ryaw, cxy, tyaw, remaining, LIMITS,
+            yaw_settled=settled,
         )
 
-        if reached and abs(yaw_err) <= LIMITS['yaw_tolerance']:
+        if reached and settled:
             break
 
         vx = vx if abs(vx) >= deadband_lin else 0.0
@@ -332,3 +335,164 @@ def test_converge_en_escenarios_dificiles():
             assert err_d <= 0.06, (marker, seed, err_d)
             assert err_y <= math.radians(8.0), (marker, seed, err_y)
             assert t < 30.0, (marker, seed, t)
+
+
+# ---------------------------------------------------------------------
+# Los dos fallos vistos en pista
+# ---------------------------------------------------------------------
+
+def test_histeresis_corta_el_casta_eo_del_giro():
+    """El robot giraba a izquierda y derecha sin asentarse.
+
+    Con un solo umbral, la zona muerta obliga a mandar min_angular en
+    cuanto se sale de tolerancia; ese minimo se pasa de largo y al
+    ciclo siguiente hay que corregir al otro lado. Ciclo limite.
+
+    Con histeresis, una vez dentro de la tolerancia fina no se vuelve a
+    mandar giro hasta superar el umbral GRANDE.
+    """
+    limits = dict(LIMITS)
+    limits['yaw_hysteresis'] = 2.5
+
+    # dentro de tolerancia: se asienta
+    _, _, wz, _, _, settled = holonomic_command(
+        0.0, 0.0, 0.0, (1.0, 0.0),
+        math.radians(2.0), 1.0, limits,
+    )
+
+    assert settled
+    assert wz == 0.0
+
+    # error mayor que la tolerancia pero menor que el de salida:
+    # SIGUE asentado, no manda nada. Aqui es donde castañeaba.
+    _, _, wz, _, _, settled = holonomic_command(
+        0.0, 0.0, 0.0, (1.0, 0.0),
+        math.radians(7.0), 1.0, limits,
+        yaw_settled=settled,
+    )
+
+    assert settled
+    assert wz == 0.0
+
+    # error grande de verdad: vuelve a engancharse
+    _, _, wz, _, _, settled = holonomic_command(
+        0.0, 0.0, 0.0, (1.0, 0.0),
+        math.radians(25.0), 1.0, limits,
+        yaw_settled=settled,
+    )
+
+    assert not settled
+    assert abs(wz) >= limits['min_angular']
+
+
+def test_sin_histeresis_hay_ciclo_limite():
+    """El caso que distingue: la DERIVA despues de asentarse.
+
+    Mientras el robot avanza, el rumbo objetivo se mueve unos grados.
+    Con un umbral unico eso basta para volver a mandar giro, y como la
+    zona muerta obliga a mandar min_angular, se pasa de largo y hay que
+    corregir al otro lado: castañeo. Con dos umbrales el robot se queda
+    callado mientras la deriva no salga de la banda.
+    """
+    def tras_derivar(hysteresis, deriva_deg):
+        limits = dict(LIMITS)
+        limits['yaw_hysteresis'] = hysteresis
+
+        # entra en tolerancia y se asienta
+        *_, settled = holonomic_command(
+            0.0, 0.0, 0.0, (1.0, 0.0),
+            math.radians(2.0), 1.0, limits,
+        )
+
+        assert settled
+
+        # el rumbo objetivo deriva
+        _, _, wz, _, _, settled = holonomic_command(
+            0.0, 0.0, 0.0, (1.0, 0.0),
+            math.radians(deriva_deg), 1.0, limits,
+            yaw_settled=settled,
+        )
+
+        return wz, settled
+
+    # Umbral unico (hysteresis 1.0): 6 grados ya lo despierta.
+    wz, settled = tras_derivar(1.0, 6.0)
+
+    assert wz != 0.0
+    assert not settled
+
+    # Con histeresis 1.5 la banda de salida son 6 grados: aguanta.
+    wz, settled = tras_derivar(1.5, 5.0)
+
+    assert wz == 0.0
+    assert settled
+
+    # Pero una deriva de verdad SI lo despierta: no es sordera.
+    wz, settled = tras_derivar(1.5, 20.0)
+
+    assert wz != 0.0
+    assert not settled
+
+
+def test_filtro_rechaza_el_salto_de_ambiguedad_del_aruco():
+    """La pose de un ArUco plano salta entre dos soluciones.
+
+    Sin filtro, esos saltos entran en la media, el rumbo objetivo se
+    mueve con ellos y el robot los persigue a izquierda y derecha.
+    """
+    est = TargetEstimate(
+        alpha_position=0.20,
+        alpha_normal=0.10,
+        max_normal_jump=math.radians(35.0),
+        gate_after=3,
+        relock_after=12,
+    )
+
+    for _ in range(10):
+        est.update(1.0, 0.0, 1.0, 0.0)
+
+    antes = math.atan2(est.ny, est.nx)
+
+    # rama ambigua a 80 grados: debe rechazarse
+    aceptada = est.update(1.0, 0.0, math.cos(math.radians(80.0)),
+                          math.sin(math.radians(80.0)))
+
+    assert not aceptada
+    assert est.rejected == 1
+    assert abs(math.atan2(est.ny, est.nx) - antes) < 1e-9
+
+
+def test_el_filtro_no_se_atrinchera_en_una_estimacion_mala():
+    """Si se rechaza sin parar, la equivocada es la estimacion."""
+    est = TargetEstimate(
+        alpha_position=0.20,
+        alpha_normal=0.10,
+        max_normal_jump=math.radians(35.0),
+        gate_after=3,
+        relock_after=6,
+    )
+
+    for _ in range(10):
+        est.update(1.0, 0.0, 1.0, 0.0)
+
+    # la realidad es otra, insistentemente
+    for _ in range(20):
+        est.update(1.0, 0.0, 0.0, 1.0)
+
+    # acaba reenganchandose en vez de defender la vieja para siempre
+    assert abs(math.atan2(est.ny, est.nx) - math.pi / 2) < math.radians(20)
+
+
+def test_el_techo_de_velocidad_debe_superar_la_zona_muerta():
+    """El fallo que dejo al robot parado publicando 0.08 m/s.
+
+    Con max_linear_speed 0.08 y una zona muerta real por encima, el
+    rango ENTERO de mando cae dentro de la zona muerta: ninguna salida
+    del controlador puede mover las ruedas. Un techo que no supera
+    holgadamente al suelo es una configuracion sin margen util.
+    """
+    limits = dict(LIMITS)
+
+    assert limits['max_linear'] > limits['min_linear'] * 1.5
+    assert limits['max_lateral'] > limits['min_lateral'] * 1.5
+    assert limits['max_angular'] > limits['min_angular'] * 1.5
