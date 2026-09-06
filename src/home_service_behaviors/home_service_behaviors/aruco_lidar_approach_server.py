@@ -420,9 +420,27 @@ class ArucoLidarApproachServer(Node):
         # Banda de profundidad alrededor del punto mas cercano del
         # sector: descarta la pared del fondo y los objetos sueltos que
         # caen en el mismo angulo.
+        # Profundidad que se acepta por detras del punto mas cercano.
+        # TIENE QUE SER MENOR QUE LA SEPARACION entre el marcador y lo
+        # que haya detras, o la banda se traga las dos superficies y la
+        # SVD ajusta una recta a traves de las DOS.
+        #
+        # Medido: con el ArUco sobre una caja a 13 cm de la pared y la
+        # banda en 0.30, salian 360 avisos de 'superficie no plana' en
+        # una sola corrida, con residuos de 0.023 a 0.086 m contra un
+        # umbral de 0.02 -- justo el orden de una mezcla de dos planos
+        # separados 13 cm. La normal se descartaba casi siempre y el
+        # servidor caia a la del ArUco, que es la que sufre la
+        # ambiguedad planar: rumbo objetivo saltando y robot sin
+        # asentarse nunca.
+        #
+        # 0.08 deja fuera la pared con margen y sigue muy por encima
+        # del ruido de alcance del LiDAR (1-2 cm). Si el montaje cambia
+        # y el marcador queda mas pegado a la pared, hay que bajarlo
+        # mas: el criterio es la SEPARACION, no un valor fijo.
         self.declare_parameter(
             'lidar_normal_depth_band',
-            0.30
+            0.08
         )
 
         self.declare_parameter(
