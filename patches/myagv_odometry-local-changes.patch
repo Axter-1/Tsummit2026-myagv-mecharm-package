@@ -66,10 +66,72 @@ index 2a7beb6..f6823ba 100644
    <test_depend>ament_lint_common</test_depend>
  
 diff --git a/myagv_odometry/src/myAGV.cpp b/myagv_odometry/src/myAGV.cpp
-index d513bea..71bc83c 100755
+index d513bea..6d401f8 100755
 --- a/myagv_odometry/src/myAGV.cpp
 +++ b/myagv_odometry/src/myAGV.cpp
-@@ -316,7 +316,7 @@ void MyAGV::publisherOdom(double dt)
+@@ -2,6 +2,9 @@
+ #include <iostream>
+ #include <iomanip>
+ #include <time.h>
++#include <unistd.h>   // isatty
++#include <cstdio>     // fileno
++#include <limits>     // numeric_limits
+ 
+ #include "myagv_odometry/myAGV.h"
+ 
+@@ -82,12 +85,47 @@ void MyAGV::restore()
+ 
+ void MyAGV::restoreRun()
+ {
++    // readSpeed() llega aqui cuando la placa manda un frame de fallo de
++    // rueda (o basura del serie que da la casualidad de cumplir ese
++    // checksum de 5 bytes).
++    //
++    // El codigo original pedia por stdin ("input 1, then press enter") y
++    // giraba en ese bucle hasta recibirlo. Pero el nodo corre SIEMPRE
++    // headless: std::cin da EOF al instante, deja el stream en failbit,
++    // y a partir de ahi cada `std::cin >> res` vuelve sin bloquear. El
++    // while gira a millones de vueltas por segundo escribiendo
++    // "press enter": un nucleo entero al 100% y cientos de MB de log en
++    // minutos. Paso tres veces en un solo dia de pruebas.
++    //
++    // Sin terminal interactiva no hay nadie que pulse una tecla, asi
++    // que lo unico util es auto-recuperar. Con un techo de 1 Hz para
++    // que un serie ruidoso que falla en bucle no vuelva a quemar CPU
++    // ni disco -- solo que ahora de forma acotada y visible.
++    if (!isatty(fileno(stdin))) {
++
++        static rclcpp::Time last_restore(0, 0, RCL_ROS_TIME);
++        rclcpp::Time now = this->get_clock()->now();
++
++        if ((now - last_restore).seconds() < 1.0) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(200));
++            return;
++        }
++        last_restore = now;
++
++        RCLCPP_WARN(this->get_logger(),
++            "Placa en fallo; auto-restore (sin terminal interactiva).");
++        restore();
++        return;
++    }
++
+     int res = 0;
+     std::cout << "if you want restore run,pls input 1,then press enter" << std::endl;
+-    while(res != 1) {
+-        std::cin >> res;
+-        std::cout <<  "press enter" << std::endl;
+-        std::cout << res;
++    while (res != 1) {
++        if (!(std::cin >> res)) {   // EOF o entrada no numerica
++            std::cin.clear();
++            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
++            break;
++        }
+     }
+     restore();
+     std::cout <<  "restore finished" << std::endl;
+@@ -316,7 +354,7 @@ void MyAGV::publisherOdom(double dt)
  
      odom_trans.transform.rotation = odom_quat;
  
@@ -78,18 +140,13 @@ index d513bea..71bc83c 100755
  
      nav_msgs::msg::Odometry odom;
      odom.header.stamp = this->get_clock()->now();;
-@@ -337,20 +337,30 @@ void MyAGV::publisherOdom(double dt)
+@@ -337,21 +375,31 @@ void MyAGV::publisherOdom(double dt)
      pub_odom->publish(odom);
  }
  
 -void MyAGV::execute(double linearX, double linearY, double angularZ)
 -{   
 -    currentTime = this->get_clock()->now();   
--    double dt = (currentTime - lastTime).seconds();
--    if (true ==  readSpeed()) 
--    {    
--        writeSpeed(linearX, linearY, angularZ);
--        publisherOdom(dt);
 +void MyAGV::sendCommand(double linearX, double linearY, double angularZ)
 +{
 +    writeSpeed(linearX, linearY, angularZ);
@@ -98,29 +155,31 @@ index d513bea..71bc83c 100755
 +void MyAGV::readTelemetry()
 +{
 +    currentTime = this->get_clock()->now();
-+    double dt = (currentTime - lastTime).seconds();
+     double dt = (currentTime - lastTime).seconds();
+-    if (true ==  readSpeed()) 
+-    {    
+-        writeSpeed(linearX, linearY, angularZ);
 +    if (true ==  readSpeed())
 +    {
-+        publisherOdom(dt);
+         publisherOdom(dt);
          //ROS_INFO("dt:%f",dt);
          publisherImuSensor();
          Publish_Voltage();
 -    } 
--    lastTime = currentTime;
--}
 +    }
-+    lastTime = currentTime;
-+}
-+
+     lastTime = currentTime;
+ }
+ 
 +void MyAGV::execute(double linearX, double linearY, double angularZ)
 +{
 +    sendCommand(linearX, linearY, angularZ);
 +    readTelemetry();
 +}
- 
++
  /**
   * @brief auto report 
-@@ -378,4 +388,4 @@ void MyAGV::setAutoReportState(bool state)
+  * state 0/1 0-close 1-open
+@@ -378,4 +426,4 @@ void MyAGV::setAutoReportState(bool state)
      boost::asio::write(sp, boost::asio::buffer(cmd));
      std::this_thread::sleep_for(std::chrono::milliseconds(50));
      return;

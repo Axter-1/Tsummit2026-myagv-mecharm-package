@@ -43,6 +43,36 @@ sería inútil, y por debajo de ~0.2 s un hipo normal de red frenaría el
 robot a tirones. Los emisores publican a >= 10 Hz, así que son 3
 mensajes perdidos seguidos.
 
+### `restoreRun()` sin terminal: el bucle de "press enter"
+
+`readSpeed()` llama a `restoreRun()` cuando la placa manda un frame de
+fallo de rueda (sobre-corriente), o cuando el serie mete basura que da
+la casualidad de cumplir el checksum de 5 bytes de ese frame. El código
+original de ahí pedía por `stdin`:
+
+```cpp
+std::cout << "if you want restore run,pls input 1,then press enter";
+while (res != 1) { std::cin >> res; std::cout << "press enter"; }
+```
+
+El nodo corre **siempre headless**. `std::cin` da EOF al instante, el
+stream se queda en `failbit`, y a partir de ahí cada `std::cin >> res`
+vuelve sin bloquear: el `while` gira a millones de vueltas por segundo
+escribiendo `press enter`. **Un núcleo entero al 100 % y ~450 MB de log
+en pocos minutos.** Pasó tres veces en un solo día de pruebas.
+
+El parche: si no hay TTY (`isatty(fileno(stdin))`), auto-recupera
+(`restore()`) con un techo de 1 Hz para que un serie ruidoso que falla
+en bucle no vuelva a quemar CPU ni disco — ahora acotado y con un
+`RCLCPP_WARN` visible. El camino interactivo (por si alguien lo arranca
+desde una terminal) queda también guardado contra EOF.
+
+Log esperado cuando la placa falla:
+
+```
+[WARN] [myagv_odometry_node]: Placa en fallo; auto-restore (sin terminal interactiva).
+```
+
 ### Cómo aplicarlo tras un `vcs import` limpio
 
 ```bash
