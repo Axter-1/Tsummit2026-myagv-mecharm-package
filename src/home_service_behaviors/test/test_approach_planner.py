@@ -204,19 +204,68 @@ def test_el_promedio_NO_diluye_un_sesgo_sistematico():
 # Control
 # ---------------------------------------------------------------------
 
-def test_mueve_los_tres_ejes_a_la_vez():
-    """Sobre una base mecanum no hay que corregir un eje cada vez."""
+def test_nunca_manda_los_tres_ejes_a_la_vez():
+    """La placa se queda QUIETA si recibe los tres ejes no nulos.
+
+    Medido en el robot: uno o dos ejes siempre mueven; los tres dan cero
+    absoluto a cualquier magnitud (probado a 1, 1/2 y 1/4). Esta prueba
+    sustituye a `test_mueve_los_tres_ejes_a_la_vez`, que afirmaba lo
+    contrario y pasaba porque nadie lo habia medido en el hardware.
+    """
+    # rumbo muy fuera de banda: toca ciclo de giro puro
     vx, vy, wz, _, _, _ = holonomic_command(
         0.0, 0.0, 0.0,
         (1.0, 1.0),
         math.radians(45),
         1.41,
         LIMITS,
+        yaw_settled=False,
     )
 
-    assert abs(vx) > 1e-6
-    assert abs(vy) > 1e-6
-    assert abs(wz) > 1e-6
+    assert abs(wz) > 1e-6, 'con el rumbo fuera de banda tiene que girar'
+    assert vx == 0.0 and vy == 0.0, 'giro puro: sin traslacion'
+
+
+def test_traslacion_plena_cuando_el_rumbo_esta_asentado():
+    """vx y vy van SIEMPRE juntos: separarlos torceria la direccion."""
+    # robot a yaw 0 y objetivo en diagonal: el error de cuerpo tiene
+    # componente en los DOS ejes. Con el robot a 45 grados caeria todo
+    # sobre uno solo y la prueba no probaria nada.
+    vx, vy, wz, _, _, settled = holonomic_command(
+        0.0, 0.0, 0.0,
+        (1.0, 1.0),
+        0.0,
+        1.41,
+        LIMITS,
+        yaw_settled=True,
+    )
+
+    assert settled
+    assert wz == 0.0, 'asentado: no gira'
+    assert abs(vx) > 1e-6 and abs(vy) > 1e-6, 'los dos ejes de traslacion'
+
+
+def test_ninguna_combinacion_saca_tres_componentes():
+    """Barrido: en ningun caso salen las tres no nulas a la vez."""
+    for gx, gy in ((1.0, 1.0), (0.5, -0.8), (-1.2, 0.3), (0.05, 0.05)):
+        for yaw_obj in (0.0, math.radians(30), math.radians(-120)):
+            for ryaw in (0.0, math.radians(90)):
+                for settled in (True, False):
+                    vx, vy, wz, _, _, _ = holonomic_command(
+                        0.0, 0.0, ryaw,
+                        (gx, gy),
+                        yaw_obj,
+                        math.hypot(gx, gy),
+                        LIMITS,
+                        yaw_settled=settled,
+                    )
+
+                    activos = sum(
+                        1 for v in (vx, vy, wz) if abs(v) > 1e-9
+                    )
+
+                    assert activos <= 2, (gx, gy, yaw_obj, ryaw,
+                                          settled, vx, vy, wz)
 
 
 def test_rumbo_mira_al_marcador_de_lejos():

@@ -581,10 +581,14 @@ def holonomic_command(
 ):
     """Velocidades en el marco del ROBOT hacia el carrot.
 
-    Las tres salidas se calculan a la vez: es una base mecanum y no hay
-    ninguna razon para corregir un eje cada vez, que era lo que hacia
-    que el control anterior se persiguiera la cola (corregir el lateral
-    cambia el rumbo, corregir el rumbo cambia el lateral).
+    vx y vy se calculan SIEMPRE juntos: corregir un eje de traslacion
+    cada vez era lo que hacia que el control anterior se persiguiera la
+    cola (corregir el lateral cambia el rumbo, corregir el rumbo cambia
+    el lateral).
+
+    El giro, en cambio, NO puede acompañarlos: la placa no acepta los
+    tres ejes a la vez y se queda quieta. Ver el bloque de
+    holonomic_command donde se anula la traslacion, con las medidas.
 
     `limits` es un dict con: max_linear, max_lateral, max_angular,
     min_linear, min_lateral, min_angular, accel, distance_tolerance,
@@ -699,6 +703,7 @@ def holonomic_command(
 
     if yaw_settled:
         wz = 0.0
+
     else:
         wz = clamp(
             limits['kp_angular'] * yaw_error,
@@ -707,6 +712,49 @@ def holonomic_command(
         )
 
         wz = apply_deadband(wz, limits['min_angular'])
+
+        # LA PLACA NO ACEPTA LOS TRES EJES A LA VEZ.
+        #
+        # Medido en el robot, ventanas de 2 s sobre /odom:
+        #
+        #     solo giro                    0.773 rad
+        #     solo avance                  0.212 m
+        #     solo lateral                 0.180 m
+        #     avance + giro        0.302 m / 0.273 rad
+        #     lateral + giro       0.217 m / 0.277 rad
+        #     avance + lateral     0.271 m
+        #     LOS TRES             0.000 m / 0.000 rad   <-- ni un mm
+        #     los tres, a la mitad         0.000
+        #     los tres, a un cuarto        0.000
+        #
+        # Uno o dos ejes siempre se mueve; tres, cero absoluto a
+        # CUALQUIER magnitud, asi que no es saturacion. Verificado que
+        # el mando llega entero a /cmd_vel, o sea que no es twist_mux:
+        # es la placa. En el frame de writeSpeed
+        # (fe fe 01 0b [x] [y] [rot] [check], cada eje int(v*100)+128)
+        # todos los casos que se mueven tienen exactamente UN byte de
+        # eje a 0x80; los de tres ejes no tienen ninguno. Firmware
+        # cerrado: hay que convivir con ello.
+        #
+        # Esto es lo que hacia que el robot "no avanzara", y tambien lo
+        # que hacia que SOLO se aproximara de frente: de frente el error
+        # de rumbo es ~0, wz sale 0 y quedan dos ejes, que si funcionan.
+        # En oblicuo los tres son no nulos y la base se congela.
+        #
+        # Se sacrifica la SIMULTANEIDAD del giro con la traslacion, que
+        # la placa no puede dar de todas formas. NO se separa vx de vy:
+        # esos dos siguen yendo SIEMPRE juntos, que es lo que conserva
+        # la direccion del movimiento (ver la elipse de zona muerta mas
+        # arriba). Separarlos era el "perseguirse la cola" del control
+        # viejo.
+        #
+        # La puerta es la histeresis que ya hay, no un umbral nuevo:
+        # fuera de banda el ciclo es giro puro, dentro es traslacion
+        # plena. Cerca del objetivo vx,vy tienden a 0 y el rumbo domina,
+        # asi que salen ciclos de giro puro y la llegada se asienta
+        # perpendicular.
+        vx = 0.0
+        vy = 0.0
 
     return vx, vy, wz, yaw_error, reached, yaw_settled
 
