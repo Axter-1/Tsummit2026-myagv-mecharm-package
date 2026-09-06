@@ -561,12 +561,64 @@ rqt() {
 }
 
 check() {
-    "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
+    # OJO con dos trampas, las dos vividas el 2026-09-06:
+    #
+    # 1. Sin CYCLONEDDS_URI, CycloneDDS se ata a lo (que no admite
+    #    multicast) y NO VE NADA. Esta funcion no lo pasaba mientras que
+    #    run_bg y aruco_goal si, asi que en modo distribuido informaba de
+    #    una lista de nodos vacia con la pila entera funcionando. Dos
+    #    sesiones distintas dieron la pila por caida estando sana.
+    #
+    # 2. El daemon de ros2 cachea el grafo. Ha llegado a devolver 2
+    #    topicos habiendo 26. --no-daemon lo evita, pero solo vale para
+    #    `topic list` y `node list`: en `action list` no existe.
+    #
+    # Ademas de los nodos se comprueba la TF, porque los dos fallos de la
+    # prueba de aproximacion de ese dia fueron precondiciones, no control:
+    # sin `odom` (placa de la base caida) el servidor navega contra una
+    # estimacion congelada, y sin `laser_frame` la llegada no se declara
+    # nunca.
+    "${DOCKER[@]}" exec -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" bash -lc \
         "${source_env}; \
          ros2 pkg prefix myagv_teleop_joy >/dev/null; \
          ros2 pkg prefix home_service_behaviors >/dev/null; \
          ros2 pkg prefix home_service_bringup >/dev/null; \
-         ros2 action list; ros2 node list; \
+         echo '=== acciones ==='; ros2 action list; \
+         echo '=== nodos ==='; ros2 node list --no-daemon; \
+         echo '=== TF imprescindibles ==='; \
+         python3 - <<'PY'
+import rclpy, time
+from rclpy.node import Node
+from rclpy.time import Time
+import tf2_ros
+
+rclpy.init()
+n = Node('check_tf')
+buf = tf2_ros.Buffer()
+tf2_ros.TransformListener(buf, n)
+
+t = time.time()
+while time.time() - t < 5.0:
+    rclpy.spin_once(n, timeout_sec=0.1)
+
+falta = []
+for padre, hijo, pista in (
+    ('odom', 'base_link', 'placa de la base caida: reinicia SOLO myagv_odometry_node'),
+    ('base_link', 'laser_frame', 'sin LiDAR: la llegada no se declara nunca'),
+):
+    try:
+        buf.lookup_transform(padre, hijo, Time())
+        print('  OK    %s -> %s' % (padre, hijo))
+    except Exception:
+        print('  FALTA %s -> %s   (%s)' % (padre, hijo, pista))
+        falta.append(hijo)
+
+if falta:
+    print('  NO LANCES la aproximacion hasta que esas TF existan.')
+
+rclpy.shutdown()
+PY
+         echo '=== /cmd_vel ==='; \
          timeout 3 ros2 topic echo --once /cmd_vel || true"
 }
 
