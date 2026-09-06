@@ -214,17 +214,40 @@ class ArucoLidarApproachServer(Node):
         # publica, el robot no se mueve, el error no baja y el control
         # proporcional entra en ciclo limite (tiron, pasada, tiron al
         # otro lado). Cualquier wz no nulo se eleva a este valor.
+        # El suelo real de la base son 0.37 rad/s: pidas 0.08 o pidas
+        # 0.30, gira a 0.37. Se deja en el valor medido para que el
+        # planificador razone con la velocidad que va a conseguir de
+        # verdad, no con una que la base no sabe dar.
         self.declare_parameter(
             'min_heading_speed',
-            0.08
+            0.37
         )
 
         # 0.02 rad = 1.15 grados era inalcanzable: en ese borde wz vale
         # 0.03 rad/s, muy por debajo de min_heading_speed. 0.12 rad = 7
         # grados sobra para una aproximacion perpendicular.
+        # MEDIDO en el robot: el suelo de giro de la base es 0.37 rad/s
+        # (mandos de 0.02 a 0.40 entregan todos lo mismo). Con los
+        # ~200 ms de retardo de la tuberia offboard, en lo que llega la
+        # orden de parar el robot ya ha girado 0.37*0.2 = 0.074 rad, mas
+        # 0.037 de un ciclo de control a 10 Hz. Son 0.111 rad de
+        # sobrepasamiento INEVITABLE.
+        #
+        # Con 0.08 el sobrepasamiento se comia la banda entera: el robot
+        # no podia pararse dentro de la tolerancia, salia por el otro
+        # lado y corregia al reves. Ese es el baile izquierda-derecha, y
+        # por eso la histeresis lo aliviaba sin curarlo (su umbral de
+        # salida, 1.5*0.08 = 0.12, es del mismo orden que el
+        # sobrepasamiento). La tolerancia tiene que ser MAYOR que el
+        # sobrepasamiento; 0.15 deja un 35% de margen.
+        #
+        # Ojo: la llegada usa esta misma banda a proposito (un criterio
+        # mas estricto que la histeresis produce bloqueo), asi que
+        # subirla afloja tambien la perpendicularidad de llegada.
+        # Medir con scripts/curva_respuesta.py.
         self.declare_parameter(
             'heading_tolerance',
-            0.08
+            0.15
         )
 
         # 0.05 rad = 2.9 grados: el desplazamiento lateral en mecanum
@@ -299,9 +322,14 @@ class ArucoLidarApproachServer(Node):
         # Zona muerta hacia delante, hermana de min_lateral_speed.
         # Sin esto el robot se para a unos centimetros del objetivo sin
         # llegar a cumplir la condicion de parada.
+        # MEDIDO: el suelo de avance de la base son 0.07 m/s (mandos de
+        # 0.02 a 0.08 entregan todos ~0.07). Con 0.03 el planificador
+        # creia ir a menos de la mitad de la velocidad real y se
+        # pasaba de largo al llegar. El lateral, medido en 0.035, ya
+        # coincidia con lo que habia.
         self.declare_parameter(
             'min_linear_speed',
-            0.03
+            0.07
         )
 
         # 0.01 m no es alcanzable con la latencia de la tuberia
