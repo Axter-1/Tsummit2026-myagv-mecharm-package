@@ -1896,9 +1896,7 @@ class ArucoLidarApproachServer(Node):
             self.pf('control_rate')
         )
 
-        yaw_tolerance = math.radians(
-            self.pf('heading_tolerance')
-        )
+        yaw_tolerance = self.pf('heading_tolerance')
 
         self.check_tolerances(period)
 
