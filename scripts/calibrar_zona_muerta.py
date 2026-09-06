@@ -6,15 +6,25 @@ siendo ESTIMACIONES, y todas fallaron. Se dio por hecho tres veces que
 la zona muerta era la causa de que el robot no se moviera, y se subieron
 los topes a ciegas cada vez.
 
-Medido por fin en el robot: se mueve ya a 0.02 m/s. La zona muerta es
-DESPRECIABLE y nunca fue la causa. Que el robot pareciera parado con
-mando distinto de cero era otra cosa (mando alternando de signo por el
-castañeo del giro, y la direccion torcida por aplicar la zona muerta
-eje a eje). Esto esta aqui para que ese numero deje de suponerse.
+Lo unico que hay del robot es una COTA, y conviene no confundirla con
+una medida. La primera pasada se movio en el escalon mas bajo que
+probo, 0.024 m/s, y el barrido de entonces solo subia: asi que el
+umbral esta EN 0.024 O POR DEBAJO. No se sabe donde.
 
-Esto no lo estima: lo mide. Manda una rampa de velocidades por la MISMA
-cadena que usa la aproximacion (/cmd_vel_aruco -> twist_mux -> /cmd_vel)
-y mira /odom para ver a partir de que mando se mueve de verdad.
+Esa cota basta para descartar la zona muerta como causa de que el robot
+no se moviera -- si se mueve a 0.024, un rango de mando que llega a
+0.08 no puede estar entero dentro de ella -- pero NO da el valor. Que
+el robot pareciera parado con mando distinto de cero era otra cosa: el
+mando alternaba de signo por el castañeo del giro, y la direccion
+salia torcida por aplicar la zona muerta eje a eje en vez de sobre el
+vector. Los minimos que hay ahora (0.03 / 0.035 / 0.08) son mas bajos
+que los de antes, pero siguen SIN MEDIR.
+
+Manda una rampa de velocidades por la MISMA cadena que usa la
+aproximacion (/cmd_vel_aruco -> twist_mux -> /cmd_vel) y mira /odom
+para ver a partir de que mando se mueve de verdad. Acota en las dos
+direcciones: si se mueve ya en el primer escalon, BAJA. Si llega al mas
+bajo sin parar, lo dice en vez de devolver un numero con pinta de dato.
 
 USO
     # con la pila del robot levantada y DISTRIBUTED=1 en la Jetson
