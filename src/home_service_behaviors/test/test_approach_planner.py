@@ -28,6 +28,8 @@ from home_service_behaviors.approach_planner import (
     profile_speed,
     staging_pose,
     deadband_floor,
+    stopping_distance,
+    tolerance_is_reachable,
 )
 
 
@@ -602,3 +604,58 @@ def test_sin_semieje_no_hay_suelo():
     """Un minimo a cero desactiva la zona muerta en vez de dividir por cero."""
     assert deadband_floor(1.0, 0.0, 0.0, 0.035) == 0.0
     assert deadband_floor(0.0, 1.0, 0.03, 0.0) == 0.0
+
+
+# ---------------------------------------------------------------------
+# El suelo de la base y la distancia de parada
+# ---------------------------------------------------------------------
+
+def test_distancia_de_parada():
+    """Lo que sigue recorriendo tras mandarle cero."""
+    # suelo de giro 0.37 rad/s, retardo 200 ms, ciclo a 20 Hz
+    d = stopping_distance(0.37, 0.200, 0.05)
+
+    assert abs(d - 0.0925) < 1e-9
+
+
+def test_una_tolerancia_menor_que_la_parada_es_inalcanzable():
+    """El baile izquierda-derecha, reducido a una desigualdad.
+
+    Con suelo de giro 0.37 rad/s y 200 ms de retardo, el robot gira
+    0.093 rad DESPUES de decidir pararse. Contra una tolerancia de
+    0.08 rad no puede asentarse: sale por el otro lado y corrige al
+    reves. No es un problema de ganancias, es aritmetica.
+    """
+    assert not tolerance_is_reachable(0.08, 0.37, 0.200, 0.05)
+    assert tolerance_is_reachable(0.15, 0.37, 0.200, 0.05)
+
+
+def test_por_debajo_del_suelo_solo_hay_suelo_o_cero():
+    """La base no modula por debajo de su suelo: la rampa no existe."""
+    # lejos: la rampa manda
+    assert profile_speed(1.0, 0.18, 0.25, v_min=0.07,
+                         tolerance=0.001, stop_margin=0.018) == 0.18
+
+    # La rampa baja del suelo solo por debajo de v_min^2/(2a), aqui
+    # 0.98 cm. A 0.8 cm pide sqrt(2*0.25*0.008)=0.063 < 0.07, y aun
+    # queda mas que la distancia de parada: se manda el suelo.
+    assert profile_speed(0.008, 0.18, 0.25, v_min=0.07,
+                         tolerance=0.001, stop_margin=0.005) == 0.07
+
+    # dentro de la distancia de parada: cero, o se pasaria de largo
+    assert profile_speed(0.003, 0.18, 0.25, v_min=0.07,
+                         tolerance=0.001, stop_margin=0.005) == 0.0
+
+    # Con los valores REALES de hoy la banda ni existe: la rampa baja
+    # del suelo a 0.98 cm y la distancia de parada son 1.8 cm, asi que
+    # cuando la rampa flaquea ya toca parar. Inofensivo hoy, y por eso
+    # mismo conviene que este escrito.
+    assert profile_speed(0.009, 0.18, 0.25, v_min=0.07,
+                         tolerance=0.001, stop_margin=0.018) == 0.0
+
+
+def test_el_suelo_nunca_supera_el_techo():
+    """Una configuracion sin margen no debe emitir mas que v_max."""
+    v = profile_speed(0.05, 0.06, 0.25, v_min=0.20, tolerance=0.01)
+
+    assert v <= 0.06

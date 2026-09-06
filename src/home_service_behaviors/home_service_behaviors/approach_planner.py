@@ -421,7 +421,36 @@ def carrot(path, rx, ry, lookahead):
 # Perfil de velocidad
 # ---------------------------------------------------------------------
 
-def profile_speed(remaining, v_max, a_max, v_min=0.0, tolerance=0.0):
+def stopping_distance(speed, latency, period):
+    """Cuanto sigue recorriendo tras mandarle parar.
+
+    El mando de cero tarda `latency` en llegar (tuberia + red) y ademas
+    el ciclo ya en curso dura `period`. A velocidad constante eso es
+    speed * (latency + period).
+
+    Medido en esta base: el suelo de giro es 0.37 rad/s y el retardo
+    ~200 ms, o sea 0.093 rad = 5.3 grados que el robot gira DESPUES de
+    decidir pararse. Contra una tolerancia de 0.08 rad (4.6 grados) es
+    imposible asentarse: sale por el otro lado y corrige al reves. Ese
+    fue el baile izquierda-derecha, y no se arregla con ganancias.
+
+    REGLA: ninguna tolerancia puede ser menor que su distancia de
+    parada. Si lo es, el objetivo es inalcanzable por construccion.
+    """
+    return abs(speed) * (latency + period)
+
+
+def tolerance_is_reachable(tolerance, floor_speed, latency, period):
+    """La tolerancia, es alcanzable con este suelo y este retardo?"""
+    return tolerance >= stopping_distance(floor_speed, latency, period)
+
+
+def profile_speed(
+    remaining, v_max, a_max,
+    v_min=0.0,
+    tolerance=0.0,
+    stop_margin=0.0,
+):
     """Rampa de frenado: v = sqrt(2*a*d), saturada a v_max.
 
     Es el perfil trapezoidal de toda la vida. Sustituye al proporcional
@@ -430,17 +459,36 @@ def profile_speed(remaining, v_max, a_max, v_min=0.0, tolerance=0.0):
     de los motores, asi que el robot se paraba ANTES de llegar y el
     estado no cerraba nunca.
 
-    Con `v_min` la velocidad nunca queda por debajo de lo que de verdad
-    mueve las ruedas... salvo dentro de la tolerancia, donde se manda
-    cero de verdad. Sin esa excepcion el robot vibraria en el destino.
+    `v_min` no es una zona muerta: es el SUELO de la base. Medido en
+    este robot, por debajo de el la base NO MODULA -- pedirle 0.02 o
+    pedirle 0.07 produce lo mismo, 0.07. O sea que el conjunto de
+    velocidades alcanzables no es un intervalo continuo sino
+
+        {0}  union  [v_min, v_max]
+
+    y por debajo de v_min la rampa de frenado NO EXISTE. Ahi solo se
+    puede elegir entre el suelo y parar, asi que se elige por distancia
+    de parada: si lo que queda cabe en lo que el robot recorreria antes
+    de detenerse, se manda cero; si no, el suelo.
+
+    Sin esto el planificador cree ir a la mitad de lo que va y frena
+    tarde. Con los valores de hoy la rampa solo baja del suelo por
+    debajo de 1 cm, muy dentro de la tolerancia de 3 cm, asi que no se
+    llega a notar. Pero v_min, a_max y la tolerancia se ajustan desde
+    el launch, y el dia que se toquen esto deja de ser inofensivo --
+    la misma leccion que la elipse de la zona muerta.
     """
     if remaining <= tolerance:
         return 0.0
 
     v = min(v_max, math.sqrt(max(0.0, 2.0 * a_max * remaining)))
 
-    if v_min > 0.0:
-        v = max(v, v_min)
+    if v_min > 0.0 and v < v_min:
+
+        if remaining <= stop_margin:
+            return 0.0
+
+        return min(v_min, v_max)
 
     return min(v, v_max)
 
@@ -560,8 +608,9 @@ def holonomic_command(
         remaining,
         limits['max_linear'],
         limits['accel'],
-        v_min=0.0,
+        v_min=limits.get('min_linear', 0.0),
         tolerance=limits['distance_tolerance'],
+        stop_margin=limits.get('stop_margin', 0.0),
     )
 
     if norm > 1e-9 and speed > 0.0:

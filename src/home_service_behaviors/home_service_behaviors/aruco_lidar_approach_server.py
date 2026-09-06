@@ -548,6 +548,15 @@ class ArucoLidarApproachServer(Node):
             35.0
         )
 
+        # Retardo del lazo: lo que tarda un mando en surtir efecto
+        # (tuberia + red + driver). Con el servidor en el portatil
+        # medimos ~200 ms; pegado a los drivers en la Jetson seria
+        # bastante menos. Se usa para la distancia de parada.
+        self.declare_parameter(
+            'command_latency',
+            0.20
+        )
+
         # Parada de seguridad por LiDAR frontal.
         self.declare_parameter(
             'min_front_clearance',
@@ -652,6 +661,12 @@ class ArucoLidarApproachServer(Node):
         self.get_logger().info(
             'ArUco + LiDAR geometric '
             'approach server started'
+        )
+
+        # Al ARRANCAR, no al aceptar el primer goal: una configuracion
+        # imposible tiene que verse ya, sin tener que lanzar nada.
+        self.check_tolerances(
+            1.0 / max(1.0, self.pf('control_rate'))
         )
 
     # =============================================================
@@ -1662,6 +1677,47 @@ class ArucoLidarApproachServer(Node):
             feedback
         )
 
+    def check_tolerances(self, period):
+        """Avisa si alguna tolerancia es inalcanzable por aritmetica.
+
+        La base tiene un SUELO de velocidad por debajo del cual no
+        modula. A ese suelo, entre el retardo del lazo y el ciclo en
+        curso, el robot recorre una distancia DESPUES de decidir
+        pararse. Si la tolerancia es menor que eso, el objetivo es
+        inalcanzable: sale por el otro lado y corrige al reves.
+
+        Ese fue exactamente el baile izquierda-derecha del giro
+        (suelo 0.37 rad/s, retardo 200 ms -> 0.093 rad de
+        sobrepasamiento contra una tolerancia de 0.08). Costo varias
+        sesiones y una prueba de pista descubrirlo. Comprobarlo al
+        arrancar cuesta cuatro lineas.
+        """
+        latency = self.pf('command_latency')
+
+        for nombre, tol, suelo, unidad in (
+            ('heading_tolerance',
+             math.radians(0.0) + self.pf('heading_tolerance'),
+             self.pf('min_heading_speed'), 'rad'),
+            ('distance_tolerance',
+             self.pf('distance_tolerance'),
+             self.pf('min_linear_speed'), 'm'),
+            ('lateral_tolerance',
+             self.pf('lateral_tolerance'),
+             self.pf('min_lateral_speed'), 'm'),
+        ):
+
+            parada = planner.stopping_distance(suelo, latency, period)
+
+            if tol < parada:
+
+                self.get_logger().error(
+                    f'{nombre}={tol:.3f} {unidad} es INALCANZABLE: a su '
+                    f'suelo de {suelo:.3f} el robot recorre '
+                    f'{parada:.3f} {unidad} tras mandarle parar. '
+                    f'Subelo por encima de {parada:.3f} o baja el suelo, '
+                    'o el control oscilara sin asentarse nunca.'
+                )
+
     # =============================================================
     # Action
     # =============================================================
@@ -1749,6 +1805,8 @@ class ArucoLidarApproachServer(Node):
         yaw_tolerance = math.radians(
             self.pf('heading_tolerance')
         )
+
+        self.check_tolerances(period)
 
         self.get_logger().info(
             f'Starting target ID {target_id} '
@@ -2022,6 +2080,11 @@ class ArucoLidarApproachServer(Node):
                 'distance_tolerance': self.pf('distance_tolerance'),
                 'yaw_tolerance': yaw_tolerance,
                 'yaw_hysteresis': self.pf('yaw_hysteresis'),
+                'stop_margin': planner.stopping_distance(
+                    self.pf('min_linear_speed'),
+                    self.pf('command_latency'),
+                    period,
+                ),
             }
 
             vx, vy, wz, yaw_error, reached, yaw_settled = (
