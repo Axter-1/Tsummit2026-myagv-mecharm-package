@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Mide la ZONA MUERTA real de los motores, con la odometria del robot.
 
-Por que existe: los valores de min_lateral_speed y min_linear_speed
-venian siendo estimaciones, y se han equivocado dos veces seguidas. La
-segunda salio cara: max_linear_speed estaba en 0.08 y el umbral real
-resulto estar POR ENCIMA, asi que el rango entero de mando caia dentro
-de la zona muerta. El robot publicaba velocidad y no se movia.
+Por que existe: min_lateral_speed y min_linear_speed llevaban rondas
+siendo ESTIMACIONES, y todas fallaron. Se dio por hecho tres veces que
+la zona muerta era la causa de que el robot no se moviera, y se subieron
+los topes a ciegas cada vez.
+
+Medido por fin en el robot: se mueve ya a 0.02 m/s. La zona muerta es
+DESPRECIABLE y nunca fue la causa. Que el robot pareciera parado con
+mando distinto de cero era otra cosa (mando alternando de signo por el
+castañeo del giro, y la direccion torcida por aplicar la zona muerta
+eje a eje). Esto esta aqui para que ese numero deje de suponerse.
 
 Esto no lo estima: lo mide. Manda una rampa de velocidades por la MISMA
 cadena que usa la aproximacion (/cmd_vel_aruco -> twist_mux -> /cmd_vel)
@@ -163,28 +168,79 @@ def calibrar_eje(nodo, eje, args):
           f"  -> umbral {umbral_ruido:.4f} {unidad}")
     print()
 
-    encontrado = None
-    valor = inicio
-
-    while valor <= tope + 1e-9:
-
+    def se_mueve(valor):
         d = nodo.medir(eje, valor, args.ventana)
 
         if d is None:
-            print("    ERROR: se perdio /odom a mitad.")
-            return None
+            return None, None
 
         movio = d > umbral_ruido
 
-        marca = 'SE MUEVE' if movio else '  --    '
+        print(f"    {valor:6.3f} {vunidad:6s}  ->  {d:7.4f} {unidad}   "
+              f"{'SE MUEVE' if movio else '  --    '}")
 
-        print(f"    {valor:6.3f} {vunidad:6s}  ->  {d:7.4f} {unidad}   {marca}")
+        return movio, d
 
-        if movio:
+    # Acotar de verdad, en las dos direcciones.
+    #
+    # Antes solo subia desde --min, asi que si se movia ya en el primer
+    # escalon daba ESE valor como umbral. No lo es: es solo el primer
+    # peldaño de la escalera. Lo unico que dice es que el umbral esta
+    # en ese valor o por debajo, y hay que seguir BAJANDO para saberlo.
+    movio, _ = se_mueve(inicio)
+
+    if movio is None:
+        print("    ERROR: se perdio /odom a mitad.")
+        return None
+
+    encontrado = None
+
+    if movio:
+
+        # Se movio a la primera: bajar hasta que deje de moverse.
+        print(f"\n    se mueve ya en el primer escalon; bajando\n")
+
+        encontrado = inicio
+        valor = inicio - paso
+
+        while valor > 1e-6:
+
+            movio, _ = se_mueve(valor)
+
+            if movio is None:
+                return None
+
+            if not movio:
+                break
+
             encontrado = valor
-            break
+            valor -= paso
 
-        valor += paso
+        if encontrado <= paso + 1e-9:
+            print()
+            print(f"    Se mueve hasta el escalon mas bajo probado")
+            print(f"    ({encontrado:.3f} {vunidad}). La zona muerta es")
+            print(f"    DESPRECIABLE en este eje: no es lo que impide")
+            print(f"    que el robot se mueva. Busca la causa en otro")
+            print(f"    sitio (mando que llega, direccion, o control).")
+
+    else:
+
+        # No se movio: subir hasta que se mueva.
+        valor = inicio + paso
+
+        while valor <= tope + 1e-9:
+
+            movio, _ = se_mueve(valor)
+
+            if movio is None:
+                return None
+
+            if movio:
+                encontrado = valor
+                break
+
+            valor += paso
 
     print()
 
@@ -198,6 +254,12 @@ def calibrar_eje(nodo, eje, args):
 
     print(f"    zona muerta medida : {encontrado:.3f} {vunidad}")
     print(f"    valor recomendado  : {margen:.3f} {vunidad}  (+20% de margen)")
+
+    if encontrado <= paso + 1e-9:
+        print()
+        print("    OJO: esto es un TECHO, no una medida. El barrido no")
+        print(f"    bajo de {encontrado:.3f}. Repite con --paso mas fino")
+        print("    y --min mas bajo si quieres el numero exacto.")
 
     return encontrado, margen
 
@@ -247,6 +309,10 @@ def main():
     print(f"  mando por  {args.cmd_topic}   (la misma cadena que la")
     print(f"             aproximacion: twist_mux -> /cmd_vel)")
     print(f"  mido por   {args.odom_topic}")
+    print()
+    print("  OJO: /odom se calcula con los ENCODERS. Mide que las ruedas")
+    print("  giren, no que el robot avance. Si patinan, esto dira que se")
+    print("  mueve. Miralo tambien con los ojos.")
 
     print("\n  esperando /odom ...", end='', flush=True)
 

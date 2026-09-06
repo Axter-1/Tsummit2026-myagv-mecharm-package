@@ -206,7 +206,7 @@ class ArucoLidarApproachServer(Node):
 
         self.declare_parameter(
             'max_heading_speed',
-            0.90
+            0.60
         )
 
         # Velocidad angular minima EFECTIVA. Por debajo de esto los
@@ -216,7 +216,7 @@ class ArucoLidarApproachServer(Node):
         # otro lado). Cualquier wz no nulo se eleva a este valor.
         self.declare_parameter(
             'min_heading_speed',
-            0.25
+            0.08
         )
 
         # 0.02 rad = 1.15 grados era inalcanzable: en ese borde wz vale
@@ -246,7 +246,7 @@ class ArucoLidarApproachServer(Node):
 
         self.declare_parameter(
             'max_lateral_speed',
-            0.20
+            0.14
         )
 
         # Zona muerta lateral. Desplazarse de lado en mecanum exige MAS
@@ -256,7 +256,7 @@ class ArucoLidarApproachServer(Node):
         # ciclo limite de tirones que tenia el rumbo.
         self.declare_parameter(
             'min_lateral_speed',
-            0.13
+            0.035
         )
 
         self.declare_parameter(
@@ -293,7 +293,7 @@ class ArucoLidarApproachServer(Node):
 
         self.declare_parameter(
             'max_linear_speed',
-            0.22
+            0.18
         )
 
         # Zona muerta hacia delante, hermana de min_lateral_speed.
@@ -301,7 +301,7 @@ class ArucoLidarApproachServer(Node):
         # llegar a cumplir la condicion de parada.
         self.declare_parameter(
             'min_linear_speed',
-            0.12
+            0.03
         )
 
         # 0.01 m no es alcanzable con la latencia de la tuberia
