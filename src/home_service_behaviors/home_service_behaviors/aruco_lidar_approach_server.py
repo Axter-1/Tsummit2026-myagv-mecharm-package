@@ -126,6 +126,16 @@ class ArucoLidarApproachServer(Node):
             0.70
         )
 
+        # Buscar indefinidamente tampoco vale: si el marcador no esta a
+        # la vista, o el detector esta caido, o la Nano esta saturada y
+        # no llega ni una deteccion, girar sobre el sitio hasta el
+        # timeout no ayuda a nadie. Pasado esto se rinde con un estado
+        # claro para que el operador sepa que revisar.
+        self.declare_parameter(
+            'search_giveup_sec',
+            45.0
+        )
+
         # =========================================================
         # Lock target normal
         # =========================================================
@@ -526,6 +536,18 @@ class ArucoLidarApproachServer(Node):
         self.declare_parameter(
             'estimate_max_age',
             3.0
+        )
+
+        # ...y sin detecciones durante mas de ESTO, se ABORTA. Estimar
+        # en odom permite coastear con el marcador tapado un rato -- esa
+        # es la gracia. Pero la odometria deriva: pasado cierto punto la
+        # estimacion ya no dice donde esta el marcador, solo donde
+        # estaba menos la deriva acumulada, y seguir es conducir a
+        # ciegas. Antes se agotaba el timeout entero (180 s) navegando
+        # contra una estimacion muerta, o declarando una llegada falsa.
+        self.declare_parameter(
+            'estimate_abort_age',
+            8.0
         )
 
         # Histeresis del giro. La tolerancia fina hace de umbral de
@@ -1977,6 +1999,32 @@ class ArucoLidarApproachServer(Node):
 
                 state = 'SEARCHING'
 
+                # Rendirse si se lleva demasiado buscando sin haber
+                # conseguido una sola estimacion. En este estado
+                # last_detection_ns es siempre None (a PURSUING no se
+                # vuelve), asi que esto es literalmente "nunca vi el
+                # marcador".
+                if elapsed > self.pf('search_giveup_sec'):
+
+                    self.stop_robot()
+                    goal_handle.abort()
+
+                    result = ArucoApproach.Result()
+
+                    result.success = False
+                    result.status = 'NO_MARKER'
+                    result.message = (
+                        f'Marcador {target_id} no encontrado en '
+                        f'{elapsed:.1f} s de busqueda. Si deberia estar '
+                        'a la vista: revisar el detector (¿publica '
+                        '/aruco/detections?) y la carga de CPU.'
+                    )
+                    result.final_distance = -1.0
+
+                    self.get_logger().error(result.message)
+
+                    return result
+
                 phase_elapsed = (
                     now_ns - search_phase_start_ns
                 ) / 1e9
@@ -2043,6 +2091,50 @@ class ArucoLidarApproachServer(Node):
 
             rx, ry, ryaw = robot_pose
             mx, my, nx, ny = estimate.pose
+
+            # -------------------------------------------------
+            # Estimacion vieja: avisar, y abortar si es mucho.
+            #
+            # Se comprueba ANTES de construir el camino o la logica de
+            # llegada: contra una estimacion derivada, "he llegado"
+            # tambien puede salir falso. Mejor abortar limpio.
+            # -------------------------------------------------
+            stale = (
+                now_ns - (last_detection_ns or now_ns)
+            ) / 1e9
+
+            if stale > self.pf('estimate_abort_age'):
+
+                self.stop_robot()
+                goal_handle.abort()
+
+                result = ArucoApproach.Result()
+
+                result.success = False
+                result.status = 'LOST'
+                result.message = (
+                    f'Marcador perdido {stale:.1f} s (limite '
+                    f'{self.pf("estimate_abort_age"):.1f} s). La '
+                    'estimacion en odom ha derivado demasiado; abortando '
+                    'en vez de navegar a ciegas.'
+                )
+                result.final_distance = final_distance
+
+                self.get_logger().error(result.message)
+
+                return result
+
+            if (
+                stale > self.pf('estimate_max_age') and
+                not stale_warned
+            ):
+
+                stale_warned = True
+
+                self.get_logger().warn(
+                    f'Sin detecciones desde hace {stale:.1f} s; '
+                    'navegando por odometria.'
+                )
 
             standoff = self.pf('staging_standoff')
 
@@ -2188,32 +2280,6 @@ class ArucoLidarApproachServer(Node):
                 self.get_logger().info(result.message)
 
                 return result
-
-            # -------------------------------------------------
-            # Aviso de estimacion vieja
-            #
-            # No se vuelve a SEARCHING: la gracia de estimar en odom es
-            # justo poder seguir con el marcador tapado un rato. Pero
-            # la odometria deriva, asi que hay que decirlo.
-            # -------------------------------------------------
-
-            if last_detection_ns is not None:
-
-                stale = (
-                    now_ns - last_detection_ns
-                ) / 1e9
-
-                if (
-                    stale > self.pf('estimate_max_age') and
-                    not stale_warned
-                ):
-
-                    stale_warned = True
-
-                    self.get_logger().warn(
-                        f'Sin detecciones desde hace {stale:.1f} s; '
-                        'navegando por odometria.'
-                    )
 
             self.publish_cmd(vx, vy, wz)
 
