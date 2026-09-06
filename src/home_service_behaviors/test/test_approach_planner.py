@@ -147,6 +147,56 @@ def test_perfil_respeta_la_zona_muerta_fuera_de_tolerancia():
 
 
 # ---------------------------------------------------------------------
+# Estimador
+# ---------------------------------------------------------------------
+
+def test_el_promedio_diluye_ruido_aleatorio():
+    """Con ruido de media cero, promediar SI ayuda."""
+    random.seed(7)
+
+    est = TargetEstimate(alpha_position=0.20, alpha_normal=0.10)
+
+    for _ in range(200):
+        angle = random.gauss(0.0, math.radians(10.0))
+        est.update(1.0, 0.0, math.cos(angle), math.sin(angle))
+
+    assert abs(math.atan2(est.ny, est.nx)) < math.radians(4.0)
+
+
+def test_el_promedio_NO_diluye_un_sesgo_sistematico():
+    """La suposicion falsa que motivo la guarda de oblicuidad.
+
+    El comentario original del servidor decia que meter la normal del
+    LiDAR con doble peso era seguro porque "si el ajuste engancha una
+    pared vecina, el promedio lo diluye". Es falso, y de dos maneras:
+
+      1. El alfa tiene SUELO -- max(alpha, 1/n) -- asi que la media
+         corriente 1/n solo dura las primeras muestras. Despues es un
+         exponencial fijo, con memoria de unas pocas muestras.
+      2. Promediar solo diluye error ALEATORIO. El fallo real es
+         SISTEMATICO: la SVD engancha la pared contigua con coherencia
+         1.00 y devuelve la MISMA respuesta erronea cada ciclo. La
+         media de una constante es esa constante.
+
+    Con doble peso el sesgo no se diluye: gana. Por eso hace falta
+    RECHAZARLO por geometria (normal_obliquity en el servidor), no
+    esperar que se promedie solo.
+    """
+    est = TargetEstimate(alpha_position=0.20, alpha_normal=0.10)
+
+    for _ in range(40):
+        # buena, a 0 grados, peso normal (ArUco)
+        est.update(1.0, 0.0, 1.0, 0.0)
+        # pared contigua, a 90 grados, peso doble (LiDAR)
+        est.update(1.0, 0.0, 0.0, 1.0, alpha_scale=2.0)
+
+    desviacion = abs(math.atan2(est.ny, est.nx))
+
+    # Muy lejos de la buena y pegada a la mala: NO se diluyo.
+    assert desviacion > math.radians(60.0), math.degrees(desviacion)
+
+
+# ---------------------------------------------------------------------
 # Control
 # ---------------------------------------------------------------------
 

@@ -1789,7 +1789,11 @@ class ArucoLidarApproachServer(Node):
                     # Pero el peso doble NO diluye una normal mala: el
                     # alfa del estimador tiene SUELO (max(alpha, 1/n)),
                     # asi que pasadas unas muestras es un filtro
-                    # exponencial fijo de 0.25, que por 2 son 0.50. Y el
+                    # exponencial fijo: 0.25 con el valor por defecto de
+                    # TargetEstimate, o 0.10 con el que pasa este
+                    # servidor (estimate_alpha_normal), y por 2 al meter
+                    # alpha_scale. Da igual cual: en los dos casos el
+                    # sesgo gana (+73.7 y +67.0 grados). Y el
                     # fallo que vimos en el robot no es ruido: la SVD
                     # enganchaba la pared CONTIGUA con coherencia 1.00 y
                     # residuo de milimetros -- misma respuesta erronea
