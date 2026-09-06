@@ -573,6 +573,27 @@ class ArucoLidarApproachServer(Node):
         # umbrales el giro castañea: la zona muerta obliga a mandar el
         # minimo en cuanto se sale de tolerancia, ese minimo se pasa de
         # largo, y al ciclo siguiente hay que corregir al otro lado.
+        # Cuanto se deja alejar el marcador del centro del encuadre
+        # antes de gastar un ciclo en girar. En unidades de
+        # center_x_normalized, que va de -1 a +1: 0.55 deja mas de la
+        # mitad del semiancho de margen y aun asi avisa mucho antes de
+        # que el marcador salga.
+        #
+        # Subirlo = menos giros y aproximacion mas rapida, pero mas
+        # riesgo de perder el marcador. Bajarlo = lo contrario.
+        self.declare_parameter(
+            'center_keep_margin',
+            0.55
+        )
+
+        # Distancia por debajo de la cual el rumbo vuelve a mandar, para
+        # que la llegada quede perpendicular. Por encima se prioriza
+        # avanzar; por debajo ya casi no queda traslacion que perder.
+        self.declare_parameter(
+            'yaw_free_until',
+            0.35
+        )
+
         self.declare_parameter(
             'yaw_hysteresis',
             1.5
@@ -2229,6 +2250,52 @@ class ArucoLidarApproachServer(Node):
                     period,
                 ),
             }
+
+            # -------------------------------------------------
+            # GIRAR LO MENOS POSIBLE MIENTRAS SE APROXIMA
+            #
+            # Es una base mecanum: el desvio lateral se corrige
+            # DESPLAZANDOSE, no rotando. Y rotar aqui sale caro por tres
+            # motivos que se realimentan:
+            #
+            #   1. La base no sabe girar despacio. Su suelo son
+            #      0.37 rad/s, asi que cualquier correccion de rumbo es
+            #      un tiron (medido con curva_respuesta.py).
+            #   2. Ese tiron desenfoca la imagen y el detector pierde el
+            #      marcador. Medido durante una aproximacion: 93
+            #      mensajes sin deteccion contra 78 con ella, un 54% de
+            #      perdida.
+            #   3. Sin detecciones el rumbo estimado se degrada, lo que
+            #      pide otra correccion. Vuelta al punto 1.
+            #
+            # Ademas, como la placa no acepta los tres ejes, cada ciclo
+            # de giro es un ciclo que NO avanza. Con el rodeo quitado la
+            # aproximacion iba a 5.4 mm/s teniendo un suelo de avance de
+            # 70: el cuello de botella era este, no el camino.
+            #
+            # Asi que el criterio para girar deja de ser el error de
+            # rumbo ESTIMADO y pasa a ser lo unico que de verdad
+            # obliga: que el marcador se salga del encuadre. Se mide
+            # directamente en la imagen (center_x_normalized), que no
+            # depende de la normal ni de la pose del ArUco, asi que es
+            # inmune a los saltos de las dos.
+            #
+            # Cerca del objetivo se devuelve el mando al rumbo, para que
+            # la llegada quede perpendicular: ahi ya casi no queda
+            # traslacion que perder.
+            if (
+                detection is not None and
+                remaining > self.pf('yaw_free_until')
+            ):
+
+                if abs(center_error) < self.pf('center_keep_margin'):
+                    # el marcador esta comodo en el encuadre: no gires,
+                    # corrige de lado
+                    yaw_settled = True
+
+                else:
+                    # se va por el borde: este ciclo es de giro puro
+                    yaw_settled = False
 
             vx, vy, wz, yaw_error, reached, yaw_settled = (
                 planner.holonomic_command(
