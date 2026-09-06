@@ -1784,8 +1784,25 @@ class ArucoLidarApproachServer(Node):
                     # La normal del LiDAR es bastante mejor que la del
                     # ArUco, que en yaw es ruidosa y ambigua de perfil.
                     # Se mete como muestra de mas peso en vez de
-                    # sustituir: si el ajuste engancha una pared vecina,
-                    # el promedio lo diluye en lugar de creerselo.
+                    # sustituir.
+                    #
+                    # Pero el peso doble NO diluye una normal mala: el
+                    # alfa del estimador tiene SUELO (max(alpha, 1/n)),
+                    # asi que pasadas unas muestras es un filtro
+                    # exponencial fijo de 0.25, que por 2 son 0.50. Y el
+                    # fallo que vimos en el robot no es ruido: la SVD
+                    # enganchaba la pared CONTIGUA con coherencia 1.00 y
+                    # residuo de milimetros -- misma respuesta erronea
+                    # cada ciclo mientras el robot no se mueva. Un sesgo
+                    # sistematico a peso doble no se promedia, gana:
+                    # simulado con TargetEstimate, una normal a 90 grados
+                    # deja la estimacion en +73.7 grados en UN ciclo.
+                    #
+                    # Por eso vuelve la guarda de oblicuidad, que es lo
+                    # que salvo la unica aproximacion completa (rechazo
+                    # una normal a 82-99 grados y siguio con la camara).
+                    # Una superficie que el robot VE no puede tener su
+                    # normal casi perpendicular a la linea de vision.
                     if use_lidar:
 
                         lidar_normal = (
@@ -1796,16 +1813,47 @@ class ArucoLidarApproachServer(Node):
 
                         if lidar_normal is not None:
 
-                            lnx, lny = planner.outward_normal(
-                                lidar_normal[0],
-                                lidar_normal[1],
+                            obliquity = self.normal_obliquity(
+                                math.atan2(
+                                    lidar_normal[1],
+                                    lidar_normal[0],
+                                ),
+                                target_id,
                             )
 
-                            estimate.update(
-                                mx, my, lnx, lny,
-                                stamp_ns=now_ns,
-                                alpha_scale=2.0,
+                            max_obliquity = math.radians(
+                                self.pf(
+                                    'normal_max_obliquity_deg'
+                                )
                             )
+
+                            if (
+                                obliquity is not None and
+                                obliquity > max_obliquity
+                            ):
+
+                                self.get_logger().warn(
+                                    'Normal del LiDAR descartada: '
+                                    'oblicuidad '
+                                    f'{math.degrees(obliquity):.1f} deg '
+                                    '> '
+                                    f'{self.pf("normal_max_obliquity_deg"):.0f}'
+                                    ' deg. Probablemente la pared '
+                                    'contigua. Sigo con la del ArUco.'
+                                )
+
+                            else:
+
+                                lnx, lny = planner.outward_normal(
+                                    lidar_normal[0],
+                                    lidar_normal[1],
+                                )
+
+                                estimate.update(
+                                    mx, my, lnx, lny,
+                                    stamp_ns=now_ns,
+                                    alpha_scale=2.0,
+                                )
 
             # =====================================================
             # SEARCHING: sin estimacion no hay a donde ir
