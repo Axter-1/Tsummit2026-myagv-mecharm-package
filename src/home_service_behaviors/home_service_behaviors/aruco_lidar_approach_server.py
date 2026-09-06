@@ -690,6 +690,7 @@ class ArucoLidarApproachServer(Node):
         self.check_tolerances(
             1.0 / max(1.0, self.pf('control_rate'))
         )
+        self.check_detection_freshness()
 
     # =============================================================
     # Helpers
@@ -1738,6 +1739,38 @@ class ArucoLidarApproachServer(Node):
                     f'{parada:.3f} {unidad} tras mandarle parar. '
                     f'Subelo por encima de {parada:.3f} o baja el suelo, '
                     'o el control oscilara sin asentarse nunca.'
+                )
+
+    def check_detection_freshness(self):
+        """Avisa si el abort por estimacion rancia no puede dispararse.
+
+        get_detection() descarta una deteccion en cuanto pasa de
+        detection_timeout, asi que ESE es el tiempo real que tarda el
+        servidor en darse cuenta de que ha perdido el marcador. Los
+        cortes por estimacion vieja (estimate_max_age para el aviso,
+        estimate_abort_age para el aborto) se miden desde la ULTIMA
+        deteccion aceptada, luego solo tienen sentido si son mayores
+        que detection_timeout. Si alguien sube detection_timeout por
+        encima de estimate_abort_age, get_detection sigue dando la
+        deteccion vieja por fresca, last_detection_ns se refresca sola,
+        y el aborto no salta nunca -- se vuelve al fallo que este mismo
+        corte venia a arreglar. Misma familia que check_tolerances.
+        """
+        timeout = self.pf('detection_timeout')
+
+        for nombre, valor in (
+            ('estimate_max_age', self.pf('estimate_max_age')),
+            ('estimate_abort_age', self.pf('estimate_abort_age')),
+        ):
+
+            if valor <= timeout:
+
+                self.get_logger().error(
+                    f'{nombre}={valor:.2f} s <= detection_timeout='
+                    f'{timeout:.2f} s: get_detection() descarta la '
+                    'deteccion antes de que este corte pueda medir '
+                    'nada, asi que no disparara. Subelo por encima de '
+                    f'{timeout:.2f} o baja detection_timeout.'
                 )
 
     # =============================================================
