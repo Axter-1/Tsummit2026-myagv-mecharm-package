@@ -605,3 +605,57 @@ de deteccion fresca en `get_marker_bearing()` y sin la salida por
 `lost_marker_timeout` en `ALIGN_HEADING_TO_ARUCO`. Reaplicado sobre su
 commit. Si vuelve a aparecer `state: ALIGN_HEADING_TO_ARUCO` con
 `center_error: 0.0`, es que se ha vuelto a perder.
+
+---
+
+## Novena ronda (2026-09-06): la zona muerta no era la causa
+
+**Rectificacion.** Durante varias rondas las dos sesiones dimos por
+hecho que el robot no se movia por la zona muerta de los motores, y se
+subieron los topes a ciegas tres veces (0.04 -> 0.08 -> 0.22) sin medir
+nada. Era falso. Las causas reales del "publica mando y no se mueve"
+eran otras dos, ya corregidas:
+
+  - El mando alternaba de signo por el castañeo del control de giro
+    (umbral unico + zona muerta = corregir al otro lado cada ciclo).
+    Arreglado con histeresis de dos umbrales.
+  - La direccion salia torcida hasta 26 grados por aplicar la zona
+    muerta EJE A EJE en vez de sobre el vector.
+
+Lo que quede en este documento atribuyendo sintomas de movimiento a la
+zona muerta hay que leerlo con esto delante. En concreto, la nota de la
+octava ronda sobre `apply_linear_deadband` describe bien el mecanismo,
+pero el umbral que suponia era mucho mas alto que el real.
+
+**Lo que esta medido y lo que no.** El barrido que produjo el "0.024
+m/s" solo subia: arrancaba en el escalon mas bajo y, como el robot ya se
+movia alli, devolvia ese valor. Eso no es el umbral, es el punto de
+partida. Lo unico que se puede afirmar es una COTA: el umbral esta en
+0.024 m/s o por debajo. Basta para descartar la zona muerta como causa
+-- si se mueve a 0.024, un rango de mando que llega a 0.08 no puede
+estar entero dentro de la zona muerta -- pero no da el valor. El
+calibrador ya acota en las dos direcciones; **queda correrlo otra vez**,
+y el eje de giro sigue sin medirse nunca.
+
+### La elipse de la zona muerta
+
+Aplicar el minimo eje por eje destroza la direccion: con el objetivo muy
+al lado, `vy` es grande y `vx` minusculo, pero el minimo de avance eleva
+ese `vx` y el robot sale en diagonal. En el plano (vx, vy) la zona
+muerta es una ELIPSE de semiejes `min_linear` y `min_lateral`, y hay que
+escalar el vector entero hasta su borde.
+
+El radio en la direccion pedida es
+
+    r = 1 / sqrt((dx/a)^2 + (dy/b)^2)
+
+y **no** `hypot(a*dx, b*dy)`, que parametriza la elipse por la direccion
+de la preimagen en el circulo unidad y siempre sobrepasa. Con `a` y `b`
+parecidos la diferencia es del 1% y pasa desapercibida; en cuanto
+divergen se dispara, y son ajustables desde el launch:
+
+    a=0.03  b=0.035   ->  hasta x1.01   (los valores de hoy)
+    a=0.03  b=0.20    ->  hasta x3.41 a 45 grados
+
+Un suelo 3.4 veces mas alto del pedido es exactamente el tiron que bajar
+los minimos pretende evitar. Cubierto por tres pruebas.

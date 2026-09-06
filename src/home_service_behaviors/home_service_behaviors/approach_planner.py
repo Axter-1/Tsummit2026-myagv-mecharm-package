@@ -461,6 +461,38 @@ def apply_deadband(value, minimum, tolerance_reached=False):
     return value
 
 
+def deadband_floor(dx, dy, min_linear, min_lateral):
+    """Radio de la elipse de zona muerta en la direccion (dx, dy) unitaria.
+
+    La elipse es (vx/a)^2 + (vy/b)^2 = 1 con a=min_linear y
+    b=min_lateral. Sustituyendo el punto (r*dx, r*dy) y despejando:
+
+        r = 1 / sqrt((dx/a)^2 + (dy/b)^2)
+
+    NO es hypot(a*dx, b*dy). Esa expresion parametriza la elipse por la
+    direccion de la PREIMAGEN en el circulo unidad, no por la del rayo
+    que se pide, y por Cauchy-Schwarz siempre sobrepasa. Con a y b
+    parecidos la diferencia es del 1% y no se nota; en cuanto divergen
+    se dispara, y son ajustables desde el launch:
+
+        a=0.03 b=0.035   ->  hasta x1.01   (los valores de hoy)
+        a=0.03 b=0.20    ->  hasta x3.41 a 45 grados
+
+    Un suelo 3.4 veces mas alto del pedido es exactamente el tiron que
+    bajar los minimos pretende evitar.
+
+    Con cualquiera de los dos semiejes a cero la elipse degenera y no
+    hay suelo que aplicar: se devuelve 0 y el mando pasa tal cual.
+    """
+    if min_linear <= 0.0 or min_lateral <= 0.0:
+        return 0.0
+
+    return 1.0 / math.sqrt(
+        (dx / min_linear) ** 2 +
+        (dy / min_lateral) ** 2
+    )
+
+
 # ---------------------------------------------------------------------
 # Ley de control holonoma
 # ---------------------------------------------------------------------
@@ -578,9 +610,10 @@ def holonomic_command(
 
             dx, dy = vx / speed_norm, vy / speed_norm
 
-            floor_speed = math.hypot(
-                limits['min_linear'] * dx,
-                limits['min_lateral'] * dy,
+            floor_speed = deadband_floor(
+                dx, dy,
+                limits['min_linear'],
+                limits['min_lateral'],
             )
 
             if speed_norm < floor_speed:

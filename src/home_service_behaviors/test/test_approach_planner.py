@@ -27,6 +27,7 @@ from home_service_behaviors.approach_planner import (
     predict_pose,
     profile_speed,
     staging_pose,
+    deadband_floor,
 )
 
 
@@ -559,3 +560,45 @@ def test_la_zona_muerta_eleva_el_modulo_lo_justo():
 
     assert reached
     assert vx == 0.0 and vy == 0.0
+
+
+def test_el_suelo_de_zona_muerta_cae_en_la_elipse():
+    """El suelo debe caer EN el borde de la elipse, no cerca.
+
+    hypot(a*dx, b*dy) parametriza la elipse por la direccion de la
+    preimagen en el circulo unidad, no por la del rayo pedido. Con a y
+    b parecidos se confunde con el radio real; en cuanto divergen se
+    dispara.
+    """
+    for a, b in ((0.03, 0.035), (0.03, 0.20), (0.12, 0.13), (0.05, 0.005)):
+        for deg in range(0, 91, 5):
+            r = math.radians(deg)
+            dx, dy = math.cos(r), math.sin(r)
+
+            radio = deadband_floor(dx, dy, a, b)
+
+            # el punto devuelto satisface la ecuacion de la elipse
+            en_elipse = (radio * dx / a) ** 2 + (radio * dy / b) ** 2
+
+            assert abs(en_elipse - 1.0) < 1e-9, (a, b, deg, en_elipse)
+
+
+def test_el_suelo_no_sobrepasa_cuando_los_semiejes_divergen():
+    """Regresion del x3.41.
+
+    Con min_linear 0.03 y min_lateral 0.20, la formula anterior daba
+    0.1430 a 45 grados donde la elipse vale 0.0420. Un suelo 3.4 veces
+    mas alto del pedido es el tiron que bajar los minimos evita.
+    """
+    dx = dy = math.cos(math.radians(45.0))
+
+    radio = deadband_floor(dx, dy, 0.03, 0.20)
+
+    assert abs(radio - 0.04200) < 1e-4, radio
+    assert radio < math.hypot(0.03 * dx, 0.20 * dy)
+
+
+def test_sin_semieje_no_hay_suelo():
+    """Un minimo a cero desactiva la zona muerta en vez de dividir por cero."""
+    assert deadband_floor(1.0, 0.0, 0.0, 0.035) == 0.0
+    assert deadband_floor(0.0, 1.0, 0.03, 0.0) == 0.0
