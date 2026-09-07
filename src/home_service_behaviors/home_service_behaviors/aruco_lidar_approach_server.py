@@ -587,7 +587,20 @@ class ArucoLidarApproachServer(Node):
         # recto al objetivo en vez de rodear por el punto de encare.
         self.declare_parameter(
             'corridor_radius',
-            0.12
+            # 0.05, no 0.12. El pasillo marca cuanto se admite estar
+            # fuera del eje de la normal al entrar en el tramo recto, y
+            # ese desvio se paga como un giro en seco al final, cuando
+            # el marcador ya llena el encuadre.
+            #
+            # 0.12 a 0.346 m del marcador eran 19 grados: el robot
+            # giraba de golpe, el ArUco se salia de la imagen y acababa
+            # torcido respecto al marcador. Medido en pista, con salto
+            # del centro normalizado de 0.55.
+            #
+            # 0.05 = final * tan(heading_tolerance), o sea el desvio
+            # mas ancho que la tolerancia de rumbo puede absorber sin
+            # pedir un giro. check_tolerances lo comprueba al arrancar.
+            0.05
         )
 
         # Frenada del perfil trapezoidal: v = sqrt(2*a*d).
@@ -1869,6 +1882,43 @@ class ArucoLidarApproachServer(Node):
                     f'Subelo por encima de {parada:.3f} o baja el suelo, '
                     'o el control oscilara sin asentarse nunca.'
                 )
+
+        # -------------------------------------------------
+        # El pasillo tiene que caber en la tolerancia de rumbo
+        #
+        # Dentro del pasillo se va RECTO al objetivo, y cerca del final
+        # el rumbo deseado pasa de "apuntar al marcador" a "apuntar por
+        # la normal". Si el pasillo admite estar muy fuera del eje, esas
+        # dos direcciones difieren mucho y el cambio es un giro en seco
+        # justo cuando el marcador ya llena el encuadre: se sale de la
+        # imagen, se pierde, y el robot acaba torcido respecto al
+        # marcador.
+        #
+        # Medido en pista: pasillo 0.12 a 0.346 m del marcador son 19
+        # grados de giro, que mueven el centro normalizado 0.64. Se
+        # observo un salto de 0.55 y la deteccion se perdio.
+        # -------------------------------------------------
+
+        corridor = self.pf('corridor_radius')
+        final = self.planner_stop_distance(
+            self.pf('default_stop_distance')
+            if self.has_parameter('default_stop_distance')
+            else 0.20
+        )
+        maximo = final * math.tan(self.pf('heading_tolerance'))
+
+        if corridor > maximo:
+
+            desvio = math.degrees(math.atan2(corridor, final))
+
+            self.get_logger().error(
+                f'corridor_radius={corridor:.3f} m es DEMASIADO ANCHO '
+                f'para heading_tolerance={self.pf("heading_tolerance"):.3f} '
+                f'rad: permite entrar al tramo recto {desvio:.1f} grados '
+                f'fuera de la normal, y ese error se paga como un giro '
+                f'en seco al final que saca el marcador del encuadre. '
+                f'Bajalo a {maximo:.3f} o menos.'
+            )
 
     def check_detection_freshness(self):
         """Avisa si el abort por estimacion rancia no puede dispararse.
