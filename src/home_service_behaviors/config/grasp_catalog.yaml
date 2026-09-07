@@ -70,6 +70,12 @@ grasp_catalog:
   # desde la base del brazo supere esto (MechArm 270 -> 270 mm).
   max_reach_mm: 250.0
 
+  # Suelo de alcance: por debajo, el objetivo queda practicamente encima
+  # de la base del brazo. Importa porque el X del agarre sale de la
+  # parada de la base MENOS arm_x_offset_mm (150.2), y la base llega con
+  # +-34 mm de dispersion: una parada de 0.24 daria X = 90 mm.
+  min_reach_mm: 120.0
+
   # El brazo debe estar recogido antes de mover la base. Dejalo vacio
   # hasta ensenar una pose realmente segura y guardarla en poses.yaml;
   # con este valor vacio, cualquier grasp con base queda bloqueado.

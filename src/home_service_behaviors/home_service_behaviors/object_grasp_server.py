@@ -192,6 +192,29 @@ class ObjectGraspServer(Node):
         # coincidiera, acercarse mas nunca podria empeorar el alcance.
         # Falta medir ese offset y meterlo explicito.
         self.declare_parameter("approach_stop_distance", 0.30)
+
+        # DESFASE ENTRE LO QUE MIDE LA PARADA Y LO QUE ALCANZA EL BRAZO
+        #
+        # _grasp_coords calculaba X = parada * 1000 a secas, dando por
+        # hecho que el origen del frame del brazo coincide con el punto
+        # desde el que se mide la parada del LiDAR. No coincide, y se
+        # notaba: con parada 0.30 el radio salia 301 mm contra un
+        # max_reach_mm de 250, o sea que el agarre se rechazaba justo a
+        # la distancia a la que el operador comprobo que SI alcanza.
+        #
+        # MEDIDO: con la base a 300 mm de parada, la consola del brazo
+        # leyo X = 149.8 mm con la pinza sobre la pieza. Diferencia
+        # 150.2 mm.
+        #
+        # No se puede descomponer con una sola lectura -- parte es la
+        # distancia de la base del brazo al borde delantero, y parte que
+        # la pieza no esta en el mismo plano que el ArUco. Da igual: es
+        # una constante de este montaje y basta con restarla.
+        #
+        # OJO: deja de valer si cambia la geometria pieza/marcador. Si
+        # se recoloca el ArUco respecto a la pieza, hay que volver a
+        # medir la X en la consola.
+        self.declare_parameter("arm_x_offset_mm", 150.2)
         self.declare_parameter("approach_timeout_sec", 45.0)
         # Cuanto se espera a ver un ArUco en modo "auto".
         self.declare_parameter("detect_timeout_sec", 15.0)
@@ -205,6 +228,9 @@ class ObjectGraspServer(Node):
         # Distancia REAL a la que quedo la base tras la ultima
         # aproximacion, medida por LiDAR. None mientras no haya una.
         self.measured_stop_distance = None
+        self.arm_x_offset_mm = float(
+            self.get_parameter("arm_x_offset_mm").value
+        )
         self.stop_distance = float(
             self.get_parameter("approach_stop_distance").value
         )
@@ -297,6 +323,12 @@ class ObjectGraspServer(Node):
         gripper = cat.get("gripper", {})
         self.table_z_mm = float(cat.get("table_z_mm", 0.0))
         self.max_reach_mm = float(cat.get("max_reach_mm", 250.0))
+        # Suelo de alcance. El de arriba evita pedirle al brazo mas de lo
+        # que da; este evita lo contrario, que con el offset del frame es
+        # un riesgo real: la base llega con +-34 mm de dispersion, asi
+        # que una parada corta de 0.24 deja X = 240 - 150.2 = 90 mm, o
+        # sea el objetivo casi encima de la propia base del brazo.
+        self.min_reach_mm = float(cat.get("min_reach_mm", 120.0))
         self.safe_navigation_pose = str(
             cat.get("safe_navigation_pose", "")
         ).strip()
@@ -569,6 +601,18 @@ class ObjectGraspServer(Node):
                 "Baja grasp_z_mm o acerca la base."
             )
 
+        if coords[0] <= 0.0 or reach < self.min_reach_mm:
+            goal_handle.abort()
+            return self._result(
+                False, "INVALID_GOAL",
+                f"Objetivo DEMASIADO CERCA: X={coords[0]:.0f} mm, radio "
+                f"{reach:.0f}, por debajo de min_reach_mm="
+                f"{self.min_reach_mm:.0f}. La base se ha quedado corta: "
+                f"paro a {(self.measured_stop_distance or self.stop_distance)*1000:.0f} mm "
+                f"y el offset del brazo son {self.arm_x_offset_mm:.0f}. "
+                "Aleja la base y repite."
+            )
+
         self.get_logger().info(
             f"Agarre en X={coords[0]:.0f} Y={coords[1]:.0f} "
             f"Z={coords[2]:.0f} mm (radio {reach:.0f} mm)"
@@ -651,7 +695,7 @@ class ObjectGraspServer(Node):
                 else self.stop_distance
             )
             base = [
-                parada * 1000.0 + spec.offset_mm[0],
+                parada * 1000.0 - self.arm_x_offset_mm + spec.offset_mm[0],
                 spec.offset_mm[1],
                 spec.absolute_grasp_z(),
             ]
