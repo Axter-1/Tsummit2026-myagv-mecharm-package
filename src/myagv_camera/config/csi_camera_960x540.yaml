@@ -1,10 +1,23 @@
-# Calibracion de referencia de la camara frontal CSI (IMX219) del myAGV
-# a 960x540. Fuente: guia "myAGV — ArUco Camera Detection & Robotic Arm
-# Control". Formato estandar de camera_calibration / camera_info_manager.
+# Calibracion de la camara frontal CSI (IMX219) del myAGV a 960x540,
+# MEDIDA EN ESTA UNIDAD con tablero de ajedrez (107 imagenes).
 #
-# IMPORTANTE: cada modulo/lente difiere ligeramente. Para medir
-# distancias con precision, recalibra tu unidad (tablero de ajedrez
-# OpenCV o ros2 run camera_calibration) y sustituye estos valores.
+# Sustituye a la de la guia del fabricante, que nunca se midio en este
+# robot y cuyo propio comentario pedia recalibrar. Aquella daba
+# fx=785.9 y fy=584.8: un 25.6% de diferencia entre los dos ejes, que
+# con un escalado uniforme de 1280x720 a 960x540 no es fisico.
+#
+# El efecto era que la camara subestimaba la distancia un 24%. Medido
+# de dos formas independientes que coinciden:
+#
+#   contra el LiDAR, dos corridas a distinta distancia   0.751 y 0.764
+#   cociente de focales efectivas vieja/nueva            0.755
+#
+# Por eso la aproximacion se plantaba lejos del marcador y oscilaba: el
+# camino se agotaba antes de llegar, y el eje de la normal no estaba
+# donde el robot creia.
+#
+# Si algun dia fx y fy vuelven a separarse mas de un 2%, sospecha de la
+# captura antes que del calibrador.
 
 image_width: 960
 image_height: 540
@@ -14,25 +27,25 @@ distortion_model: plumb_bob
 camera_matrix:
   rows: 3
   cols: 3
-  data: [785.855437,   0.0,       451.670922,
-           0.0,       584.820336, 259.056856,
-           0.0,         0.0,         1.0]
+  data: [897.167140, 0.000000, 503.548660,
+         0.000000, 898.368110, 268.496360,
+         0.000000, 0.000000, 1.000000]
 
 distortion_coefficients:
   rows: 1
   cols: 5
-  data: [0.095135, -0.109279, -0.002513, -0.002418, 0.0]
+  data: [0.049751, -0.050054, 0.003230, 0.003726, 0.000000]
 
 rectification_matrix:
   rows: 3
   cols: 3
-  data: [1.0, 0.0, 0.0,
-         0.0, 1.0, 0.0,
-         0.0, 0.0, 1.0]
+  data: [1.000000, 0.000000, 0.000000,
+         0.000000, 1.000000, 0.000000,
+         0.000000, 0.000000, 1.000000]
 
 projection_matrix:
   rows: 3
   cols: 4
-  data: [785.855437,   0.0,       451.670922, 0.0,
-           0.0,       584.820336, 259.056856, 0.0,
-           0.0,         0.0,         1.0,      0.0]
+  data: [907.678340, 0.000000, 505.912960, 0.000000,
+         0.000000, 909.986270, 269.479930, 0.000000,
+         0.000000, 0.000000, 1.000000, 0.000000]
