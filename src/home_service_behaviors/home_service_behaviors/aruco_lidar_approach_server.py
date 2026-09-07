@@ -2166,8 +2166,16 @@ class ArucoLidarApproachServer(Node):
                     )
 
                     last_detection_ns = now_ns
-                    last_detection_xy = (rx, ry)
                     stale_warned = False
+
+                    # La pose se pide aqui explicitamente: este bloque
+                    # corre tambien en SEARCHING, donde rx/ry todavia no
+                    # existen (se desempaquetan mas abajo, ya en
+                    # PURSUING). Usarlas aqui reventaba el goal con
+                    # UnboundLocalError y un abort de estado vacio.
+                    pose_ahora = self.get_robot_pose()
+                    if pose_ahora is not None:
+                        last_detection_xy = (pose_ahora[0], pose_ahora[1])
 
                     # La normal del LiDAR es bastante mejor que la del
                     # ArUco, que en yaw es ruidosa y ambigua de perfil.
@@ -2541,12 +2549,42 @@ class ArucoLidarApproachServer(Node):
                     # se va por el borde: este ciclo es de giro puro
                     yaw_settled = False
 
+            # -------------------------------------------------
+            # FRENAR CON LA REGLA MAS PESIMISTA
+            #
+            # `remaining` sale del camino, y el camino sale de la pose
+            # del marcador por camara. Un sesgo de la camara HACIA
+            # ARRIBA no frena a tiempo: medido en pista, el robot se
+            # planto a 0.159 m con 0.200 pedidos, y luego no podia
+            # corregir porque para la geometria ya habia llegado.
+            #
+            # Las tres corridas del dia dieron 0.226, 0.197 y 0.159
+            # sobre una tolerancia de 0.03: las dos buenas cayeron
+            # dentro por poco, no por precision.
+            #
+            # El LiDAR mide el plano de verdad y es quien juzga la
+            # llegada, asi que aqui manda la regla que diga "estas mas
+            # cerca". El minimo solo puede ADELANTAR la frenada, nunca
+            # retrasarla, o sea que no añade riesgo de choque.
+            #
+            # final_distance es del ciclo anterior; a 20 Hz y 0.18 m/s
+            # eso son 9 mm. El > 0.0 filtra el centinela inicial.
+            # -------------------------------------------------
+
+            remaining_ctrl = remaining
+
+            if final_distance > 0.0:
+                remaining_ctrl = min(
+                    remaining,
+                    final_distance - stop_distance,
+                )
+
             vx, vy, wz, yaw_error, reached, yaw_settled = (
                 planner.holonomic_command(
                     rx, ry, ryaw,
                     carrot_xy,
                     target_yaw,
-                    remaining,
+                    remaining_ctrl,
                     limits,
                     yaw_settled=yaw_settled,
                 )
