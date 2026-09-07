@@ -276,7 +276,8 @@ check() {
     printf '   (necesita que el robot ya este arrancado con DISTRIBUTED=1)\n'
     # shellcheck disable=SC1090
     if [ -f "/opt/ros/${ROS_DISTRO_USED}/setup.bash" ]; then
-        (
+        local topics
+        topics="$(
             # Los setup.bash de ROS leen variables sin definir
             # (AMENT_TRACE_SETUP_FILES y compania): con 'set -u' revientan
             # con "unbound variable". Se desactiva solo para el source.
@@ -287,10 +288,25 @@ check() {
             export ROS_DOMAIN_ID RMW_IMPLEMENTATION
             CYCLONEDDS_URI="$(dds_uri | tr -d '\n')"
             export CYCLONEDDS_URI
-            timeout 8 ros2 topic list 2>/dev/null | grep -E \
-                "/camera/image_raw/compressed|/scan_filtered|/odom|/cmd_vel" \
-                || printf '   (todavia no se ve nada del robot)\n'
-        ) || true
+            timeout 8 ros2 topic list 2>/dev/null || true
+        )"
+
+        local topic missing_topics=0
+        for topic in /camera/image_raw/compressed /scan_filtered /odom; do
+            if printf '%s\n' "${topics}" | grep -Fxq "${topic}"; then
+                printf '   OK    %s\n' "${topic}"
+            else
+                printf '   FALTA %s\n' "${topic}"
+                missing_topics=1
+            fi
+        done
+
+        if [ "${missing_topics}" -ne 0 ]; then
+            printf '   FALLO DDS: IP responde, pero ROS 2 no cruza entre maquinas.\n'
+            printf '   Revisa el firewall UDP del portatil para el dominio 30\n'
+            printf '   (puertos 14900-15000) y que no haya aislamiento de clientes.\n'
+            fail=1
+        fi
     fi
 
     printf '\n'
