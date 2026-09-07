@@ -193,6 +193,9 @@ class ObjectGraspServer(Node):
         self.declare_parameter("enable_approach", True)
 
         self.detections_topic = str(self.get_parameter("detections_topic").value)
+        # Distancia REAL a la que quedo la base tras la ultima
+        # aproximacion, medida por LiDAR. None mientras no haya una.
+        self.measured_stop_distance = None
         self.stop_distance = float(
             self.get_parameter("approach_stop_distance").value
         )
@@ -327,9 +330,10 @@ class ObjectGraspServer(Node):
         self._feedback(goal_handle, "SAFE_POSE")
         goal = MoveArm.Goal()
         goal.pose_name = self.safe_navigation_pose
-        return self._send_and_wait(
+        ok, msg, _ = self._send_and_wait(
             self.move_client, goal, "mecharm/move_arm pose segura", 90.0
         )
+        return ok, msg
 
     # =================================================================
     # Detecciones
@@ -388,31 +392,36 @@ class ObjectGraspServer(Node):
         return result
 
     def _send_and_wait(self, client, goal, name, timeout_sec):
-        """Manda un goal y bloquea hasta el resultado. Devuelve (ok, msg)."""
+        """Manda un goal y bloquea. Devuelve (ok, msg, resultado).
+
+        El resultado se devuelve entero a proposito: la aproximacion
+        MIDE donde ha parado de verdad y ese numero no se puede tirar.
+        Ver _execute, donde sustituye a la distancia nominal.
+        """
         if not client.wait_for_server(timeout_sec=5.0):
-            return False, f"{name} no disponible"
+            return False, f"{name} no disponible", None
 
         send_future = client.send_goal_async(goal)
         if not wait_future(self, send_future, timeout_sec):
-            return False, f"{name}: timeout aceptando el goal"
+            return False, f"{name}: timeout aceptando el goal", None
 
         handle = send_future.result()
         if handle is None or not handle.accepted:
-            return False, f"{name}: goal rechazado"
+            return False, f"{name}: goal rechazado", None
 
         result_future = handle.get_result_async()
         if not wait_future(self, result_future, timeout_sec):
             handle.cancel_goal_async()
-            return False, f"{name}: timeout esperando el resultado"
+            return False, f"{name}: timeout esperando el resultado", None
 
         wrapped = result_future.result()
         if wrapped is None:
-            return False, f"{name}: sin resultado"
+            return False, f"{name}: sin resultado", None
 
         res = wrapped.result
         ok = bool(getattr(res, "success", False))
         msg = getattr(res, "message", "") or getattr(res, "status", "")
-        return ok, f"{name}: {msg}"
+        return ok, f"{name}: {msg}", res
 
     # =================================================================
     # Ejecucion
@@ -490,7 +499,7 @@ class ObjectGraspServer(Node):
             approach.target_id = int(marker_id)
             approach.stop_distance = self.stop_distance
             approach.timeout_sec = self.approach_timeout
-            ok, msg = self._send_and_wait(
+            ok, msg, approach_res = self._send_and_wait(
                 self.approach_client, approach,
                 "aruco_lidar_approach", self.approach_timeout + 15.0,
             )
@@ -498,6 +507,33 @@ class ObjectGraspServer(Node):
             if not ok:
                 goal_handle.abort()
                 return self._result(False, "GRASP_FAILED", msg)
+
+            # DONDE PARO DE VERDAD, no donde se le pidio.
+            #
+            # La base no aterriza en stop_distance: medido en cuatro
+            # corridas pidiendo 0.200, salieron 0.226, 0.197, 0.159 y
+            # 0.227. Son 68 mm de dispersion, y la pinza del poste
+            # tolera +-6 mm. Calcular el agarre sobre el valor NOMINAL
+            # es dar por bueno un dato que sabemos que varia diez veces
+            # mas que el margen de la pieza.
+            #
+            # final_distance lo mide el LiDAR contra el plano, que es
+            # la misma regla que decide la llegada.
+            medida = float(getattr(approach_res, "final_distance", 0.0))
+
+            if medida > 0.0:
+                self.measured_stop_distance = medida
+                self.get_logger().info(
+                    f"Aproximacion medida: {medida:.3f} m "
+                    f"(nominal {self.stop_distance:.3f}, "
+                    f"diferencia {(medida - self.stop_distance)*1000:+.0f} mm)"
+                )
+            else:
+                self.measured_stop_distance = None
+                self.get_logger().warn(
+                    "La aproximacion no reporto distancia; se usara la "
+                    "nominal y el agarre puede quedar descolocado."
+                )
         else:
             self.get_logger().info("Aproximacion desactivada; se salta.")
 
@@ -563,7 +599,7 @@ class ObjectGraspServer(Node):
             req.retreat_pose_name or spec.carry_pose
         )
 
-        ok, msg = self._send_and_wait(
+        ok, msg, _ = self._send_and_wait(
             self.pick_client, pick, "mecharm/pick_place", 90.0
         )
         self.get_logger().info(msg)
@@ -594,8 +630,19 @@ class ObjectGraspServer(Node):
             return list(spec.target_coords)
         else:
             # X delante del brazo a la distancia de parada, Y centrado.
+            #
+            # La MEDIDA manda sobre la nominal. La base no aterriza
+            # donde se le pide: 68 mm de dispersion en cuatro corridas
+            # contra los +-6 mm que tolera la pinza del poste. Usar el
+            # valor pedido seria fiarse del unico numero que sabemos
+            # que no se cumple.
+            parada = (
+                self.measured_stop_distance
+                if self.measured_stop_distance is not None
+                else self.stop_distance
+            )
             base = [
-                self.stop_distance * 1000.0 + spec.offset_mm[0],
+                parada * 1000.0 + spec.offset_mm[0],
                 spec.offset_mm[1],
                 spec.absolute_grasp_z(),
             ]
