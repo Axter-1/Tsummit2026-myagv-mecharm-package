@@ -95,6 +95,15 @@ class GraspSpec:
         self.target_coords = None
         raw_target = raw.get("target_coords")
 
+        # Parada de la base a la que se enseño target_coords. Una pose
+        # enseñada es exacta SOLO desde donde se enseño, y la base llega
+        # con +-34 mm de dispersion. Guardando la parada se puede
+        # corregir la X por la diferencia y conservar la orientacion,
+        # que es lo que de verdad no se puede adivinar.
+        self.target_coords_stop_m = raw.get("target_coords_stop_m")
+        if self.target_coords_stop_m is not None:
+            self.target_coords_stop_m = float(self.target_coords_stop_m)
+
         self.table_z_mm = float(table_z_mm)
 
         stroke = float(gripper_cfg.get("stroke_mm", 45.0))
@@ -202,9 +211,14 @@ class ObjectGraspServer(Node):
         # max_reach_mm de 250, o sea que el agarre se rechazaba justo a
         # la distancia a la que el operador comprobo que SI alcanza.
         #
-        # MEDIDO: con la base a 300 mm de parada, la consola del brazo
-        # leyo X = 149.8 mm con la pinza sobre la pieza. Diferencia
-        # 150.2 mm.
+        # MEDIDO: con el LiDAR a ~280 mm, la consola leyo X = 138.0 mm
+        # con las mordazas rozando la superficie. Diferencia 142.0 mm.
+        #
+        # Una lectura anterior daba 150.2. Las dos son coherentes si ese
+        # "aproximadamente 28 cm" era en realidad ~288: el offset es el
+        # mismo y lo que varia es la parada, que se midio a ojo. Se usa
+        # 142 por ser la lectura corregida, pero hay ~8 mm de
+        # incertidumbre en este numero.
         #
         # No se puede descomponer con una sola lectura -- parte es la
         # distancia de la base del brazo al borde delantero, y parte que
@@ -214,7 +228,7 @@ class ObjectGraspServer(Node):
         # OJO: deja de valer si cambia la geometria pieza/marcador. Si
         # se recoloca el ArUco respecto a la pieza, hay que volver a
         # medir la X en la consola.
-        self.declare_parameter("arm_x_offset_mm", 150.2)
+        self.declare_parameter("arm_x_offset_mm", 142.0)
         self.declare_parameter("approach_timeout_sec", 45.0)
         # Cuanto se espera a ver un ArUco en modo "auto".
         self.declare_parameter("detect_timeout_sec", 15.0)
@@ -680,7 +694,27 @@ class ObjectGraspServer(Node):
         if len(req.target_coords) >= 3:
             base = list(req.target_coords[:3])
         elif spec.target_coords is not None:
-            return list(spec.target_coords)
+            ensenada = list(spec.target_coords)
+
+            # Si sabemos a que parada se enseño y donde ha parado de
+            # verdad, se desplaza la X por la diferencia. La orientacion
+            # y la altura se respetan tal cual: son propiedades de como
+            # se agarra la pieza, no de donde esta la base.
+            if (
+                spec.target_coords_stop_m is not None and
+                self.measured_stop_distance is not None
+            ):
+                corr = (
+                    self.measured_stop_distance - spec.target_coords_stop_m
+                ) * 1000.0
+                ensenada[0] += corr
+                self.get_logger().info(
+                    f"Pose ensenada a {spec.target_coords_stop_m:.3f} m, "
+                    f"base parada en {self.measured_stop_distance:.3f}: "
+                    f"X corregida {corr:+.1f} mm -> {ensenada[0]:.1f}"
+                )
+
+            return ensenada
         else:
             # X delante del brazo a la distancia de parada, Y centrado.
             #

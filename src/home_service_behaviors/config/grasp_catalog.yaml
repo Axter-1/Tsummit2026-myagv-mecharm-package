@@ -62,9 +62,10 @@ grasp_catalog:
   # de magnitud: tenia el SIGNO cambiado. 140 mm de error, que es bajar
   # el brazo 14 cm por encima de la pieza y cerrar al aire.
   #
-  # PRELIMINAR: una sola lectura. Repetir tres o cuatro veces subiendo y
-  # bajando; si varian mas de 2-3 mm no es fiable.
-  table_z_mm: -49.8
+  # Lectura corregida por el operador: [138.00, 6.50, -42.70, ...] con
+  # las mordazas rozando la superficie y el LiDAR a ~0.28 m. Sustituye a
+  # la primera lectura, que dio -49.8.
+  table_z_mm: -42.70
 
   # Margen de seguridad: el nodo rechaza cualquier objetivo cuyo radio
   # desde la base del brazo supere esto (MechArm 270 -> 270 mm).
@@ -175,9 +176,24 @@ grasp_catalog:
       span_mm: 20.0
       open_mm: 32.0
       close_mm: 15.0             # aplasta 5 mm
-      # No usar el brazo hasta volver a ensenar una pose valida en pista.
       require_calibrated_target: true
-      # Respaldo documental; require_calibrated_target impide usarlo.
+      # POSE ENSENADA EN PISTA, con las mordazas sobre el tubo.
+      # Leida de la consola: c -> [X, Y, Z, RX, RY, RZ].
+      #
+      # La orientacion es lo que no se podia adivinar. El calculo
+      # generico asumia [180, 0, 0] (descenso vertical) y la real es
+      # [-15.26, 83.99, -14.38]: RY casi 84 grados. Con la supuesta, la
+      # muneca habria bajado contra la pieza.
+      #
+      # Contraste que da confianza: la altura enseñada queda 68.3 mm
+      # sobre la superficie (25.60 - (-42.70)) y grasp_z_mm decia 70.0.
+      # La geometria del catalogo era buena; lo que fallaba era la
+      # referencia absoluta y la orientacion.
+      target_coords: [222.30, 21.20, 25.60, -15.26, 83.99, -14.38]
+      # Parada de la base a la que se enseño. Sin esto la pose solo vale
+      # desde ese punto exacto, y la base llega con +-34 mm.
+      target_coords_stop_m: 0.28
+      # Respaldo documental; manda target_coords.
       grasp_z_mm: 70.0
       approach_height_mm: 60.0
       grasp_offset_mm: [0.0, 0.0]
