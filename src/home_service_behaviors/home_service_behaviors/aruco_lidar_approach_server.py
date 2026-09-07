@@ -376,6 +376,31 @@ class ArucoLidarApproachServer(Node):
             0.195
         )
 
+        # Cuanto mas lejos que el plano esperado se acepta un eco del
+        # sector frontal. Por encima es el fondo -- tipicamente la pared
+        # detras del marcador -- y falsea la distancia hacia arriba.
+        #
+        # La banda es de UN SOLO LADO: un eco mas cerca de lo esperado
+        # es un obstaculo de verdad y tiene que seguir contando, porque
+        # es lo unico que dispara la parada de seguridad.
+        #
+        # 0.08 = el lado del marcador. Mas estrecho y el ruido del
+        # sensor empieza a vaciar el sector; mas ancho y vuelve a
+        # colarse una pared que este a 13 cm, que es el caso medido.
+        self.declare_parameter(
+            'lidar_front_depth_band',
+            0.08
+        )
+
+        # Cuanto se tolera que el robot este parado sin haber declarado
+        # llegada antes de abortar con diagnostico. Dos segundos son
+        # cuarenta ciclos a 20 Hz: de sobra para distinguir un bloqueo
+        # real de un ciclo de giro puro con traslacion nula.
+        self.declare_parameter(
+            'stall_timeout',
+            2.0
+        )
+
         # El ArUco debe seguir centrado al aceptar el rango LiDAR final:
         # asi se evita parar ante otra superficie del sector frontal.
         self.declare_parameter(
@@ -1449,7 +1474,7 @@ class ArucoLidarApproachServer(Node):
             laser_x
         )
 
-    def get_front_lidar_range(self):
+    def get_front_lidar_range(self, expected=None):
 
         now_ns = (
             self.get_clock()
@@ -1536,10 +1561,31 @@ class ArucoLidarApproachServer(Node):
             )
             return None
 
+        # El sector mide lo que haya delante, no "el marcador". Con el
+        # ArUco sobre una caja y la pared detras, la mayoria de los ecos
+        # son de la pared y la MEDIANA se va con ellos: en pista dio
+        # 0.511 m (pared) donde la geometria decia 0.384 (marcador), y
+        # el goal expiro creyendo que faltaban 11.6 cm ya recorridos.
+        # Un 'min' habria acertado de chiripa; la mediana falla siempre.
+        gated = planner.plane_returns(
+            values,
+            expected,
+            self.pf('lidar_front_depth_band'),
+        )
+
+        if not gated:
+            # No inventar un numero: que el llamante sepa que el plano
+            # esperado no esta y decida el con la geometria.
+            self._lidar_fail = (
+                f'SIN_PLANO(esperado={expected:.3f}m, '
+                f'mas cerca={min(values):.3f}m)'
+            )
+            return None
+
         self._lidar_fail = None
 
         return float(
-            np.median(values)
+            np.median(gated)
         )
 
     # =============================================================
@@ -1899,6 +1945,10 @@ class ArucoLidarApproachServer(Node):
         )
 
         state = 'SEARCHING'
+
+        # Ciclos seguidos sin mando y sin llegada declarada. Ver el
+        # bloque "Ni avanza ni llega" mas abajo.
+        stalled = 0
 
         start_ns = (
             self.get_clock()
@@ -2344,7 +2394,17 @@ class ArucoLidarApproachServer(Node):
             # se equivoca y esto lo salva.
             # -------------------------------------------------
 
-            front = self.get_front_lidar_range()
+            # Que espera ver el LiDAR: la geometria dice que el plano
+            # del marcador esta a `along` de base_link, y el sensor va
+            # laser_x por delante. Sin esta expectativa el sector no
+            # puede distinguir el marcador del fondo.
+            laser_to_base = self.get_laser_to_base()
+            laser_x = (
+                laser_to_base[0] if laser_to_base is not None else 0.0
+            )
+            expected_plane = along - laser_x
+
+            front = self.get_front_lidar_range(expected_plane)
             front_clearance = None
 
             if front is not None:
@@ -2436,6 +2496,58 @@ class ArucoLidarApproachServer(Node):
                 result.final_distance = final_distance
 
                 self.get_logger().info(result.message)
+
+                return result
+
+            # -------------------------------------------------
+            # Ni avanza ni llega: no colgarse callado
+            #
+            # Si el mando cae a cero mientras `reached` sigue False, el
+            # robot ya no se va a mover solo: el camino se agoto pero el
+            # juez de la llegada no da su brazo a torcer. Eso paso en
+            # pista y costo el goal entero -- 150 s de timeout, 140 de
+            # ellos inmovil, sin una sola linea de log.
+            #
+            # Un bloqueo asi casi siempre significa que las dos medidas
+            # de la distancia discrepan, asi que se abortan las dos a la
+            # vista. Diagnosticarlo costaba una prueba de pista; ahora
+            # cuesta dos segundos.
+            # -------------------------------------------------
+
+            parado = (
+                abs(vx) < 1e-6 and
+                abs(vy) < 1e-6 and
+                abs(wz) < 1e-6
+            )
+
+            if parado and not reached:
+                stalled += 1
+            else:
+                stalled = 0
+
+            if stalled >= max(1, int(self.pf('stall_timeout') / period)):
+
+                self.stop_robot()
+                goal_handle.abort()
+
+                result = ArucoApproach.Result()
+
+                result.success = False
+                result.status = 'STALLED'
+                result.message = (
+                    'Sin mando y sin llegada: el control se agoto pero '
+                    'la llegada no se acepta. '
+                    f'LiDAR={final_distance:.3f} m, '
+                    f'geometria={along:.3f} m, '
+                    f'pedido={stop_distance:.3f} m '
+                    f'(tolerancia {self.pf("distance_tolerance"):.3f}). '
+                    'Si las dos distancias discrepan, revisa '
+                    'marker_length, lidar_to_front_bumper_m y que el '
+                    'sector frontal no este midiendo el fondo.'
+                )
+                result.final_distance = float(final_distance)
+
+                self.get_logger().error(result.message)
 
                 return result
 

@@ -421,6 +421,32 @@ def carrot(path, rx, ry, lookahead):
 # Perfil de velocidad
 # ---------------------------------------------------------------------
 
+def plane_returns(values, expected, band):
+    """Ecos que caen en el plano esperado, descartando lo de detras.
+
+    El sector frontal del LiDAR no mide "el marcador": mide lo que haya
+    delante. Si el ArUco esta sobre una caja separada de la pared, y el
+    sector es mas ancho que la caja, la MAYORIA de los ecos son de la
+    pared. Tomar la mediana entonces devuelve la pared con toda
+    confianza, y el robot cree que le falta camino cuando ya ha
+    llegado. Medido: sector de +-6 grados a 0.5 m abarca +-5.3 cm, y el
+    marcador mide 8 cm.
+
+    La banda es de un solo lado a proposito. Un eco MAS CERCA que lo
+    esperado es un obstaculo real y tiene que seguir contando, que para
+    eso existe la parada de seguridad. Uno mas lejos es el fondo, y es
+    justo lo que hay que tirar.
+
+    `expected` es la distancia geometrica del LiDAR al plano. Con
+    expected None no se filtra nada: sin una expectativa no hay forma
+    honesta de decidir que sobra.
+    """
+    if expected is None or band <= 0.0:
+        return list(values)
+    limite = expected + band
+    return [v for v in values if v <= limite]
+
+
 def stopping_distance(speed, latency, period):
     """Cuanto sigue recorriendo tras mandarle parar.
 

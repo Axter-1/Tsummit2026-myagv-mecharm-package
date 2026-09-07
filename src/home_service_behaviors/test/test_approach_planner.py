@@ -30,6 +30,7 @@ from home_service_behaviors.approach_planner import (
     deadband_floor,
     stopping_distance,
     tolerance_is_reachable,
+    plane_returns,
 )
 
 
@@ -708,3 +709,62 @@ def test_el_suelo_nunca_supera_el_techo():
     v = profile_speed(0.05, 0.06, 0.25, v_min=0.20, tolerance=0.01)
 
     assert v <= 0.06
+
+
+# =====================================================================
+#  El sector frontal del LiDAR no mide "el marcador"
+# =====================================================================
+
+
+def test_la_mediana_del_sector_devuelve_la_pared():
+    """Reproduce el fallo de pista: el goal expiro a 0.316 m.
+
+    Escena real: ArUco de 8 cm sobre una caja, la pared 13 cm detras,
+    sector de +-6 grados que a 0.5 m abarca +-5.3 cm. La caja no llena
+    el sector, asi que la mayoria de los ecos son de la pared.
+    """
+    import statistics
+
+    # 3 ecos en la caja, 8 en la pared: proporciones de la escena real.
+    ecos = [0.384] * 3 + [0.511] * 8
+
+    # Sin banda, la mediana se va con la mayoria y devuelve la pared.
+    assert statistics.median(plane_returns(ecos, None, 0.08)) == 0.511
+
+    # Con banda, la pared desaparece y queda el plano del marcador.
+    gated = plane_returns(ecos, expected=0.384, band=0.08)
+    assert statistics.median(gated) == 0.384
+    assert 0.511 not in gated
+
+
+def test_un_eco_mas_cerca_siempre_cuenta():
+    """La banda es de un solo lado: un obstaculo delante no se filtra.
+
+    Si se filtrara por los dos lados, una caja que se cruza en el camino
+    quedaria invisible justo para la parada de seguridad, que es lo
+    unico que evita el choque.
+    """
+    ecos = [0.12, 0.384, 0.390]
+
+    gated = plane_returns(ecos, expected=0.384, band=0.08)
+
+    assert 0.12 in gated
+
+
+def test_sin_expectativa_no_se_filtra():
+    """Sin geometria fiable no hay forma honesta de decidir que sobra."""
+    ecos = [0.30, 0.51, 0.90]
+
+    assert plane_returns(ecos, None, 0.08) == ecos
+    assert plane_returns(ecos, 0.30, 0.0) == ecos
+
+
+def test_la_banda_puede_dejar_el_sector_vacio():
+    """Si todo cae fuera hay que devolver vacio, no inventar un numero.
+
+    El llamante tiene que poder distinguir "no veo el plano" de "el
+    plano esta a X", porque son decisiones distintas.
+    """
+    ecos = [0.90, 0.95]
+
+    assert plane_returns(ecos, expected=0.30, band=0.08) == []
