@@ -458,6 +458,21 @@ class ArucoLidarApproachServer(Node):
             0.12
         )
 
+        # Criterio final contra la normal del plano. No usar
+        # `yaw_settled` como criterio de llegada: ese estado tambien puede
+        # significar que se dejo de girar para priorizar la traslacion.
+        self.declare_parameter(
+            'final_heading_tolerance',
+            0.12
+        )
+
+        # El rumbo debe permanecer dentro de la banda durante varios ciclos
+        # para evitar aceptar una lectura favorable aislada.
+        self.declare_parameter(
+            'final_heading_settle_sec',
+            0.30
+        )
+
         # Angulo del FRENTE del robot medido EN EL FRAME DEL LASER.
         #
         # No es 0. El YDLidar va montado girado 180 grados
@@ -2075,6 +2090,7 @@ class ArucoLidarApproachServer(Node):
 
         final_distance = -1.0
         center_error = 0.0
+        final_heading_since_ns = None
 
         period = 1.0 / max(
             1.0,
@@ -2627,14 +2643,21 @@ class ArucoLidarApproachServer(Node):
                 abs(center_error) <= self.pf('final_camera_center_tolerance')
             )
 
-            # Coherente con la histeresis, a proposito. Exigir la
-            # tolerancia FINA aqui produce bloqueo: el robot se asienta
-            # dentro de ella, avanza, el rumbo objetivo deriva unos
-            # grados, y como sigue asentado ya no corrige -- pero la
-            # llegada nunca se declara. La precision alcanzable es la
-            # banda de la histeresis, no la de entrada; decir otra cosa
-            # seria mentir sobre lo que el robot sabe hacer.
-            aligned = yaw_settled or abs(yaw_error) <= yaw_tolerance
+            final_heading_tolerance = self.pf(
+                'final_heading_tolerance'
+            )
+
+            if abs(yaw_error) <= final_heading_tolerance:
+                if final_heading_since_ns is None:
+                    final_heading_since_ns = now_ns
+            else:
+                final_heading_since_ns = None
+
+            aligned = (
+                final_heading_since_ns is not None and
+                (now_ns - final_heading_since_ns) / 1e9 >=
+                self.pf('final_heading_settle_sec')
+            )
 
             centred = abs(lateral) <= self.pf('lateral_tolerance')
 
@@ -2644,7 +2667,7 @@ class ArucoLidarApproachServer(Node):
                 self.pf('distance_tolerance') and
                 aligned and
                 centred and
-                (camera_centered or blind)
+                (camera_centered or (blind and detection is None))
             ):
                 reached = True
 

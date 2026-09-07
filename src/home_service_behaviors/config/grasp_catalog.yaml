@@ -35,6 +35,8 @@
 #
 #  target_coords, si existe en una pieza, sustituye ese calculo por una
 #  pose enseñada [X,Y,Z,RX,RY,RZ] en mm/grados del frame real del brazo.
+#  pregrasp_coords es otra pose enseñada: no se deriva sumando Z, porque
+#  con esta orientacion del efector eso tambien desplaza lateralmente.
 # =====================================================================
 
 grasp_catalog:
@@ -175,18 +177,19 @@ grasp_catalog:
       height_mm: 100.0
       span_mm: 20.0
       open_mm: 32.0
-      close_mm: 15.0             # aplasta 5 mm
+      close_mm: 10.0
       require_calibrated_target: true
-      # POSE ENSENADA EN PISTA, con las mordazas sobre el tubo.
-      # Leida de la consola: c -> [X, Y, Z, RX, RY, RZ]. La configuracion
-      # articular observada fue [7.29, 132.01, -50.62, 4.74, -90.17,
-      # -0.08]; se conserva como contraste de rama, no como un goal.
-      target_coords: [163.50, 15.50, -25.30, 4.08, 81.21, 6.62]
-      # Despeje LiDAR REAL de la aproximacion que precedio la ensenanza:
-      # rango=0.274 m menos lidar_to_front_bumper_m=0.195 m -> 0.184 m.
-      # El servidor corrige X con la diferencia entre esta referencia y
-      # la parada medida de cada nueva aproximacion.
-      target_coords_stop_m: 0.18425
+      # Preagarre reensenado, con holgura amplia sobre el poste.
+      pregrasp_coords: [206.00, 3.80, 155.60, 179.36, -14.40, 3.95]
+      target_coords: [199.00, 2.00, -2.20, 178.10, -5.04, 6.32]
+      target_joint_angles: [0.96, 105.82, -74.97, -1.84, 53.96, 175.78]
+      approach_joint_waypoints:
+        # Preagarre.
+        - [1.05, 62.31, -77.43, 0.00, 90.26, 177.18]
+        # Intermedia.
+        - [0.61, 91.31, -77.69, -0.17, 71.89, 176.66]
+      # Parada real de la base usada para estas mediciones.
+      target_coords_stop_m: 0.21725
       # Respaldo documental; manda target_coords.
       grasp_z_mm: 70.0
       approach_height_mm: 60.0
@@ -194,6 +197,7 @@ grasp_catalog:
       wrist_deg: 0.0
       lift_mm: 60.0
       carry_pose: carry
+      initial_pose_name: home
 
     # -----------------------------------------------------------------
     # RUEDA / CIRCUNFERENCIA  (Contexto/RUEDA15Nueva.STL)

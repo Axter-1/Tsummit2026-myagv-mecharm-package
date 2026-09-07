@@ -12,6 +12,10 @@
 #
 #   target_pose_name -> pose con nombre (poses.yaml)
 #   target_coords    -> [X, Y, Z, RX, RY, RZ] mm / grados
+#
+# Para un preagarre cartesiano ensenado, se pueden pasar 12 valores:
+#   [agarre X,Y,Z,RX,RY,RZ, preagarre X,Y,Z,RX,RY,RZ]
+# En ese caso approach_height se ignora: el preagarre explicito manda.
 # ============================================================
 
 # "pick" | "place"
@@ -20,6 +24,19 @@ string operation
 string target_pose_name
 
 float64[] target_coords
+
+# Alternativa a target_coords: pose final ensenada [J1..J6] en grados.
+# Se usa con approach_joint_waypoints para rutas calibradas que el IK del
+# firmware no puede reproducir de forma segura.
+float64[] target_joint_angles
+
+# Waypoints articulares ensenados, aplanados en grupos de seis valores.
+# Se recorren en orden antes de DESCEND y en orden inverso durante LIFT.
+float64[] approach_joint_waypoints
+
+# Pose articular inicial opcional antes de abrir la pinza y aproximarse.
+# Para el poste se usa "home" para no iniciar desde una rama anterior.
+string initial_pose_name
 
 # Holgura vertical (mm) para los waypoints de aproximacion y
 # retirada, por encima del objetivo.

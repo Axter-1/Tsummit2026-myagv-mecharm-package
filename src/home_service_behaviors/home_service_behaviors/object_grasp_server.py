@@ -88,12 +88,19 @@ class GraspSpec:
         self.offset_mm = [float(v) for v in raw.get("grasp_offset_mm", [0.0, 0.0])]
         self.wrist_deg = float(raw.get("wrist_deg", 0.0))
         self.carry_pose = str(raw.get("carry_pose", "carry"))
+        self.initial_pose = str(raw.get("initial_pose_name", ""))
         self.require_calibrated_target = bool(
             raw.get("require_calibrated_target", False)
         )
 
         self.target_coords = None
         raw_target = raw.get("target_coords")
+        self.target_joint_angles = None
+        raw_target_joints = raw.get("target_joint_angles")
+        self.approach_joint_waypoints = []
+        raw_joint_waypoints = raw.get("approach_joint_waypoints")
+        self.pregrasp_coords = None
+        raw_pregrasp = raw.get("pregrasp_coords")
 
         # Parada de la base a la que se enseño target_coords. Una pose
         # enseñada es exacta SOLO desde donde se enseño, y la base llega
@@ -122,8 +129,52 @@ class GraspSpec:
                     self.target_coords = [float(value) for value in raw_target]
                 except (TypeError, ValueError):
                     problems.append("target_coords contiene un valor no numerico")
+        if raw_pregrasp is not None:
+            if not isinstance(raw_pregrasp, (list, tuple)) or len(raw_pregrasp) != 6:
+                problems.append("pregrasp_coords debe tener 6 valores [X,Y,Z,RX,RY,RZ]")
+            else:
+                try:
+                    self.pregrasp_coords = [float(value) for value in raw_pregrasp]
+                except (TypeError, ValueError):
+                    problems.append("pregrasp_coords contiene un valor no numerico")
+        if raw_target_joints is not None:
+            if not isinstance(raw_target_joints, (list, tuple)) or len(raw_target_joints) != 6:
+                problems.append("target_joint_angles debe tener 6 valores [J1..J6]")
+            else:
+                try:
+                    self.target_joint_angles = [float(value) for value in raw_target_joints]
+                except (TypeError, ValueError):
+                    problems.append("target_joint_angles contiene un valor no numerico")
+        if raw_joint_waypoints is not None:
+            if not isinstance(raw_joint_waypoints, (list, tuple)) or not raw_joint_waypoints:
+                problems.append("approach_joint_waypoints debe tener al menos un waypoint")
+            else:
+                for index, waypoint in enumerate(raw_joint_waypoints):
+                    if not isinstance(waypoint, (list, tuple)) or len(waypoint) != 6:
+                        problems.append(
+                            f"approach_joint_waypoints[{index}] debe tener 6 valores [J1..J6]"
+                        )
+                        continue
+                    try:
+                        self.approach_joint_waypoints.append(
+                            [float(value) for value in waypoint]
+                        )
+                    except (TypeError, ValueError):
+                        problems.append(
+                            f"approach_joint_waypoints[{index}] contiene un valor no numerico"
+                        )
         if self.require_calibrated_target and self.target_coords is None:
             problems.append("requiere target_coords ensenadas antes de usar el brazo")
+        if (
+            self.require_calibrated_target and
+            self.pregrasp_coords is None and
+            self.target_joint_angles is None
+        ):
+            problems.append("requiere pregrasp_coords ensenadas antes de usar el brazo")
+        if self.require_calibrated_target and self.target_joint_angles is None:
+            problems.append("requiere target_joint_angles ensenados antes de usar el brazo")
+        if self.require_calibrated_target and not self.approach_joint_waypoints:
+            problems.append("requiere approach_joint_waypoints ensenados antes de usar el brazo")
         if self.span_mm > stroke:
             problems.append(
                 f"span_mm={self.span_mm:.1f} supera el recorrido de la "
@@ -644,7 +695,17 @@ class ObjectGraspServer(Node):
         self._feedback(goal_handle, "DESCEND")
         pick = PickPlace.Goal()
         pick.operation = "pick"
-        pick.target_coords = coords
+        if spec.target_joint_angles is not None:
+            pick.target_joint_angles = spec.target_joint_angles
+            pick.approach_joint_waypoints = [
+                value
+                for waypoint in spec.approach_joint_waypoints
+                for value in waypoint
+            ]
+        else:
+            pregrasp = self._pregrasp_coords(spec)
+            pick.target_coords = coords + pregrasp if pregrasp is not None else coords
+        pick.initial_pose_name = spec.initial_pose
         pick.approach_height = (
             req.approach_height if req.approach_height > 0.0
             else spec.approach_height_mm
@@ -741,6 +802,26 @@ class ObjectGraspServer(Node):
             orientation = [180.0, 0.0, spec.wrist_deg]
 
         return [float(v) for v in base + orientation]
+
+    def _pregrasp_coords(self, spec):
+        """Preagarre ensenado, corregido por la parada real de la base."""
+        if spec.pregrasp_coords is None:
+            return None
+
+        coords = list(spec.pregrasp_coords)
+        if (
+            spec.target_coords_stop_m is not None and
+            self.measured_stop_distance is not None
+        ):
+            corr = (
+                self.measured_stop_distance - spec.target_coords_stop_m
+            ) * 1000.0
+            coords[0] += corr
+            self.get_logger().info(
+                f"Preagarre ensenado a {spec.target_coords_stop_m:.3f} m, "
+                f"X corregida {corr:+.1f} mm -> {coords[0]:.1f}"
+            )
+        return coords
 
 
 def threading_wait(seconds):

@@ -709,3 +709,105 @@ Con la regla escrita como "el procesamiento va fuera de la Jetson" a
 secas, cualquiera descarta la variante del punto 4, que es justamente la
 buena si hace falta bajar el retardo. El numero importa: **drivers ~3,
 detector +1.6 y ahi es donde revienta.**
+
+---
+
+## Incidente y recuperacion (2026-09-07)
+
+### 1. El goal de aproximacion se quedaba esperando
+
+**Sintoma.** `tsummit.sh approach` parecia colgarse durante las
+comprobaciones `ros2 topic echo --once`. Al lanzar despues el goal a mano,
+`ros2 action send_goal` mostraba el nombre de la accion, pero se quedaba en:
+
+    Waiting for an action server to become available...
+
+La base no estaba moviendose en ese momento.
+
+**Causa.** El comando manual se ejecuto dentro del contenedor con el
+`CYCLONEDDS_URI` por defecto, que solo usa `lo` (loopback). El servidor
+`aruco_lidar_approach_server` y el detector estaban en el portatil. El grafo
+DDS podia mostrar nombres de nodos/acciones descubiertos de forma incompleta,
+pero el cliente no podia conectar con el servidor real.
+
+Ademas, dejar que el script autodetectase `ROBOT_IP` eligio `10.53.98.48`,
+que no era la interfaz Tailscale usada por esta sesion.
+
+**Configuracion que funciono.** En esta instalacion:
+
+    ROS_DOMAIN_ID=30
+    ROBOT_IP=100.86.172.41
+    LAPTOP_IP=100.91.114.36
+    DDS_MULTICAST=false
+
+Para una aproximacion, pasar siempre ambas IP explicitamente y no confiar en
+la ruta por defecto:
+
+    ALLOW_MOTION=1 DISTRIBUTED=1 DDS_MULTICAST=false \
+    ROBOT_IP=100.86.172.41 LAPTOP_IP=100.91.114.36 \
+        ./scripts/tsummit.sh approach 2 0.20
+
+Si las comprobaciones del script vuelven a bloquearse, comprobar primero
+`ros2 action info /aruco_lidar_approach` dentro del contenedor con la misma
+URI DDS. El fallback probado fue lanzar el cliente dentro del contenedor con
+una `CYCLONEDDS_URI` que fija la interfaz `100.86.172.41`, desactiva
+multicast y declara como peers `100.86.172.41` y `100.91.114.36`. No usar el
+entorno loopback para goals distribuidos.
+
+**Resultado de recuperacion.** El goal del poste (`target_id: 2`,
+`stop_distance: 0.20`) termino correctamente:
+
+    status: REACHED
+    despeje_lidar: 0.217 m
+    lateral: -0.008 m
+    yaw: +2.5 deg
+    camara: -0.01
+
+El servidor se alcanzo en 1.5 s. Esta es la parada de referencia para volver
+a ensenar las poses del brazo; guardarla junto con cada nueva calibracion.
+
+### 2. La pose de contacto forzaba J2 fuera de limite
+
+**Sintoma.** La pose de contacto ensenada en modo libre tenia `J2=127.88`
+(otra lectura dio `J2=127.44`) y estaba fuera de limite. El brazo podia
+sostenerla sin alimentacion, pero
+al ejecutar la ruta con los servos alimentados el movimiento se detenia o
+`pymycobot` rechazaba el angulo.
+
+**Diagnostico.** El firmware devolvio:
+
+    error=2
+
+En `MechArm270`, `error=2` significa que la articulacion J2 excede el limite
+de posicion. No era sobrecalentamiento. La comprobacion directa dio:
+
+    temperaturas: [33, 37, 46, 31, 41, 35] deg C
+    servo_status: [0, 0, 0, 0, 0, 0]
+
+Se intento temporalmente evitar la validacion local de `pymycobot`; fue
+retirado. Nunca volver a enviar una pose fuera de los limites del firmware:
+la tabla valida J2 en `[-75, 120]` y el driver ahora rechaza una pose
+ensenada fuera de esos limites antes de mandar el comando.
+
+**Recuperacion.** Se enseno una nueva pose de contacto con los servos
+alimentados y J2 dentro de limite:
+
+    angles: [-3.69, 104.76, -32.87, -0.79, -53.70, -4.48]
+    coords: [200.8, -12.2, -8.3, -165.88, 71.21, -168.14]
+
+La ruta seca, con `operation: place` y pinza abierta, fue validada con
+resultado `OK` siguiendo:
+
+    60 mm -> 30 mm -> contacto -> 30 mm -> 60 mm
+
+El contacto y la retirada funcionaron. No se cerro la pinza ni se tomo el
+poste.
+
+**Reglas antes de reensenar o probar.**
+
+1. Repetir primero la aproximacion de base con DDS distribuido correcto.
+2. Detener el driver del brazo antes de abrir la consola manual.
+3. Ensenar cada pose con los servos alimentados o comprobar que todos los
+   angulos respetan los limites del firmware; no guardar J2 mayor que 120.
+4. Validar primero como `place` con pinza abierta y a velocidad baja.
+5. Solo despues de confirmar la ruta seca autorizar `pick` y cierre.

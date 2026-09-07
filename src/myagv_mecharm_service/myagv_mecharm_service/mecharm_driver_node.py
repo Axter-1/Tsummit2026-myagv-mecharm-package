@@ -89,6 +89,9 @@ class MechArmDriver(Node):
         # Si el error deja de reducirse durante este tiempo, se aborta:
         # obstruccion, limite articular o pose fuera del alcance.
         self.declare_parameter("stall_timeout_sec", 4.0)
+        # Las poses articulares ensenadas pueden asentarse lentamente bajo
+        # carga; mantienen el timeout total y solo amplian esta ventana.
+        self.declare_parameter("taught_stall_timeout_sec", 12.0)
 
         self.declare_parameter(
             "joint_limits_min",
@@ -98,6 +101,27 @@ class MechArmDriver(Node):
             "joint_limits_max",
             [160.0, 90.0, 45.0, 160.0, 100.0, 180.0],
         )
+
+        # Modo de movimiento del firmware.
+        #   fresh_mode 1 = refresh (ejecuta siempre la ultima orden)
+        #   fresh_mode 0 = cola/interpolado
+        # En refresh mode, send_coords salta de rama de la IK; vision_mode
+        # 1 lo limita (doc pymycobot: "limit the posture flipping of
+        # send_coords in refresh mode"). -1 = no tocar el ajuste.
+        self.declare_parameter("fresh_mode", 1)
+        self.declare_parameter("vision_mode", 1)
+
+        # send_coords deja la eleccion de rama de la IK al firmware, que
+        # en esta unidad salta de rama o no encuentra solucion (se probo
+        # 6 veces). Con coords_via_ik=True el driver resuelve la IK con
+        # solve_inv_kinematics SEMBRANDO con los angulos actuales, valida
+        # contra los limites y manda send_angles (el unico camino que ha
+        # funcionado siempre). Las coordenadas siguen siendo la interfaz.
+        self.declare_parameter("coords_via_ik", True)
+        # Margen (mm) con el que la comprobacion FK de la IK da por buena
+        # la solucion: angles_to_coords(sol) debe caer a esta distancia
+        # del objetivo pedido.
+        self.declare_parameter("ik_fk_check_mm", 15.0)
 
         self.declare_parameter("poses_file", "")
         self.declare_parameter("verify_grasp", False)
@@ -167,6 +191,9 @@ class MechArmDriver(Node):
         self.stall_timeout = float(
             self.get_parameter("stall_timeout_sec").value
         )
+        self.taught_stall_timeout = float(
+            self.get_parameter("taught_stall_timeout_sec").value
+        )
 
         self.joint_min = [
             float(v) for v in self.get_parameter("joint_limits_min").value
@@ -174,6 +201,20 @@ class MechArmDriver(Node):
         self.joint_max = [
             float(v) for v in self.get_parameter("joint_limits_max").value
         ]
+
+        self.fresh_mode = int(self.get_parameter("fresh_mode").value)
+        self.vision_mode = int(self.get_parameter("vision_mode").value)
+        self.coords_via_ik = bool(
+            self.get_parameter("coords_via_ik").value
+        )
+        self.ik_fk_check_mm = float(
+            self.get_parameter("ik_fk_check_mm").value
+        )
+        # Limites (min, max) leidos del firmware al conectar. Fuente
+        # preferente para validar la IK; None hasta la primera lectura.
+        self._firmware_limits = None
+        # Motivo del ultimo fallo de IK, para el mensaje de INVALID_GOAL.
+        self._last_ik_error = ""
 
         self.verify_grasp = bool(self.get_parameter("verify_grasp").value)
 
@@ -348,23 +389,106 @@ class MechArmDriver(Node):
                 except Exception:  # noqa: BLE001
                     pass
                 try:
-                    mc.set_fresh_mode(1)
+                    mc.clear_error_information()
                 except Exception:  # noqa: BLE001
                     pass
+                if self.fresh_mode >= 0:
+                    try:
+                        mc.set_fresh_mode(self.fresh_mode)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if self.vision_mode >= 0:
+                    try:
+                        mc.set_vision_mode(self.vision_mode)
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     mc.init_gripper()
                 except Exception:  # noqa: BLE001
                     pass
             self.mc = mc
             self.get_logger().info(
-                f"Conectado al MechArm 270 en {self.port}."
+                f"Conectado al MechArm 270 en {self.port} "
+                f"(fresh_mode={self.fresh_mode}, "
+                f"vision_mode={self.vision_mode})."
             )
+            self._log_firmware_limits(mc)
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(
                 f"No se pudo conectar al MechArm ({exc}); "
                 "reintentando."
             )
             self.mc = None
+
+    def _log_firmware_limits(self, mc):
+        """Vuelca los limites articulares que reporta el firmware.
+
+        Sirve para zanjar la discrepancia entre el URDF (J2 +120) y el
+        yaml (J2 +90): el numero del firmware manda.
+        """
+        try:
+            mins, maxs = [], []
+            for jid in range(1, 7):
+                lo = mc.get_joint_min_angle(jid)
+                hi = mc.get_joint_max_angle(jid)
+                mins.append(float(lo))
+                maxs.append(float(hi))
+            if len(mins) == 6 and len(maxs) == 6:
+                self._firmware_limits = (mins, maxs)
+            self.get_logger().info(
+                f"Limites del firmware  min={mins}  max={maxs}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(
+                f"No se pudieron leer los limites del firmware: {exc}"
+            )
+        if self.coords_via_ik:
+            self._check_ik_convention(mc)
+
+    def _check_ik_convention(self, mc):
+        """Comprueba SIN MOVER el brazo que solve_inv_kinematics usa el
+        mismo convenio de pose que get_coords: angulos -> coords ->
+        solve_inv_kinematics(coords, angulos) debe devolver algo parecido
+        a los angulos de partida. Si no cierra, el convenio no cuadra.
+        """
+        try:
+            with self._serial_lock:
+                a0 = mc.get_angles()
+                time.sleep(0.05)
+                c0 = mc.get_coords()
+            if not (isinstance(a0, (list, tuple)) and len(a0) == 6):
+                self.get_logger().warn(
+                    "Chequeo IK: get_angles no devolvio 6 valores."
+                )
+                return
+            if not (isinstance(c0, (list, tuple)) and len(c0) == 6):
+                self.get_logger().warn(
+                    "Chequeo IK: get_coords no devolvio 6 valores."
+                )
+                return
+            with self._serial_lock:
+                a1 = mc.solve_inv_kinematics(
+                    [float(x) for x in c0], [float(x) for x in a0]
+                )
+            if not (isinstance(a1, (list, tuple)) and len(a1) == 6):
+                self.get_logger().warn(
+                    f"Chequeo IK: solve_inv_kinematics devolvio {a1!r}."
+                )
+                return
+            diff = max(abs(float(a1[i]) - float(a0[i])) for i in range(6))
+            msg = (
+                f"Chequeo IK ida y vuelta: partida={[round(x,1) for x in a0]} "
+                f"-> IK={[round(x,1) for x in a1]}  dif_max={diff:.1f} deg"
+            )
+            if diff <= 5.0:
+                self.get_logger().info(msg + "  -> convenio OK")
+            else:
+                self.get_logger().warn(
+                    msg + "  -> NO CIERRA: revisar convenio de pose "
+                    "antes de fiarse de la IK"
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"Chequeo IK fallo: {exc}")
 
     def _reconnect_tick(self):
         if self.mc is None:
@@ -416,7 +540,9 @@ class MechArmDriver(Node):
             time.sleep(delay)
         return None
 
-    def _wait_for_arrival(self, goal_handle, target, kind, timeout):
+    def _wait_for_arrival(
+        self, goal_handle, target, kind, timeout, stall_timeout=None
+    ):
         """Espera a que el brazo LLEGUE al objetivo.
 
         Devuelve ('ok'|'timeout'|'canceled'|'fault').
@@ -445,6 +571,9 @@ class MechArmDriver(Node):
             components = 3
 
         deadline = time.monotonic() + timeout
+        stall_limit = (
+            self.stall_timeout if stall_timeout is None else stall_timeout
+        )
         # Margen para que el brazo arranque antes de evaluar nada.
         time.sleep(0.3)
 
@@ -490,7 +619,7 @@ class MechArmDriver(Node):
             if last_error is None or error < last_error - tolerance * 0.25:
                 last_error = error
                 last_progress_time = time.monotonic()
-            elif time.monotonic() - last_progress_time > self.stall_timeout:
+            elif time.monotonic() - last_progress_time > stall_limit:
                 self.get_logger().warn(
                     f"El brazo dejo de acercarse al objetivo "
                     f"(error {error:.2f}, tolerancia {tolerance:.2f}). "
@@ -540,21 +669,129 @@ class MechArmDriver(Node):
             out.append(clamp(float(a), lo, hi))
         return out
 
+    def _log_arm_errors(self, tag):
+        """Vuelca el estado de error del firmware. Diagnostico: si el
+        brazo ignora send_angles, aqui deberia salir el motivo.
+        """
+        try:
+            with self._serial_lock:
+                info = None
+                for name in ("get_error_information", "read_next_error"):
+                    m = getattr(self.mc, name, None)
+                    if m is not None:
+                        info = (name, m())
+                        break
+                servo = None
+                sm = getattr(self.mc, "get_servo_status", None)
+                if sm is not None:
+                    servo = sm()
+            self.get_logger().info(
+                f"Estado brazo [{tag}]: error={info}  servo_status={servo}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(
+                f"No se pudo leer el estado del brazo [{tag}]: {exc}"
+            )
+
     def _move_angles(self, goal_handle, angles, speed):
         angles = self._clamp_joints(angles)
         try:
             self._arm("send_angles", angles, speed)
-        except RuntimeError as exc:
+        except Exception as exc:  # noqa: BLE001 - valida pymycobot tambien
             self._drop_connection(str(exc))
             return "fault"
-        return self._wait_for_arrival(
+        outcome = self._wait_for_arrival(
             goal_handle, angles, "angles", self.move_timeout
         )
+        if outcome != "ok":
+            self._log_arm_errors("tras send_angles fallido")
+        return outcome
+
+    def _within_limits(self, angles):
+        # Fuente preferente: lo leido del firmware. Si no, el parametro.
+        if self._firmware_limits is not None:
+            lo_all, hi_all = self._firmware_limits
+        else:
+            lo_all, hi_all = self.joint_min, self.joint_max
+        for i, a in enumerate(angles):
+            lo = lo_all[i] if i < len(lo_all) else -180.0
+            hi = hi_all[i] if i < len(hi_all) else 180.0
+            if a < lo - 1.0 or a > hi + 1.0:
+                return False
+        return True
+
+    def _coords_to_angles(self, coords):
+        """Resuelve la IK de 'coords' con solve_inv_kinematics sembrando
+        con los angulos actuales. Devuelve una lista de 6 angulos valida
+        o None si no hay solucion de confianza.
+        """
+        self._last_ik_error = ""
+        seed = self._read_angles(retries=3, delay=0.1)
+        if seed is None:
+            self._last_ik_error = (
+                "no se pudieron leer los angulos actuales para sembrar la IK"
+            )
+            self.get_logger().warn(f"IK: {self._last_ik_error}.")
+            return None
+        try:
+            sol = self._arm("solve_inv_kinematics", list(coords), seed)
+        except RuntimeError as exc:
+            self._drop_connection(str(exc))
+            return None
+        if not isinstance(sol, (list, tuple)) or len(sol) != 6:
+            self._last_ik_error = f"respuesta de IK no valida ({sol!r})"
+            self.get_logger().warn(f"IK: {self._last_ik_error}.")
+            return None
+        sol = [float(a) for a in sol]
+        if all(abs(a) < 1e-6 for a in sol):
+            self._last_ik_error = "la IK no encontro solucion (solucion nula)"
+            self.get_logger().warn(f"IK: {self._last_ik_error}.")
+            return None
+        if not self._within_limits(sol):
+            self._last_ik_error = (
+                f"la solucion de IK {[round(a, 1) for a in sol]} "
+                "queda fuera de los limites del firmware"
+            )
+            self.get_logger().warn(f"IK: {self._last_ik_error}.")
+            return None
+        # Comprobacion FK: la solucion debe reproducir el objetivo.
+        try:
+            fk = self._arm("angles_to_coords", sol)
+        except RuntimeError:
+            fk = None
+        if isinstance(fk, (list, tuple)) and len(fk) == 6:
+            err = max(abs(float(fk[i]) - float(coords[i])) for i in range(3))
+            if err > self.ik_fk_check_mm:
+                self._last_ik_error = (
+                    f"la solucion de IK no reproduce el objetivo "
+                    f"(FK a {err:.1f} mm, tope {self.ik_fk_check_mm:.1f})"
+                )
+                self.get_logger().warn(f"IK: {self._last_ik_error}.")
+                return None
+            self.get_logger().info(
+                f"IK: solucion {[round(a, 1) for a in sol]} "
+                f"(FK a {err:.1f} mm del objetivo)."
+            )
+        else:
+            self.get_logger().info(
+                f"IK: solucion {[round(a, 1) for a in sol]} "
+                f"(sin verificacion FK)."
+            )
+        return sol
 
     def _move_coords(self, goal_handle, coords, speed, mode):
         coords = [float(c) for c in coords]
         # pymycobot: mode 0 = angular (trayectoria libre),
         #            mode 1 = lineal (linea recta).
+        if self.coords_via_ik:
+            # send_coords deja la eleccion de rama al firmware y en esta
+            # unidad falla. Resolvemos la IK aqui y mandamos angulos. Si
+            # no hay solucion de confianza, el objetivo es INALCANZABLE:
+            # se dice explicitamente, no se cae a send_coords.
+            angles = self._coords_to_angles(coords)
+            if angles is None:
+                return "unreachable"
+            return self._move_angles(goal_handle, angles, speed)
         try:
             self._arm("send_coords", coords, speed, int(mode))
         except RuntimeError as exc:
@@ -786,6 +1023,14 @@ class MechArmDriver(Node):
                 result.status = "OK"
                 result.message = "Movimiento completado."
                 goal_handle.succeed()
+            elif outcome == "unreachable":
+                result.success = False
+                result.status = "INVALID_GOAL"
+                result.message = (
+                    "Esta pose no es alcanzable: "
+                    + (self._last_ik_error or "sin solucion de IK")
+                )
+                goal_handle.abort()
             elif outcome == "canceled":
                 result.success = False
                 result.status = "CANCELED"
@@ -838,13 +1083,23 @@ class MechArmDriver(Node):
                 return result
 
             use_pose = bool(req.target_pose_name)
-            use_coords = len(req.target_coords) == 6
-            if use_pose == use_coords:
+            use_coords = len(req.target_coords) in (6, 12)
+            use_joints = len(req.target_joint_angles) == 6
+            if sum((use_pose, use_coords, use_joints)) != 1:
                 result.success = False
                 result.status = "INVALID_GOAL"
                 result.message = (
                     "Rellena exactamente uno: target_pose_name o "
-                    "target_coords(6)."
+                    "target_coords(6 o 12) o target_joint_angles(6)."
+                )
+                goal_handle.abort()
+                return result
+
+            if len(req.approach_joint_waypoints) % 6 != 0:
+                result.success = False
+                result.status = "INVALID_GOAL"
+                result.message = (
+                    "approach_joint_waypoints debe contener grupos de 6 angulos."
                 )
                 goal_handle.abort()
                 return result
@@ -854,6 +1109,18 @@ class MechArmDriver(Node):
                 result.status = "INVALID_GOAL"
                 result.message = (
                     f"Pose desconocida: '{req.target_pose_name}'."
+                )
+                goal_handle.abort()
+                return result
+
+            if (
+                req.initial_pose_name and
+                req.initial_pose_name not in self.poses
+            ):
+                result.success = False
+                result.status = "INVALID_GOAL"
+                result.message = (
+                    f"Pose inicial desconocida: '{req.initial_pose_name}'."
                 )
                 goal_handle.abort()
                 return result
@@ -885,12 +1152,48 @@ class MechArmDriver(Node):
 
             approach_height = float(req.approach_height)
 
+            if req.initial_pose_name:
+                self._feedback_pp(goal_handle, "APPROACH")
+                outcome = self._move_angles(
+                    goal_handle,
+                    self.poses[req.initial_pose_name],
+                    speed,
+                )
+                if not self._handle_outcome(
+                    outcome,
+                    goal_handle,
+                    result,
+                    f"INITIAL {req.initial_pose_name}",
+                ):
+                    return result
+
             if use_coords:
+                taught_pregrasp = (
+                    list(req.target_coords[6:])
+                    if len(req.target_coords) == 12 else None
+                )
                 outcome = self._pick_place_coords(
                     goal_handle,
                     operation,
-                    list(req.target_coords),
+                    list(req.target_coords[:6]),
                     approach_height,
+                    speed,
+                    gripper_speed,
+                    open_value,
+                    closed_value,
+                    result,
+                    taught_pregrasp,
+                )
+            elif use_joints:
+                taught_waypoints = [
+                    list(req.approach_joint_waypoints[index:index + 6])
+                    for index in range(0, len(req.approach_joint_waypoints), 6)
+                ]
+                outcome = self._pick_place_taught_joints(
+                    goal_handle,
+                    operation,
+                    list(req.target_joint_angles),
+                    taught_waypoints,
                     speed,
                     gripper_speed,
                     open_value,
@@ -948,6 +1251,15 @@ class MechArmDriver(Node):
         """
         if outcome == "ok":
             return True
+        if outcome == "unreachable":
+            result.success = False
+            result.status = "INVALID_GOAL"
+            result.message = (
+                f"Pose inalcanzable en {phase}: "
+                + (self._last_ik_error or "sin solucion de IK")
+            )
+            goal_handle.abort()
+            return False
         if outcome == "canceled":
             result.success = False
             result.status = "CANCELED"
@@ -976,9 +1288,15 @@ class MechArmDriver(Node):
         open_value,
         closed_value,
         result,
+        taught_pregrasp=None,
     ):
-        approach = list(target)
-        approach[2] += approach_height
+        # Un preagarre ensenado conserva el vector seguro real. Solo las
+        # piezas sin calibracion explicita usan el respaldo target + Z.
+        if taught_pregrasp is None:
+            approach = list(target)
+            approach[2] += approach_height
+        else:
+            approach = list(taught_pregrasp)
 
         if operation == "pick":
             if self._set_gripper(open_value, gripper_speed) == "fault":
@@ -1013,6 +1331,91 @@ class MechArmDriver(Node):
         outcome = self._move_coords(goal_handle, approach, speed, 1)
         if not self._handle_outcome(outcome, goal_handle, result, "LIFT"):
             return outcome
+
+        return "ok"
+
+    def _move_taught_angles(self, goal_handle, angles, speed):
+        """Mueve a una pose que el operador ha ensenado y validado.
+
+        No aplica _clamp_joints porque una pose ensenada debe rechazarse,
+        no deformarse. Aun asi respeta los limites reales del firmware.
+        """
+        if len(angles) != 6:
+            return "fault"
+        if not self._within_limits(angles):
+            self._last_ik_error = (
+                f"pose articular ensenada fuera de limites: "
+                f"{[round(float(a), 2) for a in angles]}"
+            )
+            self.get_logger().error(f"Ruta ensenada: {self._last_ik_error}.")
+            return "unreachable"
+        try:
+            self._arm("send_angles", [float(angle) for angle in angles], speed)
+        except Exception as exc:  # noqa: BLE001 - valida pymycobot tambien
+            self._drop_connection(str(exc))
+            return "fault"
+        outcome = self._wait_for_arrival(
+            goal_handle,
+            angles,
+            "angles",
+            self.move_timeout,
+            self.taught_stall_timeout,
+        )
+        if outcome != "ok":
+            self._log_arm_errors("tras pose articular ensenada fallida")
+        return outcome
+
+    def _pick_place_taught_joints(
+        self,
+        goal_handle,
+        operation,
+        target,
+        waypoints,
+        speed,
+        gripper_speed,
+        open_value,
+        closed_value,
+        result,
+    ):
+        if operation == "pick":
+            if self._set_gripper(open_value, gripper_speed) == "fault":
+                return self._fault(goal_handle, result, "abrir gripper")
+
+        self._feedback_pp(goal_handle, "APPROACH")
+        for index, waypoint in enumerate(waypoints, start=1):
+            outcome = self._move_taught_angles(goal_handle, waypoint, speed)
+            if not self._handle_outcome(
+                outcome, goal_handle, result, f"APPROACH waypoint {index}"
+            ):
+                return outcome
+
+        self._feedback_pp(goal_handle, "DESCEND")
+        outcome = self._move_taught_angles(goal_handle, target, speed)
+        if not self._handle_outcome(outcome, goal_handle, result, "DESCEND"):
+            return outcome
+
+        self._feedback_pp(goal_handle, "GRIP")
+        grip_value = closed_value if operation == "pick" else open_value
+        if self._set_gripper(grip_value, gripper_speed) == "fault":
+            return self._fault(goal_handle, result, "gripper")
+
+        if operation == "pick" and self.verify_grasp:
+            if not self._grasp_ok(closed_value):
+                result.success = False
+                result.status = "GRASP_FAILED"
+                result.message = (
+                    "El gripper cerro por completo: no se sujeto la pieza."
+                )
+                goal_handle.abort()
+                return "grasp_failed"
+
+        self._feedback_pp(goal_handle, "LIFT")
+        for index, waypoint in enumerate(reversed(waypoints), start=1):
+            outcome = self._move_taught_angles(goal_handle, waypoint, speed)
+            if not self._handle_outcome(
+                outcome, goal_handle, result, f"LIFT waypoint {index}"
+            ):
+                return outcome
 
         return "ok"
 

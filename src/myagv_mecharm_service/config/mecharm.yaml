@@ -31,7 +31,9 @@ mecharm_driver_node:
     # ---------------------------------------------------------------
     # Tiempos
     # ---------------------------------------------------------------
-    move_timeout_sec: 20.0
+    # Las rutas articulares ensenadas a 5-10% necesitan mas de 20 s.
+    # stall_timeout_sec sigue cancelando si el brazo deja de progresar.
+    move_timeout_sec: 45.0
     gripper_timeout_sec: 5.0
     settle_time_sec: 0.4
     # Tiempo extra tras mover la pinza para que asiente sobre la pieza.
@@ -43,19 +45,28 @@ mecharm_driver_node:
     # Se considera alcanzado el objetivo cuando la posicion REAL leida
     # del brazo entra en tolerancia, no cuando is_moving() dice 0
     # (esa lectura es intermitente y poco fiable por serie).
-    angle_tolerance_deg: 2.0
+    # La telemetria de esta unidad fluctua algo mas de 2 deg al asentarse.
+    angle_tolerance_deg: 3.0
     coord_tolerance_mm: 6.0
     arrival_stable_samples: 3
     max_read_failures: 25
     # Si el error deja de reducirse durante este tiempo se aborta:
     # obstruccion, limite articular o pose fuera del alcance de 270 mm.
     stall_timeout_sec: 4.0
+    taught_stall_timeout_sec: 12.0
 
     # ---------------------------------------------------------------
-    # Limites articulares (grados) - MechArm 270 M5 (hoja de datos)
+    # Limites articulares (grados) - MechArm 270 M5
+    # Limites reportados por el firmware y aplicados por pymycobot.
     # ---------------------------------------------------------------
-    joint_limits_min: [-160.0,  -85.0, -180.0, -160.0, -100.0, -180.0]
-    joint_limits_max: [ 160.0,   90.0,   45.0,  160.0,  100.0,  180.0]
+    joint_limits_min: [-160.0,  -75.0, -175.0, -155.0, -115.0, -180.0]
+    joint_limits_max: [ 160.0,  120.0,   65.0,  155.0,  115.0,  180.0]
+
+    # El firmware reproduce bien FK (angles_to_coords), pero su
+    # solve_inv_kinematics devolvio [82.41] * 6 incluso para la pose
+    # actual. Hasta corregir esa API, send_coords es la unica via IK
+    # valida para objetivos cartesianos ensenados.
+    coords_via_ik: false
 
     # ---------------------------------------------------------------
     # Poses con nombre

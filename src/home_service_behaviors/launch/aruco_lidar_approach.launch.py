@@ -44,9 +44,11 @@ def generate_launch_description():
         'lock_min_samples': 5,
 
         'kp_heading': 1.5,
-        'max_heading_speed': 0.30,
-        'heading_tolerance': 0.02,
-        'heading_realign_threshold': 0.05,
+        # La base gira como minimo a ~0.37 rad/s. 0.02 rad era
+        # inalcanzable con la latencia de la red y provocaba sobrepaso.
+        'max_heading_speed': 0.60,
+        'heading_tolerance': 0.12,
+        'heading_realign_threshold': 0.25,
 
         'kp_lateral': 0.08,
         'max_lateral_speed': 0.04,
@@ -55,7 +57,7 @@ def generate_launch_description():
 
         'kp_linear': 0.5,
         'max_linear_speed': 0.06,
-        'distance_tolerance': 0.01,
+        'distance_tolerance': 0.03,
 
         'camera_x_minus_lidar_x': 0.16,
         'lidar_sector_half_angle_deg': 4.0,
