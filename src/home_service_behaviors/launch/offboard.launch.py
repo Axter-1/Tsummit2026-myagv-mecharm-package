@@ -102,6 +102,28 @@ def generate_launch_description():
             default_value='0.25',
             description='Frenada del perfil trapezoidal, v=sqrt(2*a*d).',
         ),
+        # Las dos calibraciones que decidieron la prueba del 6 de
+        # septiembre. Van aqui, no en la Jetson: el detector y el
+        # servidor de aproximacion corren en ESTA maquina, asi que
+        # marker_length y lidar_to_front_bumper_m se cambian aqui.
+        DeclareLaunchArgument(
+            'lidar_to_front_bumper_m',
+            default_value='0.195',
+            description='Del sensor LiDAR al borde delantero. El 0.195 '
+                        'salio de la prueba de poste; con cinta sobre '
+                        'el ArUco 2 salen ~0.081. Medirlo antes de '
+                        'fiarse: entra directo en el criterio de '
+                        'llegada.',
+        ),
+        DeclareLaunchArgument(
+            'lidar_front_depth_band',
+            default_value='0.0',
+            description='Descarta ecos del sector frontal mas lejanos '
+                        'que el plano esperado. 0.0 = apagada. NO '
+                        'encender hasta que marker_length sea correcto: '
+                        'la expectativa sale de la camara, y con la '
+                        'camara mal escalada rechaza el eco bueno.',
+        ),
     ]
 
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -167,6 +189,14 @@ def generate_launch_description():
             ),
             'linear_accel': ParameterValue(
                 LaunchConfiguration('linear_accel'),
+                value_type=float,
+            ),
+            'lidar_to_front_bumper_m': ParameterValue(
+                LaunchConfiguration('lidar_to_front_bumper_m'),
+                value_type=float,
+            ),
+            'lidar_front_depth_band': ParameterValue(
+                LaunchConfiguration('lidar_front_depth_band'),
                 value_type=float,
             ),
         }],
