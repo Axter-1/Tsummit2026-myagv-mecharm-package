@@ -178,21 +178,15 @@ grasp_catalog:
       close_mm: 15.0             # aplasta 5 mm
       require_calibrated_target: true
       # POSE ENSENADA EN PISTA, con las mordazas sobre el tubo.
-      # Leida de la consola: c -> [X, Y, Z, RX, RY, RZ].
-      #
-      # La orientacion es lo que no se podia adivinar. El calculo
-      # generico asumia [180, 0, 0] (descenso vertical) y la real es
-      # [-15.26, 83.99, -14.38]: RY casi 84 grados. Con la supuesta, la
-      # muneca habria bajado contra la pieza.
-      #
-      # Contraste que da confianza: la altura enseñada queda 68.3 mm
-      # sobre la superficie (25.60 - (-42.70)) y grasp_z_mm decia 70.0.
-      # La geometria del catalogo era buena; lo que fallaba era la
-      # referencia absoluta y la orientacion.
-      target_coords: [222.30, 21.20, 25.60, -15.26, 83.99, -14.38]
-      # Parada de la base a la que se enseño. Sin esto la pose solo vale
-      # desde ese punto exacto, y la base llega con +-34 mm.
-      target_coords_stop_m: 0.28
+      # Leida de la consola: c -> [X, Y, Z, RX, RY, RZ]. La configuracion
+      # articular observada fue [7.29, 132.01, -50.62, 4.74, -90.17,
+      # -0.08]; se conserva como contraste de rama, no como un goal.
+      target_coords: [163.50, 15.50, -25.30, 4.08, 81.21, 6.62]
+      # Despeje LiDAR REAL de la aproximacion que precedio la ensenanza:
+      # rango=0.274 m menos lidar_to_front_bumper_m=0.195 m -> 0.184 m.
+      # El servidor corrige X con la diferencia entre esta referencia y
+      # la parada medida de cada nueva aproximacion.
+      target_coords_stop_m: 0.18425
       # Respaldo documental; manda target_coords.
       grasp_z_mm: 70.0
       approach_height_mm: 60.0
