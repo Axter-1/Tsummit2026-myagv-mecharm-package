@@ -88,6 +88,12 @@ class GraspSpec:
         self.offset_mm = [float(v) for v in raw.get("grasp_offset_mm", [0.0, 0.0])]
         self.wrist_deg = float(raw.get("wrist_deg", 0.0))
         self.carry_pose = str(raw.get("carry_pose", "carry"))
+        self.require_calibrated_target = bool(
+            raw.get("require_calibrated_target", False)
+        )
+
+        self.target_coords = None
+        raw_target = raw.get("target_coords")
 
         self.table_z_mm = float(table_z_mm)
 
@@ -99,6 +105,16 @@ class GraspSpec:
         # Comprobaciones que atrapan una edicion mala del YAML antes de
         # que el brazo intente algo imposible.
         problems = []
+        if raw_target is not None:
+            if not isinstance(raw_target, (list, tuple)) or len(raw_target) != 6:
+                problems.append("target_coords debe tener 6 valores [X,Y,Z,RX,RY,RZ]")
+            else:
+                try:
+                    self.target_coords = [float(value) for value in raw_target]
+                except (TypeError, ValueError):
+                    problems.append("target_coords contiene un valor no numerico")
+        if self.require_calibrated_target and self.target_coords is None:
+            problems.append("requiere target_coords ensenadas antes de usar el brazo")
         if self.span_mm > stroke:
             problems.append(
                 f"span_mm={self.span_mm:.1f} supera el recorrido de la "
@@ -269,6 +285,9 @@ class ObjectGraspServer(Node):
         gripper = cat.get("gripper", {})
         self.table_z_mm = float(cat.get("table_z_mm", 0.0))
         self.max_reach_mm = float(cat.get("max_reach_mm", 250.0))
+        self.safe_navigation_pose = str(
+            cat.get("safe_navigation_pose", "")
+        ).strip()
 
         self.aruco_to_object = {
             int(k): str(v) for k, v in (cat.get("aruco_to_object", {}) or {}).items()
@@ -296,6 +315,21 @@ class ObjectGraspServer(Node):
             )
 
         self.get_logger().info(f"Catalogo cargado de {path}")
+
+    def _move_to_safe_pose(self, goal_handle):
+        """Recoge el brazo antes de permitir que se mueva la base."""
+        if not self.safe_navigation_pose:
+            return False, (
+                "safe_navigation_pose no esta configurada; ensena una pose "
+                "recogida antes de mover la base."
+            )
+
+        self._feedback(goal_handle, "SAFE_POSE")
+        goal = MoveArm.Goal()
+        goal.pose_name = self.safe_navigation_pose
+        return self._send_and_wait(
+            self.move_client, goal, "mecharm/move_arm pose segura", 90.0
+        )
 
     # =================================================================
     # Detecciones
@@ -441,7 +475,15 @@ class ObjectGraspServer(Node):
             f"Pieza: {spec.label} (ArUco {marker_id}). {spec.describe()}"
         )
 
-        # --- 2. Aproximacion de la base ------------------------------
+        # --- 2. Recoger el brazo antes de mover la base ---------------
+        if self.enable_arm and self.enable_approach:
+            ok, msg = self._move_to_safe_pose(goal_handle)
+            self.get_logger().info(msg)
+            if not ok:
+                goal_handle.abort()
+                return self._result(False, "GRASP_FAILED", msg)
+
+        # --- 3. Aproximacion de la base ------------------------------
         if self.enable_approach and marker_id is not None:
             self._feedback(goal_handle, "APPROACH")
             approach = ArucoApproach.Goal()
@@ -463,7 +505,7 @@ class ObjectGraspServer(Node):
             goal_handle.canceled()
             return self._result(False, "CANCELED", "Cancelado por el usuario.")
 
-        # --- 3. Objetivo de agarre -----------------------------------
+        # --- 4. Objetivo de agarre -----------------------------------
         coords = self._grasp_coords(spec, req)
         # Alcance ESFERICO, no solo en planta: el MechArm 270 tiene 270 mm
         # de radio util contando la altura. Un agarre alto (la cima del
@@ -495,7 +537,7 @@ class ObjectGraspServer(Node):
                 f"aproximada. Agarre calculado en {coords}."
             )
 
-        # --- 4. Toma con el brazo ------------------------------------
+        # --- 5. Toma con el brazo ------------------------------------
         self._feedback(goal_handle, "DESCEND")
         pick = PickPlace.Goal()
         pick.operation = "pick"
@@ -548,6 +590,8 @@ class ObjectGraspServer(Node):
         """
         if len(req.target_coords) >= 3:
             base = list(req.target_coords[:3])
+        elif spec.target_coords is not None:
+            return list(spec.target_coords)
         else:
             # X delante del brazo a la distancia de parada, Y centrado.
             base = [

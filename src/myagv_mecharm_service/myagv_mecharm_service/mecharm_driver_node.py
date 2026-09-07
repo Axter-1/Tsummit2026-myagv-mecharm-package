@@ -65,6 +65,9 @@ class MechArmDriver(Node):
 
         self.declare_parameter("gripper_open_value", 100)
         self.declare_parameter("gripper_closed_value", 20)
+        # pymycobot exige el tipo en algunas versiones aunque la API lo
+        # documente como opcional. 1 = pinza adaptativa del MechArm.
+        self.declare_parameter("gripper_type", 1)
 
         self.declare_parameter("move_timeout_sec", 20.0)
         self.declare_parameter("gripper_timeout_sec", 5.0)
@@ -135,6 +138,7 @@ class MechArmDriver(Node):
         self.gripper_closed_value = int(
             self.get_parameter("gripper_closed_value").value
         )
+        self.gripper_type = int(self.get_parameter("gripper_type").value)
 
         self.move_timeout = float(
             self.get_parameter("move_timeout_sec").value
@@ -396,7 +400,7 @@ class MechArmDriver(Node):
                 angles = self._arm("get_angles")
             except RuntimeError:
                 return None
-            if angles and len(angles) == 6 and angles != -1:
+            if isinstance(angles, (list, tuple)) and len(angles) == 6:
                 return [float(a) for a in angles]
             time.sleep(delay)
         return None
@@ -407,7 +411,7 @@ class MechArmDriver(Node):
                 coords = self._arm("get_coords")
             except RuntimeError:
                 return None
-            if coords and len(coords) == 6 and coords != -1:
+            if isinstance(coords, (list, tuple)) and len(coords) == 6:
                 return [float(c) for c in coords]
             time.sleep(delay)
         return None
@@ -571,7 +575,7 @@ class MechArmDriver(Node):
         speed = int(round(clamp(speed, 1.0, 100.0)))
 
         try:
-            self._arm("set_gripper_value", value, speed)
+            self._arm("set_gripper_value", value, speed, self.gripper_type)
         except RuntimeError as exc:
             self._drop_connection(str(exc))
             return "fault"
@@ -582,7 +586,7 @@ class MechArmDriver(Node):
             )
             try:
                 flag = 0 if value >= 50 else 1
-                self._arm("set_gripper_state", flag, speed)
+                self._arm("set_gripper_state", flag, speed, self.gripper_type)
             except Exception as exc2:  # noqa: BLE001
                 self.get_logger().error(f"set_gripper_state fallo: {exc2}")
                 return "fault"

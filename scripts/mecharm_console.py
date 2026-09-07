@@ -108,7 +108,7 @@ class Console:
                 value = getattr(self.mc, method)()
             except Exception:  # noqa: BLE001
                 value = None
-            if value and value != -1 and len(value) == length:
+            if isinstance(value, (list, tuple)) and len(value) == length:
                 return [float(v) for v in value]
             time.sleep(delay)
         return None
@@ -209,11 +209,11 @@ class Console:
     def set_gripper(self, value):
         value = int(clamp(value, 0, 100))
         try:
-            self.mc.set_gripper_value(value, 50)
+            self.mc.set_gripper_value(value, 50, 1)
         except Exception as exc:  # noqa: BLE001
             print(f"  set_gripper_value fallo ({exc}); pruebo state...")
             try:
-                self.mc.set_gripper_state(0 if value >= 50 else 1, 50)
+                self.mc.set_gripper_state(0 if value >= 50 else 1, 50, 1)
             except Exception as exc2:  # noqa: BLE001
                 print(f"  ERROR: {exc2}")
                 return

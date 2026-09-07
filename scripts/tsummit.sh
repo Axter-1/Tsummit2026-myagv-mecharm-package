@@ -23,6 +23,11 @@ ROUTINE="${ROOT}/scripts/run_robot_routine.sh"
 MAZE="${ROOT}/scripts/run_maze.sh"
 CONTAINER="${CONTAINER:-myagv-robot}"
 LOG_DIR="${LOG_DIR:-/workspace/log/robot_routine}"
+# Tiempo maximo para encontrar y aproximarse al ArUco durante un grasp.
+# Se puede ampliar por invocacion sin editar codigo.
+GRASP_APPROACH_TIMEOUT="${GRASP_APPROACH_TIMEOUT:-120.0}"
+# Distancia LiDAR (m) a la que se detiene la base antes de agarrar.
+GRASP_STOP_DISTANCE="${GRASP_STOP_DISTANCE:-0.20}"
 
 # Config DDS con la que este script habla con los nodos.
 #
@@ -242,12 +247,23 @@ perception() {
 #  y saca velocidad por /cmd_vel_aruco -> twist_mux -> /cmd_vel, que
 #  tambien exige base + twist_mux.
 #
-#      ./scripts/tsummit.sh approach-check          arranca la pila, NO mueve
-#      ALLOW_MOTION=1 ./scripts/tsummit.sh approach <id> [stop_m]
+#      DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh approach-check
+#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> \
+#          ./scripts/tsummit.sh approach <id> [stop_m]
 # =====================================================================
+
+require_distributed_aruco() {
+    # La CSI solo puede tener un CaptureSession. El detector y la
+    # aproximacion corren en el portatil, por lo que arrancar una pila
+    # ArUco local en paralelo abre una segunda camara y deja el grasp en
+    # SEARCHING antes de que llegue a mandar nada al brazo.
+    [ "${DISTRIBUTED}" = "1" ] || die \
+        "ArUco requiere DISTRIBUTED=1: define tambien LAPTOP_IP=<ip actual del portatil>."
+}
 
 approach_stack() {
     ensure_container
+    require_distributed_aruco
     routine base
     sleep 3
     perception
@@ -256,13 +272,14 @@ approach_stack() {
     # vida. 'ros2 topic hz' por CLI es poco fiable en esta Nano
     # (rcl context invalid); un one-shot con echo --once es robusto.
     say "Comprobando entradas del servidor de aproximacion"
-    in_container "for t in /scan_filtered /aruco/detections /odom; do \
+    in_container "failed=0; for t in /scan_filtered /aruco/detections /odom; do \
         if timeout 6 ros2 topic echo --once \"\$t\" >/dev/null 2>&1; then \
             echo \"  OK    \$t\"; \
         else \
             echo \"  ? \$t  (sin respuesta; la CLI de ros2 falla a ratos \
 en la Nano, reintenta 'tsummit.sh status')\"; \
-        fi; done"
+            failed=1; \
+        fi; done; exit \$failed"
 }
 
 approach_check() {
@@ -271,7 +288,8 @@ approach_check() {
     printf '  docker exec %s bash -lc "source /opt/ros/humble/setup.bash; \\\n' "${CONTAINER}"
     printf '    source /workspace/install/setup.bash; ros2 topic echo /aruco/detections"\n'
     printf 'Cuando quieras mover:\n'
-    printf '  ALLOW_MOTION=1 ./scripts/tsummit.sh approach <id> [stop_m]\n'
+    printf '%s\n' '  ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> \' \
+        '  ./scripts/tsummit.sh approach <id> [stop_m]'
 }
 
 approach() {
@@ -294,15 +312,22 @@ approach() {
 #  Los tres casos (engranaje / poste / rueda) salen del catalogo
 #  src/home_service_behaviors/config/grasp_catalog.yaml.
 #
-#      ./scripts/tsummit.sh grasp-dry            ensayo, no mueve nada
-#      ALLOW_MOTION=1 ./scripts/tsummit.sh grasp auto
-#      ALLOW_MOTION=1 ./scripts/tsummit.sh grasp engranaje
+#      DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh grasp-dry
+#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh grasp auto
+#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh grasp engranaje
 # =====================================================================
 
 grasp_stack() {
     local enable_arm="$1" enable_approach="$2"
     ensure_container
-    perception
+    require_distributed_aruco
+    if [ "${enable_approach}" = "true" ]; then
+        # La toma comparte las precondiciones de la accion publica de
+        # aproximacion: base, LiDAR, odometria y detector remoto.
+        approach_stack
+    else
+        perception
+    fi
     if [ "${enable_arm}" = "true" ]; then
         arm
     fi
@@ -312,7 +337,9 @@ grasp_stack() {
     fi
     run_bg grasp \
         "ros2 launch home_service_behaviors object_grasp.launch.py \
-         enable_arm:=${enable_arm} enable_approach:=${enable_approach}"
+         enable_arm:=${enable_arm} enable_approach:=${enable_approach} \
+         approach_stop_distance:=${GRASP_STOP_DISTANCE} \
+         approach_timeout_sec:=${GRASP_APPROACH_TIMEOUT}"
     sleep 5
 }
 
@@ -360,22 +387,15 @@ grasp_catalog() {
 reto1() {
     confirm_motion
     say "Reto 1 — Clasificacion"
-    ensure_container
-    routine base
-    perception
-    arm
     grasp_stack true true
     printf 'Pila lista. Lanza la toma con:\n'
-    printf '  ALLOW_MOTION=1 ./scripts/tsummit.sh grasp <engranaje|poste|rueda|auto>\n'
+    printf '%s\n' '  ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> \' \
+        '  ./scripts/tsummit.sh grasp <engranaje|poste|rueda|auto>'
 }
 
 reto2() {
     confirm_motion
     say "Reto 2 — Kitting"
-    ensure_container
-    routine base
-    perception
-    arm
     grasp_stack true true
     printf 'Pila lista (misma que reto 1; la secuencia de kitting la\n'
     printf 'orquesta home_service_mission/mission_manager).\n'
@@ -562,12 +582,14 @@ T-SUMMIT Challenge — consola unica
 
   APROXIMACION A UN ARUCO
     approach-check         arranca base + camara y comprueba entradas, NO mueve
-    approach <id> [stop_m] aproxima la BASE al marcador <id> (exige ALLOW_MOTION=1)
+    approach <id> [stop_m] aproxima la BASE al marcador <id> (exige ALLOW_MOTION=1,
+                            DISTRIBUTED=1 y LAPTOP_IP=<ip>)
                            stop_m = distancia final, por defecto 0.20 m
 
   TOMA DE PIEZA  (retos 1 y 2)
     grasp-dry [pieza]       ENSAYO: identifica y calcula, no mueve nada
-    grasp [pieza]           cadena completa (exige ALLOW_MOTION=1)
+    grasp [pieza]           cadena completa (exige ALLOW_MOTION=1,
+                            DISTRIBUTED=1 y LAPTOP_IP=<ip>)
     grasp-catalog           vuelca el catalogo como lo lee el nodo
       pieza = auto | engranaje | poste | rueda
       auto  -> deduce la pieza del ArUco que este viendo

@@ -21,6 +21,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.actions import Node
 
 
@@ -50,6 +51,11 @@ def generate_launch_description():
             description="Distancia (m) a la que se para la base del ArUco",
         ),
         DeclareLaunchArgument(
+            "approach_timeout_sec",
+            default_value="120.0",
+            description="Tiempo maximo (s) para encontrar y aproximar el ArUco",
+        ),
+        DeclareLaunchArgument(
             "detections_topic",
             default_value="/aruco/detections",
         ),
@@ -66,6 +72,9 @@ def generate_launch_description():
             "enable_approach": LaunchConfiguration("enable_approach"),
             "approach_stop_distance": LaunchConfiguration(
                 "approach_stop_distance"
+            ),
+            "approach_timeout_sec": ParameterValue(
+                LaunchConfiguration("approach_timeout_sec"), value_type=float
             ),
             "detections_topic": LaunchConfiguration("detections_topic"),
         }],

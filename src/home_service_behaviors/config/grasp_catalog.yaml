@@ -32,6 +32,9 @@
 #  TODAS las alturas (grasp_z_mm, approach_height_mm) son sobre la
 #  superficie de apoyo de la pieza, no sobre la base del brazo. El nodo
 #  las suma a 'table_z_mm', que es lo que hay que calibrar en pista.
+#
+#  target_coords, si existe en una pieza, sustituye ese calculo por una
+#  pose enseñada [X,Y,Z,RX,RY,RZ] en mm/grados del frame real del brazo.
 # =====================================================================
 
 grasp_catalog:
@@ -59,6 +62,11 @@ grasp_catalog:
   # Margen de seguridad: el nodo rechaza cualquier objetivo cuyo radio
   # desde la base del brazo supere esto (MechArm 270 -> 270 mm).
   max_reach_mm: 250.0
+
+  # El brazo debe estar recogido antes de mover la base. Dejalo vacio
+  # hasta ensenar una pose realmente segura y guardarla en poses.yaml;
+  # con este valor vacio, cualquier grasp con base queda bloqueado.
+  safe_navigation_pose: ""
 
   # -------------------------------------------------------------------
   # Mapa ArUco -> pieza. Los marcadores son 6x6_250, 8 cm, IDs 0..9
@@ -154,8 +162,9 @@ grasp_catalog:
       span_mm: 20.0
       open_mm: 32.0
       close_mm: 15.0             # aplasta 5 mm
-      # 70 mm sobre la mesa: tercio superior del tubo, 50 mm por encima
-      # del disco de base. Margen de sobra para no rozarlo.
+      # No usar el brazo hasta volver a ensenar una pose valida en pista.
+      require_calibrated_target: true
+      # Respaldo documental; require_calibrated_target impide usarlo.
       grasp_z_mm: 70.0
       approach_height_mm: 60.0
       grasp_offset_mm: [0.0, 0.0]

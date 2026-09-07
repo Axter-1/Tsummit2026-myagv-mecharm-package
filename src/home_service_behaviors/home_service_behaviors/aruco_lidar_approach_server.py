@@ -368,6 +368,21 @@ class ArucoLidarApproachServer(Node):
             6.0
         )
 
+        # El LiDAR no esta en el borde delantero que mide el operador.
+        # En la prueba de poste leia 0.206 m con el borde a ~0.01 m, por
+        # lo que el borde queda unos 0.195 m por delante del sensor.
+        self.declare_parameter(
+            'lidar_to_front_bumper_m',
+            0.195
+        )
+
+        # El ArUco debe seguir centrado al aceptar el rango LiDAR final:
+        # asi se evita parar ante otra superficie del sector frontal.
+        self.declare_parameter(
+            'final_camera_center_tolerance',
+            0.12
+        )
+
         # Angulo del FRENTE del robot medido EN EL FRAME DEL LASER.
         #
         # No es 0. El YDLidar va montado girado 180 grados
@@ -1424,6 +1439,16 @@ class ArucoLidarApproachServer(Node):
 
         return self._laser_to_base
 
+    def planner_stop_distance(self, bumper_clearance):
+        """Convierte el despeje del borde en distancia desde base_link."""
+        laser_to_base = self.get_laser_to_base()
+        laser_x = laser_to_base[0] if laser_to_base is not None else 0.0
+        return (
+            bumper_clearance +
+            self.pf('lidar_to_front_bumper_m') +
+            laser_x
+        )
+
     def get_front_lidar_range(self):
 
         now_ns = (
@@ -2207,11 +2232,14 @@ class ArucoLidarApproachServer(Node):
                 )
 
             standoff = self.pf('staging_standoff')
+            path_stop_distance = self.planner_stop_distance(stop_distance)
+            # El punto de encare debe quedar antes que el objetivo final.
+            standoff = max(standoff, path_stop_distance + 0.10)
 
             path = planner.build_path(
                 rx, ry, mx, my, nx, ny,
                 standoff,
-                stop_distance,
+                path_stop_distance,
                 corridor_radius=self.pf('corridor_radius'),
             )
 
@@ -2317,11 +2345,21 @@ class ArucoLidarApproachServer(Node):
             # -------------------------------------------------
 
             front = self.get_front_lidar_range()
+            front_clearance = None
 
             if front is not None:
-                final_distance = front
+                front_clearance = front - self.pf('lidar_to_front_bumper_m')
+                final_distance = front_clearance
             else:
                 final_distance = along
+
+            # La odometria/camara guia el movimiento, pero no puede
+            # declarar llegada: hace falta LiDAR fresco y ArUco centrado.
+            reached = False
+            camera_centered = (
+                detection is not None and
+                abs(center_error) <= self.pf('final_camera_center_tolerance')
+            )
 
             # Coherente con la histeresis, a proposito. Exigir la
             # tolerancia FINA aqui produce bloqueo: el robot se asienta
@@ -2335,10 +2373,12 @@ class ArucoLidarApproachServer(Node):
             centred = abs(lateral) <= self.pf('lateral_tolerance')
 
             if (
-                front is not None and
-                front <= stop_distance + self.pf('distance_tolerance') and
+                front_clearance is not None and
+                abs(front_clearance - stop_distance) <=
+                self.pf('distance_tolerance') and
                 aligned and
-                centred
+                centred and
+                camera_centered
             ):
                 reached = True
 
@@ -2349,8 +2389,8 @@ class ArucoLidarApproachServer(Node):
             clearance = self.pf('min_front_clearance')
 
             if (
-                front is not None and
-                front < clearance and
+                front_clearance is not None and
+                front_clearance < clearance and
                 vx > 0.0
             ):
 
@@ -2362,10 +2402,10 @@ class ArucoLidarApproachServer(Node):
                 result.success = False
                 result.status = 'BLOCKED'
                 result.message = (
-                    f'Obstaculo a {front:.3f} m '
+                    f'Obstaculo a {front_clearance:.3f} m '
                     f'(minimo {clearance:.3f} m)'
                 )
-                result.final_distance = front
+                result.final_distance = front_clearance
 
                 self.get_logger().error(result.message)
 
@@ -2385,9 +2425,11 @@ class ArucoLidarApproachServer(Node):
                 result.success = True
                 result.status = 'REACHED'
                 result.message = (
-                    f'Llegada: lidar={final_distance:.3f} m, '
+                    f'Llegada: despeje_lidar={final_distance:.3f} m '
+                    f'(rango={front:.3f} m), '
                     f'geometria={along:.3f} m, '
                     f'lateral={lateral:+.3f} m, '
+                    f'camara={center_error:+.2f}, '
                     f'yaw={math.degrees(yaw_error):+.1f} deg, '
                     f'{elapsed:.1f} s'
                 )

@@ -24,6 +24,9 @@ mecharm_driver_node:
     # adaptativo. Ajusta segun tu pinza y pieza.
     gripper_open_value: 100
     gripper_closed_value: 20
+    # 1 = pinza adaptativa; se envia explicitamente por compatibilidad
+    # con pymycobot, que en algunas versiones rechaza None.
+    gripper_type: 1
 
     # ---------------------------------------------------------------
     # Tiempos
