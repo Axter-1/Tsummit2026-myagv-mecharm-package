@@ -384,12 +384,31 @@ class ArucoLidarApproachServer(Node):
         # es un obstaculo de verdad y tiene que seguir contando, porque
         # es lo unico que dispara la parada de seguridad.
         #
-        # 0.08 = el lado del marcador. Mas estrecho y el ruido del
-        # sensor empieza a vaciar el sector; mas ancho y vuelve a
-        # colarse una pared que este a 13 cm, que es el caso medido.
+        # DESACTIVADA POR DEFECTO (0.0), y no por precaucion vaga.
+        #
+        # La expectativa sale de la geometria de la CAMARA, y la camara
+        # esta mal escalada ahora mismo. Medido con cinta: bumper a
+        # 0.43 m del plano del ArUco 2. Reconciliando con el LiDAR crudo
+        # (0.511 desde el sensor) sale base_link->marcador = 0.576,
+        # mientras la camara reporta 0.449. Se queda corta 0.127 m.
+        #
+        # Como la distancia estimada de un ArUco escala con
+        # marker_length, esa proporcion dice que el marcador REAL mide
+        # unos 10.3 cm, no los 0.08 configurados.
+        #
+        # Con esa expectativa mala la banda calcula un limite de 0.464 y
+        # RECHAZA el eco bueno de 0.511: tira la medida correcta por
+        # fiarse de la equivocada. Encenderla antes de recalibrar
+        # empeora las cosas.
+        #
+        # Orden correcto: medir el marcador con calibre, corregir
+        # marker_length y lidar_to_front_bumper_m (0.195 salio de la
+        # prueba de poste, otra escena; la cinta apunta a ~0.081), y
+        # SOLO entonces poner esto a ~0.08. Hasta ahi, si el sector
+        # midiera el fondo, el aborto por STALLED lo dice en 2 s.
         self.declare_parameter(
             'lidar_front_depth_band',
-            0.08
+            0.0
         )
 
         # Cuanto se tolera que el robot este parado sin haber declarado
