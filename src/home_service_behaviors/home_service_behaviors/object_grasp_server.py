@@ -182,7 +182,16 @@ class ObjectGraspServer(Node):
         # Distancia a la que la aproximacion ArUco deja la base. Es la
         # que hace repetible el agarre: el brazo siempre encuentra la
         # pieza en el mismo sitio.
-        self.declare_parameter("approach_stop_distance", 0.20)
+        # 0.30 y no 0.20: MEDIDO por el operador, con la base a 0.20 m
+        # del plano la pinza no llega a rozar la superficie donde se
+        # apoya la pieza. A 0.30 si.
+        #
+        # Ojo, esto destapa que _grasp_coords calcula X = parada * 1000,
+        # o sea da por hecho que el origen del frame del brazo coincide
+        # con lo que mide la parada del LiDAR. No coincide: si
+        # coincidiera, acercarse mas nunca podria empeorar el alcance.
+        # Falta medir ese offset y meterlo explicito.
+        self.declare_parameter("approach_stop_distance", 0.30)
         self.declare_parameter("approach_timeout_sec", 45.0)
         # Cuanto se espera a ver un ArUco en modo "auto".
         self.declare_parameter("detect_timeout_sec", 15.0)

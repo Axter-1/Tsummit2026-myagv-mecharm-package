@@ -57,7 +57,14 @@ grasp_catalog:
   #   3. lock, lee coords, apunta la Z.
   # Un error aqui se traduce en chocar contra la mesa o cerrar al aire.
   # -------------------------------------------------------------------
-  table_z_mm: 90.0
+  # MEDIDO en pista con la consola (free -> rozar la superficie -> lock
+  # -> c). El 90.0 anterior era un valor heredado sin medir, y no solo
+  # de magnitud: tenia el SIGNO cambiado. 140 mm de error, que es bajar
+  # el brazo 14 cm por encima de la pieza y cerrar al aire.
+  #
+  # PRELIMINAR: una sola lectura. Repetir tres o cuatro veces subiendo y
+  # bajando; si varian mas de 2-3 mm no es fiable.
+  table_z_mm: -49.8
 
   # Margen de seguridad: el nodo rechaza cualquier objetivo cuyo radio
   # desde la base del brazo supere esto (MechArm 270 -> 270 mm).
