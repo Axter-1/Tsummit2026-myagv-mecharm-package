@@ -110,12 +110,27 @@ def generate_launch_description():
         # marker_length y lidar_to_front_bumper_m se cambian aqui.
         DeclareLaunchArgument(
             'lidar_to_front_bumper_m',
-            default_value='0.195',
-            description='Del sensor LiDAR al borde delantero. El 0.195 '
-                        'salio de la prueba de poste; con cinta sobre '
-                        'el ArUco 2 salen ~0.081. Medirlo antes de '
-                        'fiarse: entra directo en el criterio de '
-                        'llegada.',
+            default_value='0.09',
+            description='Del sensor LiDAR al borde delantero, '
+                        'medido sobre el robot. Entra directo en el '
+                        'criterio de llegada y en el ancho maximo del '
+                        'pasillo.',
+        ),
+        DeclareLaunchArgument(
+            'blind_endgame_distance',
+            default_value='0.35',
+            description='Por debajo de esta distancia se deja de exigir '
+                        'ver el marcador: a 0.29 m un ArUco de 8 cm ya '
+                        'no cabe en el encuadre. Se navega con el '
+                        'marcador fijado en odom y el LiDAR midiendo.',
+        ),
+        DeclareLaunchArgument(
+            'max_blind_travel',
+            default_value='0.25',
+            description='Metros que se admite recorrer sin ver el '
+                        'marcador. En metros y no en segundos porque la '
+                        'deriva crece con la distancia, no con la '
+                        'espera.',
         ),
         DeclareLaunchArgument(
             'lidar_front_depth_band',
@@ -199,6 +214,14 @@ def generate_launch_description():
             ),
             'lidar_front_depth_band': ParameterValue(
                 LaunchConfiguration('lidar_front_depth_band'),
+                value_type=float,
+            ),
+            'blind_endgame_distance': ParameterValue(
+                LaunchConfiguration('blind_endgame_distance'),
+                value_type=float,
+            ),
+            'max_blind_travel': ParameterValue(
+                LaunchConfiguration('max_blind_travel'),
                 value_type=float,
             ),
         }],

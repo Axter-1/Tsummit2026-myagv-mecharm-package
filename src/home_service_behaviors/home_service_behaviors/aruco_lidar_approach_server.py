@@ -373,7 +373,15 @@ class ArucoLidarApproachServer(Node):
         # lo que el borde queda unos 0.195 m por delante del sensor.
         self.declare_parameter(
             'lidar_to_front_bumper_m',
-            0.195
+            # 0.09, medido por el usuario directamente sobre el robot:
+            # del sensor al borde delantero, sin marcador de por medio.
+            # El 0.195 salio de la prueba de poste y era de otra escena.
+            #
+            # Las dos reconciliaciones indirectas daban 0.081 y 0.122
+            # segun de que corrida se partiera, o sea que ninguna era de
+            # fiar. Una medida estatica del propio robot no depende de
+            # donde este ni de que este mirando.
+            0.09
         )
 
         # Cuanto mas lejos que el plano esperado se acepta un eco del
@@ -409,6 +417,29 @@ class ArucoLidarApproachServer(Node):
         self.declare_parameter(
             'lidar_front_depth_band',
             0.0
+        )
+
+        # Por debajo de esta distancia se deja de exigir ver el
+        # marcador. No es una concesion: a 0.29 m un ArUco de 8 cm ya no
+        # cabe en el encuadre, medido en pista. Exigir vision hasta el
+        # final vuelve inalcanzable cualquier parada corta.
+        #
+        # El marcador esta fijado en odom, asi que la odometria sabe
+        # donde esta sin verlo, y el LiDAR sigue midiendo el plano. Se
+        # pierde la correccion, no la posicion.
+        self.declare_parameter(
+            'blind_endgame_distance',
+            0.35
+        )
+
+        # Cuanto se admite recorrer a ciegas. En METROS y no en
+        # segundos: la deriva de odometria crece con la distancia
+        # recorrida, y un robot parado esperando no deriva nada. Con el
+        # limite en tiempo, quedarse quieto un rato abortaba una
+        # aproximacion sana.
+        self.declare_parameter(
+            'max_blind_travel',
+            0.25
         )
 
         # Cuanto se tolera que el robot este parado sin haber declarado
@@ -2035,6 +2066,10 @@ class ArucoLidarApproachServer(Node):
         search_moving = True
 
         last_detection_ns = None
+        # Pose del robot en la ultima deteccion. La deriva de odometria
+        # crece con la DISTANCIA recorrida, no con el tiempo parado, asi
+        # que el tramo a ciegas se acota por metros, no por segundos.
+        last_detection_xy = None
         stale_warned = False
         yaw_settled = False
 
@@ -2131,6 +2166,7 @@ class ArucoLidarApproachServer(Node):
                     )
 
                     last_detection_ns = now_ns
+                    last_detection_xy = (rx, ry)
                     stale_warned = False
 
                     # La normal del LiDAR es bastante mejor que la del
@@ -2323,7 +2359,64 @@ class ArucoLidarApproachServer(Node):
                 now_ns - (last_detection_ns or now_ns)
             ) / 1e9
 
-            if stale > self.pf('estimate_abort_age'):
+            # -------------------------------------------------
+            # TRAMO FINAL A CIEGAS
+            #
+            # Cerca del marcador la camara deja de verlo por geometria,
+            # no por fallo: a 0.29 m un ArUco de 8 cm ya se sale del
+            # encuadre. Exigir vision hasta el final hace inalcanzable
+            # cualquier parada corta, por bien que vaya todo lo demas.
+            #
+            # No hace falta: el marcador esta fijado en `odom`, asi que
+            # la odometria sabe donde esta aunque no se vea, y el LiDAR
+            # sigue midiendo la distancia al plano. Lo que se pierde es
+            # la CORRECCION, no la posicion.
+            #
+            # Por eso el limite del tramo a ciegas son METROS RECORRIDOS
+            # y no segundos: la deriva de odometria crece con la
+            # distancia, y un robot parado esperando no deriva nada. Con
+            # el limite en tiempo, quedarse quieto un rato abortaba una
+            # aproximacion perfectamente sana.
+            # -------------------------------------------------
+
+            # final_distance viene del ciclo ANTERIOR (se calcula mas
+            # abajo). A 20 Hz eso es un ciclo de retraso, irrelevante.
+            # El > 0.0 no es cosmetico: el valor inicial es -1.0 como
+            # centinela de "aun no se sabe", y sin ese filtro el primer
+            # ciclo entraria en modo ciego y desactivaria el abort por
+            # marcador perdido durante toda la aproximacion.
+            blind = (
+                final_distance > 0.0 and
+                final_distance <= self.pf('blind_endgame_distance')
+            )
+
+            recorrido_ciego = (
+                math.hypot(rx - last_detection_xy[0],
+                           ry - last_detection_xy[1])
+                if last_detection_xy is not None else 0.0
+            )
+
+            if blind and recorrido_ciego > self.pf('max_blind_travel'):
+
+                self.stop_robot()
+                goal_handle.abort()
+
+                result = ArucoApproach.Result()
+
+                result.success = False
+                result.status = 'LOST'
+                result.message = (
+                    f'{recorrido_ciego:.3f} m recorridos sin ver el '
+                    f'marcador (limite {self.pf("max_blind_travel"):.3f}). '
+                    'La odometria ha derivado demasiado para fiarse.'
+                )
+                result.final_distance = final_distance
+
+                self.get_logger().error(result.message)
+
+                return result
+
+            if not blind and stale > self.pf('estimate_abort_age'):
 
                 self.stop_robot()
                 goal_handle.abort()
@@ -2334,9 +2427,9 @@ class ArucoLidarApproachServer(Node):
                 result.status = 'LOST'
                 result.message = (
                     f'Marcador perdido {stale:.1f} s (limite '
-                    f'{self.pf("estimate_abort_age"):.1f} s). La '
-                    'estimacion en odom ha derivado demasiado; abortando '
-                    'en vez de navegar a ciegas.'
+                    f'{self.pf("estimate_abort_age"):.1f} s) y todavia a '
+                    f'{final_distance:.3f} m, lejos del tramo final. '
+                    'Abortando en vez de navegar a ciegas.'
                 )
                 result.final_distance = final_distance
 
@@ -2513,7 +2606,7 @@ class ArucoLidarApproachServer(Node):
                 self.pf('distance_tolerance') and
                 aligned and
                 centred and
-                camera_centered
+                (camera_centered or blind)
             ):
                 reached = True
 
