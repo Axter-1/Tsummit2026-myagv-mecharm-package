@@ -1558,7 +1558,7 @@ class ArucoLidarApproachServer(Node):
             laser_x
         )
 
-    def get_front_lidar_range(self, expected=None):
+    def get_front_lidar_range(self, expected=None, nearest=False):
 
         now_ns = (
             self.get_clock()
@@ -1668,9 +1668,13 @@ class ArucoLidarApproachServer(Node):
 
         self._lidar_fail = None
 
-        return float(
-            np.median(gated)
-        )
+        if nearest:
+            # Modo de seguridad: si la geometria de la camara esta mal, el
+            # eco mas cercano sigue siendo un limite valido para no avanzar
+            # contra un obstaculo o el plano del marcador.
+            return float(min(gated))
+
+        return float(np.median(gated))
 
     # =============================================================
     # Commands
@@ -2500,6 +2504,19 @@ class ArucoLidarApproachServer(Node):
                 standoff * 2.0,
             )
 
+            # Medicion independiente de la geometria ArUco. La distancia
+            # `along` puede estar sesgada si marker_length o TF de camara no
+            # estan calibrados; el eco frontal mas cercano debe limitar el
+            # mando del ciclo actual, no esperar al ciclo siguiente.
+            safety_front = self.get_front_lidar_range(
+                None,
+                nearest=True,
+            )
+            safety_clearance = (
+                safety_front - self.pf('lidar_to_front_bumper_m')
+                if safety_front is not None else None
+            )
+
             limits = {
                 'max_linear': self.pf('max_linear_speed'),
                 'max_lateral': self.pf('max_lateral_speed'),
@@ -2589,10 +2606,14 @@ class ArucoLidarApproachServer(Node):
 
             remaining_ctrl = remaining
 
-            if final_distance > 0.0:
+            control_distance = final_distance
+            if safety_clearance is not None:
+                control_distance = safety_clearance
+
+            if control_distance > 0.0:
                 remaining_ctrl = min(
                     remaining,
-                    final_distance - stop_distance,
+                    control_distance - stop_distance,
                 )
 
             vx, vy, wz, yaw_error, reached, yaw_settled = (
@@ -2632,6 +2653,9 @@ class ArucoLidarApproachServer(Node):
             if front is not None:
                 front_clearance = front - self.pf('lidar_to_front_bumper_m')
                 final_distance = front_clearance
+            elif safety_clearance is not None:
+                front_clearance = safety_clearance
+                final_distance = safety_clearance
             else:
                 final_distance = along
 
@@ -2667,7 +2691,10 @@ class ArucoLidarApproachServer(Node):
                 self.pf('distance_tolerance') and
                 aligned and
                 centred and
-                (camera_centered or (blind and detection is None))
+                # La perpendicularidad la juzga la normal LiDAR. El centro
+                # de imagen es diagnostico: la camara tiene un offset
+                # angular propio y no debe invalidar una pose geometrica.
+                (camera_centered or blind)
             ):
                 reached = True
 
@@ -2679,8 +2706,7 @@ class ArucoLidarApproachServer(Node):
 
             if (
                 front_clearance is not None and
-                front_clearance < clearance and
-                vx > 0.0
+                front_clearance < clearance
             ):
 
                 self.stop_robot()
@@ -2713,9 +2739,12 @@ class ArucoLidarApproachServer(Node):
 
                 result.success = True
                 result.status = 'REACHED'
+                result_range = (
+                    front if front is not None else safety_front
+                )
                 result.message = (
                     f'Llegada: despeje_lidar={final_distance:.3f} m '
-                    f'(rango={front:.3f} m), '
+                    f'(rango={result_range:.3f} m), '
                     f'geometria={along:.3f} m, '
                     f'lateral={lateral:+.3f} m, '
                     f'camara={center_error:+.2f}, '
