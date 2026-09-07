@@ -66,7 +66,7 @@ grasp_catalog:
   # El brazo debe estar recogido antes de mover la base. Dejalo vacio
   # hasta ensenar una pose realmente segura y guardarla en poses.yaml;
   # con este valor vacio, cualquier grasp con base queda bloqueado.
-  safe_navigation_pose: ""
+  safe_navigation_pose: "safe_navigation"
 
   # -------------------------------------------------------------------
   # Mapa ArUco -> pieza. Los marcadores son 6x6_250, 8 cm, IDs 0..9

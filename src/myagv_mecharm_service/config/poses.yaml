@@ -1,56 +1,13 @@
-# =====================================================================
-#  Poses con nombre del MechArm 270 M5.
-#  Cada pose es [J1, J2, J3, J4, J5, J6] en GRADOS.
-# ---------------------------------------------------------------------
-#  !!! LOS VALORES DE ABAJO SON PLACEHOLDERS !!!
+# Poses con nombre del MechArm 270 M5 (grados, [J1..J6]).
+# Editado por scripts/mecharm_console.py
 #
-#  Son poses conservadoras cercanas al cero, seguras de ejecutar pero
-#  SIN NINGUNA RELACION con la geometria real del escenario. Hay que
-#  sustituirlas por poses ensenadas sobre la pista antes de competir.
-#
-#  COMO ENSENAR UNA POSE
-#  =====================
-#      pkill -f mecharm_driver_node          # libera /dev/ttyACM0
-#      python3 /workspace/scripts/mecharm_console.py
-#
-#      mecharm> free              # libera los servos (SUJETA EL BRAZO)
-#      (mueve el brazo a mano hasta la posicion deseada)
-#      mecharm> save pick_table   # guarda y reescribe este archivo
-#      mecharm> lock              # vuelve a alimentar los servos
-#
-#  Ver docs/GUIA_PRUEBAS_GARRA.md para el procedimiento completo.
-#
-#  LIMITES ARTICULARES (hoja de datos MechArm 270 M5)
-#      J1 -160..+160   J2 -85..+90   J3 -180..+45
-#      J4 -160..+160   J5 -100..+100 J6 -180..+180
-#  Alcance util: radio 270 mm desde la base del brazo.
-# =====================================================================
+# Para ensenar una pose:
+#   free            -> libera los servos (sujeta el brazo)
+#   (mueve a mano)
+#   save <nombre>   -> guarda la posicion actual
+#   lock            -> vuelve a alimentar
 
-poses:
-
-  # -------------------------------------------------------------
-  # Poses de navegacion
-  # -------------------------------------------------------------
-
-  # Brazo plegado. Se usa siempre que el robot navega, y es
-  # imprescindible en el laberinto (pasillos de 60 cm).
-  home:        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-
-  # Sujetando una pieza durante el traslado: recogido y estable, para
-  # que la pieza no se salga ni sobresalga del contorno del robot.
-  carry:       [0.0, -20.0, -20.0, 0.0, 40.0, 0.0]
-
-  # -------------------------------------------------------------
-  # Poses de manipulacion (retos 1, 2 y 3)
-  # -------------------------------------------------------------
-
-  # Mirando la zona de trabajo desde arriba, antes de bajar a agarrar.
-  observe:     [0.0, -30.0, -30.0, 0.0, 60.0, 0.0]
-
-  # Agarre sobre la plataforma de CARGA (altura maxima 10 cm).
-  # Se alcanza despues de que el paso 'aruco' deje el robot a
-  # stop_distance del marcador, asi que es repetible.
-  pick_table:  [0.0, -30.0, -30.0, 0.0, 60.0, 0.0]
-
-  # Soltado sobre la plataforma de DESTINO.
-  place_table: [0.0, -30.0, -30.0, 0.0, 60.0, 0.0]
+{poses: {carry: [0.0, -20.0, -20.0, 0.0, 40.0, 0.0], home: [0.0, 0.0, 0.0, 0.0, 0.0,
+      0.0], observe: [0.0, -30.0, -30.0, 0.0, 60.0, 0.0], pick_table: [0.0, -30.0,
+      -30.0, 0.0, 60.0, 0.0], place_table: [0.0, -30.0, -30.0, 0.0, 60.0, 0.0], safe_navigation: [
+      4.21, -34.36, 4.74, -1.31, 61.34, 5.62]}}
