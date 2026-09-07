@@ -473,6 +473,19 @@ class ArucoLidarApproachServer(Node):
             0.30
         )
 
+        # Distancia de entrada a la fase final: aqui se detiene la
+        # traslacion cuando el rumbo aun no esta asentado y se gira en
+        # sitio usando la normal fresca del LiDAR.
+        self.declare_parameter(
+            'final_alignment_distance',
+            0.35
+        )
+
+        self.declare_parameter(
+            'final_lidar_normal_max_age',
+            0.75
+        )
+
         # Angulo del FRENTE del robot medido EN EL FRAME DEL LASER.
         #
         # No es 0. El YDLidar va montado girado 180 grados
@@ -2095,6 +2108,8 @@ class ArucoLidarApproachServer(Node):
         final_distance = -1.0
         center_error = 0.0
         final_heading_since_ns = None
+        last_lidar_outward_normal = None
+        last_lidar_normal_ns = None
 
         period = 1.0 / max(
             1.0,
@@ -2274,6 +2289,8 @@ class ArucoLidarApproachServer(Node):
                                     stamp_ns=now_ns,
                                     alpha_scale=2.0,
                                 )
+                                last_lidar_outward_normal = (lnx, lny)
+                                last_lidar_normal_ns = now_ns
 
             # =====================================================
             # SEARCHING: sin estimacion no hay a donde ir
@@ -2517,6 +2534,32 @@ class ArucoLidarApproachServer(Node):
                 if safety_front is not None else None
             )
 
+            final_lidar_heading = None
+            if (
+                last_lidar_outward_normal is not None and
+                last_lidar_normal_ns is not None and
+                (now_ns - last_lidar_normal_ns) / 1e9 <=
+                self.pf('final_lidar_normal_max_age')
+            ):
+                lnx, lny = last_lidar_outward_normal
+                final_lidar_heading = math.atan2(-lny, -lnx)
+
+            final_alignment_active = (
+                safety_clearance is not None and
+                safety_clearance <= self.pf('final_alignment_distance')
+            )
+
+            if final_alignment_active and final_lidar_heading is not None:
+                # En el tramo final no usamos el rumbo filtrado de la
+                # camara: la normal LiDAR es la referencia horizontal del
+                # plano y permite girar perpendicularmente aunque la
+                # camara tenga offset angular.
+                target_yaw = final_lidar_heading
+                if abs(normalize_angle(target_yaw - ryaw)) > self.pf(
+                    'final_heading_tolerance'
+                ):
+                    yaw_settled = False
+
             limits = {
                 'max_linear': self.pf('max_linear_speed'),
                 'max_lateral': self.pf('max_lateral_speed'),
@@ -2694,7 +2737,8 @@ class ArucoLidarApproachServer(Node):
                 # La perpendicularidad la juzga la normal LiDAR. El centro
                 # de imagen es diagnostico: la camara tiene un offset
                 # angular propio y no debe invalidar una pose geometrica.
-                (camera_centered or blind)
+                (final_lidar_heading is not None or
+                 (blind and detection is None))
             ):
                 reached = True
 
