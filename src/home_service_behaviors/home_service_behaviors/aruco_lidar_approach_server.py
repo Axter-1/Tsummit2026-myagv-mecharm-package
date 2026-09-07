@@ -600,7 +600,13 @@ class ArucoLidarApproachServer(Node):
             # 0.05 = final * tan(heading_tolerance), o sea el desvio
             # mas ancho que la tolerancia de rumbo puede absorber sin
             # pedir un giro. check_tolerances lo comprueba al arrancar.
-            0.05
+            #
+            # 0.04 y no 0.05 porque el limite depende de
+            # lidar_to_front_bumper_m: con el 0.081 medido con cinta el
+            # punto final queda mas cerca del marcador, el mismo desvio
+            # lateral abarca mas angulo, y el pasillo tiene que
+            # estrecharse con el. Lo canta el arranque.
+            0.04
         )
 
         # Frenada del perfil trapezoidal: v = sqrt(2*a*d).
