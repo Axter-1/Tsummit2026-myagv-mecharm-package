@@ -224,6 +224,21 @@ arm() {
     sleep 3
 }
 
+calibrate_grasp() {
+    confirm_motion
+    ensure_container
+    local object_name="${1:?uso: calibrate-grasp <engranaje|poste|rueda>}"
+    case "${object_name}" in
+        engranaje|poste|rueda) ;;
+        *) die "pieza desconocida: '${object_name}' (usa engranaje|poste|rueda)" ;;
+    esac
+    if is_running '[m]echarm_driver_node'; then
+        die "deten el driver primero: ./scripts/tsummit.sh stop. La calibracion abre /dev/ttyACM0 directamente."
+    fi
+    say "Calibracion manual de ${object_name}"
+    in_container "python3 /workspace/scripts/calibrate_grasp.py '${object_name}'"
+}
+
 perception() {
     ensure_container
     local guard='[a]ruco_detector_node'
@@ -550,6 +565,7 @@ case "${1:-help}" in
     save-map)     shift; save_map "$@" ;;
 
     arm|brazo)    arm ;;
+    calibrate-grasp|calibrar-agarre) shift; calibrate_grasp "$@" ;;
     perception|vision) perception ;;
 
     approach-check|aprox-check) approach_check ;;
@@ -603,6 +619,8 @@ T-SUMMIT Challenge — consola unica
 
   SUBSISTEMAS
     arm                     driver del MechArm 270
+    calibrate-grasp <pieza>  ensena intermedio, preagarre y contacto; los guarda
+                             y termina en home (exige ALLOW_MOTION=1 y driver parado)
     perception              camara CSI + detector ArUco
     rviz / teleop           visualizacion y mando
     viz [rviz|foxglove|none]  abre la visualizacion elegida (o ninguna)

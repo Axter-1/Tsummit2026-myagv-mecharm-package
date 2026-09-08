@@ -96,9 +96,23 @@ class GraspSpec:
         self.target_coords = None
         raw_target = raw.get("target_coords")
         self.target_joint_angles = None
-        raw_target_joints = raw.get("target_joint_angles")
+        # Las calibraciones guardan los tres tramos con nombre. El driver
+        # acepta el contacto como destino y una lista ordenada de waypoints.
+        raw_target_joints = raw.get(
+            "contact_joint_angles", raw.get("target_joint_angles")
+        )
         self.approach_joint_waypoints = []
-        raw_joint_waypoints = raw.get("approach_joint_waypoints")
+        if any(
+            name in raw for name in (
+                "intermediate_joint_angles", "pregrasp_joint_angles"
+            )
+        ):
+            raw_joint_waypoints = [
+                raw.get("intermediate_joint_angles"),
+                raw.get("pregrasp_joint_angles"),
+            ]
+        else:
+            raw_joint_waypoints = raw.get("approach_joint_waypoints")
         self.pregrasp_coords = None
         raw_pregrasp = raw.get("pregrasp_coords")
 
@@ -235,6 +249,7 @@ class ObjectGraspServer(Node):
         self.cb = ReentrantCallbackGroup()
 
         self.declare_parameter("catalog_file", "")
+        self.declare_parameter("calibration_file", "")
         self.declare_parameter("detections_topic", "/aruco/detections")
         self.declare_parameter("approach_action", "/aruco_lidar_approach")
         self.declare_parameter("pick_place_action", "/mecharm/pick_place")
@@ -385,6 +400,50 @@ class ObjectGraspServer(Node):
             data = yaml.safe_load(handle) or {}
 
         cat = data.get("grasp_catalog", {})
+        calibration_path = str(
+            self.get_parameter("calibration_file").value
+        ).strip()
+        if not calibration_path:
+            try:
+                calibration_path = os.path.join(
+                    get_package_share_directory("home_service_behaviors"),
+                    "config",
+                    "grasp_calibrations.yaml",
+                )
+            except Exception:  # noqa: BLE001
+                calibration_path = ""
+
+        calibrations = {}
+        if calibration_path and os.path.isfile(calibration_path):
+            try:
+                with open(calibration_path, "r", encoding="utf-8") as handle:
+                    calibration_data = yaml.safe_load(handle) or {}
+                calibrations = calibration_data.get("calibrations", {}) or {}
+                if not isinstance(calibrations, dict):
+                    raise ValueError("'calibrations' debe ser un mapa")
+                self.get_logger().info(
+                    f"Calibraciones cargadas de {calibration_path}: "
+                    f"{sorted(calibrations)}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(
+                    f"No se pudieron cargar calibraciones "
+                    f"'{calibration_path}': {exc}"
+                )
+
+        objects = cat.get("objects", {}) or {}
+        for key, calibration in calibrations.items():
+            if key not in objects:
+                self.get_logger().warn(
+                    f"Calibracion para pieza desconocida '{key}': ignorada."
+                )
+            elif not isinstance(calibration, dict):
+                self.get_logger().warn(
+                    f"Calibracion de '{key}' no es un mapa: ignorada."
+                )
+            else:
+                objects[key] = {**objects[key], **calibration}
+        cat["objects"] = objects
         gripper = cat.get("gripper", {})
         self.table_z_mm = float(cat.get("table_z_mm", 0.0))
         self.max_reach_mm = float(cat.get("max_reach_mm", 250.0))

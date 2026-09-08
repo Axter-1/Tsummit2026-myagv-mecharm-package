@@ -93,7 +93,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'corridor_radius',
-            default_value='0.04',
+            default_value='0.035',
             description='Semiancho del pasillo. Dentro de el se va '
                         'recto al objetivo sin rodear por el encare. '
                         'Tiene que caber en heading_tolerance o el '

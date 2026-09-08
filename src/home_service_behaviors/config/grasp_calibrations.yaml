@@ -1,0 +1,3 @@
+# Poses articulares ensenadas en pista por scripts/calibrate_grasp.py.
+# Se aplican sobre grasp_catalog.yaml sin modificar su documentación.
+calibrations: {}
