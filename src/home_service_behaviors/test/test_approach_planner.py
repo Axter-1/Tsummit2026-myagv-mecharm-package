@@ -31,6 +31,7 @@ from home_service_behaviors.approach_planner import (
     stopping_distance,
     tolerance_is_reachable,
     plane_returns,
+    robust_nearest,
     brake_target,
 )
 
@@ -170,6 +171,16 @@ def test_frenado_no_corta_el_avance_por_la_tolerancia_visual():
     )
 
     assert v >= 0.07
+
+
+def test_distancia_final_usa_grupo_cercano_y_no_un_haz_aislado():
+    """Un haz aislado no debe cambiar la distancia al corregir lateral."""
+    distancia = robust_nearest(
+        [0.214, 0.216, 0.217, 0.218, 0.258, 0.261],
+        cluster_band=0.010,
+    )
+
+    assert abs(distancia - 0.2165) < 1e-9
 
 
 # ---------------------------------------------------------------------

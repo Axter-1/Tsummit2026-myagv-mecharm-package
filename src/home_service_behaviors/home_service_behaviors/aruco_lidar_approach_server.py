@@ -419,6 +419,22 @@ class ArucoLidarApproachServer(Node):
             0.0
         )
 
+        # Banda del grupo de ecos cercanos que representa la misma cara.
+        # El minimo puro cambia de haz al corregir lateralmente y mueve la
+        # distancia final varios centimetros aunque el robot no avance.
+        self.declare_parameter(
+            'lidar_nearest_cluster_band',
+            0.04
+        )
+
+        # Un haz aislado mas cercano limita la seguridad, pero no debe
+        # cambiar la frenada nominal salvo que este separado del grupo de
+        # la cara por mas que esta banda.
+        self.declare_parameter(
+            'lidar_safety_obstacle_margin',
+            0.04
+        )
+
         # Por debajo de esta distancia se deja de exigir ver el
         # marcador. No es una concesion: a 0.29 m un ArUco de 8 cm ya no
         # cabe en el encuadre, medido en pista. Exigir vision hasta el
@@ -1598,7 +1614,12 @@ class ArucoLidarApproachServer(Node):
             laser_x
         )
 
-    def get_front_lidar_range(self, expected=None, nearest=False):
+    def get_front_lidar_range(
+        self,
+        expected=None,
+        nearest=False,
+        robust_nearest_mode=False,
+    ):
 
         now_ns = (
             self.get_clock()
@@ -1713,6 +1734,12 @@ class ArucoLidarApproachServer(Node):
             # eco mas cercano sigue siendo un limite valido para no avanzar
             # contra un obstaculo o el plano del marcador.
             return float(min(gated))
+
+        if robust_nearest_mode:
+            return planner.robust_nearest(
+                gated,
+                self.pf('lidar_nearest_cluster_band'),
+            )
 
         return float(np.median(gated))
 
@@ -2705,7 +2732,11 @@ class ArucoLidarApproachServer(Node):
             control_distance = final_distance
             if (
                 safety_clearance is not None and
-                (control_distance <= 0.0 or safety_clearance < control_distance)
+                (
+                    control_distance <= 0.0 or
+                    safety_clearance < control_distance -
+                    self.pf('lidar_safety_obstacle_margin')
+                )
             ):
                 control_distance = safety_clearance
 
@@ -2815,9 +2846,15 @@ class ArucoLidarApproachServer(Node):
             endgame = along < self.pf('lidar_nearest_below')
 
             front_median = self.get_front_lidar_range(expected_plane)
+            front_robust_nearest = (
+                self.get_front_lidar_range(
+                    expected_plane,
+                    robust_nearest_mode=True,
+                )
+            )
             front = None
-            if endgame and safety_front is not None:
-                front = safety_front
+            if endgame and front_robust_nearest is not None:
+                front = front_robust_nearest
             elif front_median is not None:
                 front = front_median
             elif safety_front is not None:

@@ -43,6 +43,7 @@ conversion; usala siempre en la frontera en vez de repartir signos.
 """
 
 import math
+import statistics
 
 
 # ---------------------------------------------------------------------
@@ -445,6 +446,23 @@ def plane_returns(values, expected, band):
         return list(values)
     limite = expected + band
     return [v for v in values if v <= limite]
+
+
+def robust_nearest(values, cluster_band):
+    """Distancia estable del grupo de ecos mas cercano.
+
+    El minimo de un sector cambia de haz cuando el robot se desplaza de
+    lado y puede enganchar alternativamente el borde del marcador. Se
+    conserva como proteccion el minimo, pero para medir la llegada se usa
+    la mediana de los ecos que pertenecen a ese mismo grupo cercano.
+    """
+    if not values:
+        return None
+
+    nearest = min(values)
+    cluster = [v for v in values if v <= nearest + cluster_band]
+
+    return float(statistics.median(cluster))
 
 
 def stopping_distance(speed, latency, period):
