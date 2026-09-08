@@ -351,6 +351,14 @@ class ArucoLidarApproachServer(Node):
             0.045
         )
 
+        # Sesgo empirico de frenada final. Compensa el avance que queda por
+        # latencia y velocidad minima sin alterar la distancia fisica
+        # reportada ni la calibracion lidar->bumper.
+        self.declare_parameter(
+            'final_braking_bias',
+            0.034
+        )
+
         # =========================================================
         # LiDAR geometry
         # =========================================================
