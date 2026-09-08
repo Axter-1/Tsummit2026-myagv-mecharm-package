@@ -754,15 +754,15 @@ class ArucoLidarApproachServer(Node):
         # largo, y al ciclo siguiente hay que corregir al otro lado.
         # Cuanto se deja alejar el marcador del centro del encuadre
         # antes de gastar un ciclo en girar. En unidades de
-        # center_x_normalized, que va de -1 a +1: 0.55 deja mas de la
-        # mitad del semiancho de margen y aun asi avisa mucho antes de
-        # que el marcador salga.
+        # center_x_normalized, que va de -1 a +1. La aproximacion debe
+        # salir ya alineada con el ArUco; un margen grande deja avanzar
+        # oblicuo y obliga al LiDAR a corregir demasiado tarde.
         #
         # Subirlo = menos giros y aproximacion mas rapida, pero mas
         # riesgo de perder el marcador. Bajarlo = lo contrario.
         self.declare_parameter(
             'center_keep_margin',
-            0.55
+            0.12
         )
 
         # Distancia por debajo de la cual el rumbo vuelve a mandar, para
@@ -2698,29 +2698,21 @@ class ArucoLidarApproachServer(Node):
             # aproximacion iba a 5.4 mm/s teniendo un suelo de avance de
             # 70: el cuello de botella era este, no el camino.
             #
-            # Asi que el criterio para girar deja de ser el error de
-            # rumbo ESTIMADO y pasa a ser lo unico que de verdad
-            # obliga: que el marcador se salga del encuadre. Se mide
-            # directamente en la imagen (center_x_normalized), que no
-            # depende de la normal ni de la pose del ArUco, asi que es
-            # inmune a los saltos de las dos.
-            #
-            # Cerca del objetivo se devuelve el mando al rumbo, para que
-            # la llegada quede perpendicular: ahi ya casi no queda
-            # traslacion que perder.
+            # La primera fase exige dos cosas de la camara: el ArUco
+            # centrado y el robot mirando hacia el marcador. Asi la base
+            # no empieza a avanzar oblicua y el LiDAR no tiene que reparar
+            # una mala orientacion desde el ultimo tramo.
             if (
                 detection is not None and
                 remaining > self.pf('yaw_free_until')
             ):
 
-                if abs(center_error) < self.pf('center_keep_margin'):
-                    # el marcador esta comodo en el encuadre: no gires,
-                    # corrige de lado
-                    yaw_settled = True
-
-                else:
-                    # se va por el borde: este ciclo es de giro puro
-                    yaw_settled = False
+                camera_yaw_error = normalize_angle(target_yaw - ryaw)
+                camera_aligned = (
+                    abs(center_error) <= self.pf('center_keep_margin') and
+                    abs(camera_yaw_error) <= yaw_tolerance
+                )
+                yaw_settled = camera_aligned
 
             # -------------------------------------------------
             # FRENAR CON LA REGLA MAS PESIMISTA
