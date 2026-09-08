@@ -34,6 +34,10 @@ float64[] target_joint_angles
 # Se recorren en orden antes de DESCEND y en orden inverso durante LIFT.
 float64[] approach_joint_waypoints
 
+# Waypoints cartesianos ensenados, aplanados en grupos de seis valores.
+# Se recorren en orden antes de DESCEND y en orden inverso durante LIFT.
+float64[] approach_coords_waypoints
+
 # Pose articular inicial opcional antes de abrir la pinza y aproximarse.
 # Para el poste se usa "home" para no iniciar desde una rama anterior.
 string initial_pose_name
@@ -50,6 +54,15 @@ int32 gripper_closed_value 0
 # 0..100. <= 0 -> velocidades por defecto del nodo.
 float64 speed_percent 0.0
 float64 gripper_speed_percent 0.0
+
+# Fuerza/par de la pinza adaptativa. 0 = usar el ajuste del driver.
+int32 gripper_torque 0
+
+# true = fuerza controlada; false = posicion/apertura solamente.
+bool gripper_force_control false
+
+# Corriente de proteccion del gripper, 1..500. 0 = ajuste del firmware.
+int32 gripper_protect_current 0
 
 # Pose de retirada opcional al terminar ("" = no ir a ninguna).
 string retreat_pose_name

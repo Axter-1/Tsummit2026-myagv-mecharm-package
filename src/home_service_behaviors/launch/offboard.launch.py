@@ -85,6 +85,8 @@ def generate_launch_description():
         # debajo de esto el mando se publica y las ruedas no giran.
         DeclareLaunchArgument('min_lateral_speed', default_value='0.035'),
         DeclareLaunchArgument('min_linear_speed', default_value='0.05'),
+        DeclareLaunchArgument('max_linear_speed', default_value='0.09'),
+        DeclareLaunchArgument('use_lidar_normal', default_value='false'),
         # Aproximacion con punto de encare y carrot. Ver
         # home_service_behaviors/approach_planner.py.
         DeclareLaunchArgument(
@@ -213,6 +215,14 @@ def generate_launch_description():
             'min_linear_speed': ParameterValue(
                 LaunchConfiguration('min_linear_speed'),
                 value_type=float,
+            ),
+            'max_linear_speed': ParameterValue(
+                LaunchConfiguration('max_linear_speed'),
+                value_type=float,
+            ),
+            'use_lidar_normal': ParameterValue(
+                LaunchConfiguration('use_lidar_normal'),
+                value_type=bool,
             ),
             'staging_standoff': ParameterValue(
                 LaunchConfiguration('staging_standoff'),

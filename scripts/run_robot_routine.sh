@@ -416,7 +416,10 @@ aruco() {
         # La camara deja de publicar la imagen cruda: por WiFi solo va
         # el JPEG, y publicar ambas seria gastar CPU para nada.
         extra="start_aruco_detector:=false start_aruco_approach:=false \
-               camera_publish_raw:=false camera_publish_compressed:=true"
+               camera_publish_raw:=false camera_publish_compressed:=true \
+               camera_framerate:=${CAMERA_FRAMERATE:-15} \
+               camera_exposure_time_us:=${CAMERA_EXPOSURE_TIME_US:-0} \
+               camera_gain:=${CAMERA_GAIN:-0.0}"
         printf 'MODO DISTRIBUIDO: detector y aproximacion NO se lanzan aqui.\n'
         printf '  Arrancalos en el portatil con:\n'
         printf '    ROBOT_IP=%s LAPTOP_IP=%s ./scripts/tsummit_offboard.sh run\n' \

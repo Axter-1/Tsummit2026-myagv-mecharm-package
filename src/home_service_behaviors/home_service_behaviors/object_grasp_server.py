@@ -92,9 +92,12 @@ class GraspSpec:
         self.require_calibrated_target = bool(
             raw.get("require_calibrated_target", False)
         )
+        self.execution_mode = str(raw.get("execution_mode", "coords")).strip().lower()
 
         self.target_coords = None
-        raw_target = raw.get("target_coords")
+        raw_target = raw.get(
+            "contact_coords", raw.get("target_coords")
+        )
         self.target_joint_angles = None
         # Las calibraciones guardan los tres tramos con nombre. El driver
         # acepta el contacto como destino y una lista ordenada de waypoints.
@@ -113,6 +116,18 @@ class GraspSpec:
             ]
         else:
             raw_joint_waypoints = raw.get("approach_joint_waypoints")
+        self.approach_coords_waypoints = []
+        if any(
+            name in raw for name in (
+                "intermediate_coords", "pregrasp_coords"
+            )
+        ):
+            raw_coords_waypoints = [
+                raw.get("intermediate_coords"),
+                raw.get("pregrasp_coords"),
+            ]
+        else:
+            raw_coords_waypoints = raw.get("approach_coords_waypoints")
         self.pregrasp_coords = None
         raw_pregrasp = raw.get("pregrasp_coords")
 
@@ -131,10 +146,21 @@ class GraspSpec:
         self.stroke_mm = stroke
         self.min_close_mm = float(gripper_cfg.get("min_close_mm", 2.0))
         self.gripper_speed = float(gripper_cfg.get("speed_percent", 40.0))
+        self.gripper_torque = int(raw.get(
+            "gripper_torque", gripper_cfg.get("torque", 0)
+        ))
+        self.gripper_force_control = bool(raw.get(
+            "gripper_force_control", gripper_cfg.get("force_control", False)
+        ))
+        self.gripper_protect_current = int(raw.get(
+            "gripper_protect_current", gripper_cfg.get("protect_current", 0)
+        ))
 
         # Comprobaciones que atrapan una edicion mala del YAML antes de
         # que el brazo intente algo imposible.
         problems = []
+        if self.execution_mode not in ("coords", "joints"):
+            problems.append("execution_mode debe ser 'coords' o 'joints'")
         if raw_target is not None:
             if not isinstance(raw_target, (list, tuple)) or len(raw_target) != 6:
                 problems.append("target_coords debe tener 6 valores [X,Y,Z,RX,RY,RZ]")
@@ -151,6 +177,31 @@ class GraspSpec:
                     self.pregrasp_coords = [float(value) for value in raw_pregrasp]
                 except (TypeError, ValueError):
                     problems.append("pregrasp_coords contiene un valor no numerico")
+        if raw_coords_waypoints is not None:
+            if (
+                not isinstance(raw_coords_waypoints, (list, tuple))
+                or not raw_coords_waypoints
+            ):
+                problems.append(
+                    "approach_coords_waypoints debe tener al menos un waypoint"
+                )
+            else:
+                for index, waypoint in enumerate(raw_coords_waypoints):
+                    if waypoint is None:
+                        continue
+                    if not isinstance(waypoint, (list, tuple)) or len(waypoint) != 6:
+                        problems.append(
+                            f"approach_coords_waypoints[{index}] debe tener 6 valores"
+                        )
+                        continue
+                    try:
+                        self.approach_coords_waypoints.append(
+                            [float(value) for value in waypoint]
+                        )
+                    except (TypeError, ValueError):
+                        problems.append(
+                            f"approach_coords_waypoints[{index}] contiene un valor no numerico"
+                        )
         if raw_target_joints is not None:
             if not isinstance(raw_target_joints, (list, tuple)) or len(raw_target_joints) != 6:
                 problems.append("target_joint_angles debe tener 6 valores [J1..J6]")
@@ -179,16 +230,8 @@ class GraspSpec:
                         )
         if self.require_calibrated_target and self.target_coords is None:
             problems.append("requiere target_coords ensenadas antes de usar el brazo")
-        if (
-            self.require_calibrated_target and
-            self.pregrasp_coords is None and
-            self.target_joint_angles is None
-        ):
+        if self.require_calibrated_target and self.pregrasp_coords is None:
             problems.append("requiere pregrasp_coords ensenadas antes de usar el brazo")
-        if self.require_calibrated_target and self.target_joint_angles is None:
-            problems.append("requiere target_joint_angles ensenados antes de usar el brazo")
-        if self.require_calibrated_target and not self.approach_joint_waypoints:
-            problems.append("requiere approach_joint_waypoints ensenados antes de usar el brazo")
         if self.span_mm > stroke:
             problems.append(
                 f"span_mm={self.span_mm:.1f} supera el recorrido de la "
@@ -396,7 +439,10 @@ class ObjectGraspServer(Node):
         "target_joint_angles",
         "approach_joint_waypoints",
         "target_coords",
+        "contact_coords",
         "pregrasp_coords",
+        "intermediate_coords",
+        "approach_coords_waypoints",
     )
 
     def _resolve_calibration_height(self, key, calibration):
@@ -618,7 +664,10 @@ class ObjectGraspServer(Node):
         MIDE donde ha parado de verdad y ese numero no se puede tirar.
         Ver _execute, donde sustituye a la distancia nominal.
         """
-        if not client.wait_for_server(timeout_sec=5.0):
+        # En el arranque distribuido CycloneDDS puede descubrir la accion
+        # del brazo despues de que el orquestador ya este listo. Cinco
+        # segundos producen falsos "no disponible" aunque el driver vive.
+        if not client.wait_for_server(timeout_sec=min(timeout_sec, 15.0)):
             return False, f"{name} no disponible", None
 
         send_future = client.send_goal_async(goal)
@@ -809,7 +858,30 @@ class ObjectGraspServer(Node):
         self._feedback(goal_handle, "DESCEND")
         pick = PickPlace.Goal()
         pick.operation = "pick"
-        if spec.target_joint_angles is not None:
+        # Las poses cartesianas enseñadas tienen prioridad sobre los angulos:
+        # el firmware puede elegir una rama IK valida sin forzar J2 fuera de
+        # sus limites. Los angulos quedan como respaldo para calibraciones
+        # antiguas que aun no tengan coordenadas.
+        if spec.execution_mode == "joints" and spec.target_joint_angles is not None:
+            pick.target_joint_angles = spec.target_joint_angles
+            pick.approach_joint_waypoints = [
+                value
+                for waypoint in spec.approach_joint_waypoints
+                for value in waypoint
+            ]
+        elif spec.target_coords is not None:
+            pregrasp = self._pregrasp_coords(spec)
+            pick.target_coords = coords
+            coord_waypoints = self._approach_coords_waypoints(spec)
+            if coord_waypoints:
+                pick.approach_coords_waypoints = [
+                    value
+                    for waypoint in coord_waypoints
+                    for value in waypoint
+                ]
+            elif pregrasp is not None:
+                pick.approach_coords_waypoints = pregrasp
+        elif spec.target_joint_angles is not None:
             pick.target_joint_angles = spec.target_joint_angles
             pick.approach_joint_waypoints = [
                 value
@@ -836,6 +908,9 @@ class ObjectGraspServer(Node):
             req.gripper_speed_percent if req.gripper_speed_percent > 0.0
             else spec.gripper_speed
         )
+        pick.gripper_torque = spec.gripper_torque
+        pick.gripper_force_control = spec.gripper_force_control
+        pick.gripper_protect_current = spec.gripper_protect_current
         pick.speed_percent = req.speed_percent
         pick.retreat_pose_name = (
             req.retreat_pose_name or spec.carry_pose
@@ -923,6 +998,17 @@ class ObjectGraspServer(Node):
             return None
 
         coords = list(spec.pregrasp_coords)
+        self._correct_taught_x(spec, coords)
+        return coords
+
+    def _approach_coords_waypoints(self, spec):
+        """Waypoints cartesianos enseñados, corregidos por la parada real."""
+        waypoints = [list(coords) for coords in spec.approach_coords_waypoints]
+        for coords in waypoints:
+            self._correct_taught_x(spec, coords)
+        return waypoints
+
+    def _correct_taught_x(self, spec, coords):
         if (
             spec.target_coords_stop_m is not None and
             self.measured_stop_distance is not None
@@ -932,10 +1018,9 @@ class ObjectGraspServer(Node):
             ) * 1000.0
             coords[0] += corr
             self.get_logger().info(
-                f"Preagarre ensenado a {spec.target_coords_stop_m:.3f} m, "
+                f"Waypoint ensenado a {spec.target_coords_stop_m:.3f} m, "
                 f"X corregida {corr:+.1f} mm -> {coords[0]:.1f}"
             )
-        return coords
 
 
 def threading_wait(seconds):

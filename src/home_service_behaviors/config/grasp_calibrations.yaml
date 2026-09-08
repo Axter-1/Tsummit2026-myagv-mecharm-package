@@ -1,23 +1,78 @@
-# Poses articulares ensenadas en pista por scripts/calibrate_grasp.py.
-# Se aplican sobre grasp_catalog.yaml sin modificar su documentacion.
-#
-# FORMATO: anidado por objeto y por altura de plataforma (mm). El
-# object_grasp_server elige la altura con el parametro 'table_height_mm'.
-#
-#   calibrations:
-#     poste:
-#       "100":
-#         intermediate_joint_angles: [J1..J6]
-#         pregrasp_joint_angles:     [J1..J6]
-#         contact_joint_angles:      [J1..J6]
-#         table_height_mm: 100
-#         initial_pose_name: home
-#         carry_pose: home
-#         calibrated_at: "..."
-#       "200":
-#         ...
-#
-# Se admite tambien el formato plano antiguo (los *_joint_angles
-# directamente bajo el objeto, sin nivel de altura); el script lo migra
-# a la forma anidada la proxima vez que se calibre esa pieza.
-calibrations: {}
+calibrations:
+  poste:
+    '100':
+      intermediate_joint_angles:
+      - -0.61
+      - 75.93
+      - -78.83
+      - 0.79
+      - 65.65
+      - -9.31
+      pregrasp_joint_angles:
+      - 2.19
+      - 92.81
+      - -84.72
+      - -4.57
+      - 65.21
+      - -6.59
+      contact_joint_angles:
+      - 2.46
+      - 112.85
+      - -84.9
+      - -2.54
+      - 52.91
+      - -3.16
+      table_height_mm: 100
+      initial_pose_name: home
+      carry_pose: home
+      calibrated_at: '2026-09-08T06:18:07+00:00'
+  rueda:
+    '100':
+      intermediate_coords:
+      - 268.7
+      - 19.7
+      - 172.1
+      - -73.39
+      - 86.61
+      - -69.28
+      pregrasp_coords:
+      - 228.8
+      - 20.4
+      - 134.3
+      - -177.01
+      - 27.51
+      - -171.87
+      contact_coords:
+      - 214.8
+      - 23.2
+      - 36.2
+      - -179.96
+      - 14.06
+      - -172.42
+      intermediate_joint_angles:
+      - 4.21
+      - 79.8
+      - -84.99
+      - -1.58
+      - 2.98
+      - -2.1
+      pregrasp_joint_angles:
+      - 5.62
+      - 72.33
+      - -80.77
+      - -1.93
+      - 70.83
+      - -1.58
+      contact_joint_angles:
+      - 6.06
+      - 111.79
+      - -106.69
+      - 0.35
+      - 70.83
+      - -1.58
+      execution_mode: joints
+      target_coords_stop_m: 0.09
+      table_height_mm: 100
+      initial_pose_name: home
+      carry_pose: home
+      calibrated_at: '2026-09-08T10:24:26-06:00'

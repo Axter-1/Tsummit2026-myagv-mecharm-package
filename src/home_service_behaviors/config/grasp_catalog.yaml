@@ -50,6 +50,11 @@ grasp_catalog:
     # Por debajo de esto la pinza no cierra de forma repetible.
     min_close_mm: 2.0
     speed_percent: 40.0
+    # Fuerza moderada para retener la pieza sin cambiar la apertura
+    # calibrada por objeto. El driver valida estos limites.
+    torque: 500
+    force_control: true
+    protect_current: 500
 
   # -------------------------------------------------------------------
   # Altura del plano de apoyo de las piezas medida en el frame del

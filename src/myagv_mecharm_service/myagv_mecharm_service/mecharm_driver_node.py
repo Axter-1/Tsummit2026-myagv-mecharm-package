@@ -15,6 +15,7 @@ El acceso al puerto serie de pymycobot NO es seguro entre hilos: todas
 las llamadas se serializan con un cerrojo.
 """
 
+import inspect
 import math
 import os
 import threading
@@ -65,15 +66,31 @@ class MechArmDriver(Node):
 
         self.declare_parameter("gripper_open_value", 100)
         self.declare_parameter("gripper_closed_value", 20)
+        # 0 deja el ajuste actual del firmware. 150..980 activa el torque
+        # solicitado para la pinza adaptativa.
+        self.declare_parameter("gripper_torque", 0)
+        self.declare_parameter("gripper_force_control", False)
+        self.declare_parameter("gripper_protect_current", 0)
         # pymycobot exige el tipo en algunas versiones aunque la API lo
         # documente como opcional. 1 = pinza adaptativa del MechArm.
         self.declare_parameter("gripper_type", 1)
+        self.gripper_torque = int(self.get_parameter("gripper_torque").value)
+        self.gripper_force_control = bool(
+            self.get_parameter("gripper_force_control").value
+        )
+        self.gripper_protect_current = int(
+            self.get_parameter("gripper_protect_current").value
+        )
+        self._active_gripper_torque = None
+        self._active_gripper_force_control = None
+        self._active_gripper_protect_current = None
 
         self.declare_parameter("move_timeout_sec", 20.0)
         self.declare_parameter("gripper_timeout_sec", 5.0)
         self.declare_parameter("settle_time_sec", 0.4)
         # Tiempo extra tras cerrar/abrir la pinza para que asiente.
         self.declare_parameter("gripper_settle_sec", 0.6)
+        self.declare_parameter("gripper_regrip_sec", 1.0)
 
         # --- Criterio de llegada (convergencia de posicion) ---
         # La repetibilidad del MechArm 270 es +-0.5 mm, pero la lectura
@@ -92,6 +109,9 @@ class MechArmDriver(Node):
         # Las poses articulares ensenadas pueden asentarse lentamente bajo
         # carga; mantienen el timeout total y solo amplian esta ventana.
         self.declare_parameter("taught_stall_timeout_sec", 12.0)
+        # 0 = mandar cada pose ensenada directamente. Valores positivos
+        # fragmentan el salto, solo para diagnostico de rutas dificiles.
+        self.declare_parameter("taught_max_joint_step_deg", 0.0)
 
         self.declare_parameter(
             "joint_limits_min",
@@ -111,13 +131,17 @@ class MechArmDriver(Node):
         self.declare_parameter("fresh_mode", 1)
         self.declare_parameter("vision_mode", 1)
 
-        # send_coords deja la eleccion de rama de la IK al firmware, que
-        # en esta unidad salta de rama o no encuentra solucion (se probo
-        # 6 veces). Con coords_via_ik=True el driver resuelve la IK con
-        # solve_inv_kinematics SEMBRANDO con los angulos actuales, valida
-        # contra los limites y manda send_angles (el unico camino que ha
-        # funcionado siempre). Las coordenadas siguen siendo la interfaz.
-        self.declare_parameter("coords_via_ik", True)
+        # False mantiene las coordenadas como coordenadas hasta el firmware:
+        # es la via necesaria para poses ensenadas cuya rama articular
+        # equivalente excede un limite. True queda disponible como respaldo
+        # diagnostico y resuelve la IK localmente antes de mandar angulos.
+        self.declare_parameter("coords_via_ik", False)
+        # Compensa un sesgo medido entre send_coords y get_coords. Se suma
+        # al comando, pero la llegada se valida contra la pose ensenada.
+        self.declare_parameter("coords_command_z_offset_mm", 0.0)
+        # Un segundo send_coords corrige la histéresis del firmware sin
+        # relajar la tolerancia de llegada del contacto.
+        self.declare_parameter("coords_retry_error_mm", 0.0)
         # Margen (mm) con el que la comprobacion FK de la IK da por buena
         # la solucion: angles_to_coords(sol) debe caer a esta distancia
         # del objetivo pedido.
@@ -176,6 +200,9 @@ class MechArmDriver(Node):
         self.gripper_settle = float(
             self.get_parameter("gripper_settle_sec").value
         )
+        self.gripper_regrip = float(
+            self.get_parameter("gripper_regrip_sec").value
+        )
         self.angle_tolerance = float(
             self.get_parameter("angle_tolerance_deg").value
         )
@@ -194,6 +221,9 @@ class MechArmDriver(Node):
         self.taught_stall_timeout = float(
             self.get_parameter("taught_stall_timeout_sec").value
         )
+        self.taught_max_joint_step = float(
+            self.get_parameter("taught_max_joint_step_deg").value
+        )
 
         self.joint_min = [
             float(v) for v in self.get_parameter("joint_limits_min").value
@@ -207,6 +237,12 @@ class MechArmDriver(Node):
         self.coords_via_ik = bool(
             self.get_parameter("coords_via_ik").value
         )
+        self.coords_command_z_offset = float(
+            self.get_parameter("coords_command_z_offset_mm").value
+        )
+        self.coords_retry_error = float(
+            self.get_parameter("coords_retry_error_mm").value
+        )
         self.ik_fk_check_mm = float(
             self.get_parameter("ik_fk_check_mm").value
         )
@@ -215,6 +251,8 @@ class MechArmDriver(Node):
         self._firmware_limits = None
         # Motivo del ultimo fallo de IK, para el mensaje de INVALID_GOAL.
         self._last_ik_error = ""
+        # Ultima comparacion objetivo/lectura para diagnosticar timeouts.
+        self._last_motion_detail = ""
 
         self.verify_grasp = bool(self.get_parameter("verify_grasp").value)
 
@@ -412,6 +450,7 @@ class MechArmDriver(Node):
                 f"(fresh_mode={self.fresh_mode}, "
                 f"vision_mode={self.vision_mode})."
             )
+            self._log_gripper_status(mc)
             self._log_firmware_limits(mc)
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(
@@ -444,6 +483,20 @@ class MechArmDriver(Node):
             )
         if self.coords_via_ik:
             self._check_ik_convention(mc)
+
+    def _log_gripper_status(self, mc):
+        """Lee capacidades del gripper sin moverlo."""
+        values = []
+        for label, method_name in (
+            ("modo_torque", "is_torque_gripper"),
+            ("torque_actual", "get_HTS_gripper_torque"),
+            ("corriente_proteccion", "get_gripper_protect_current"),
+        ):
+            try:
+                values.append(f"{label}={getattr(mc, method_name)()}")
+            except Exception as exc:  # noqa: BLE001
+                values.append(f"{label}=no_disponible({exc})")
+        self.get_logger().info("Estado gripper: " + ", ".join(values))
 
     def _check_ik_convention(self, mc):
         """Comprueba SIN MOVER el brazo que solve_inv_kinematics usa el
@@ -516,7 +569,11 @@ class MechArmDriver(Node):
             raise RuntimeError(f"pymycobot no expone '{method_name}'")
 
         with self._serial_lock:
-            return method(*args, **kwargs)
+            try:
+                return method(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - errores de pyserial
+                self._drop_connection(str(exc))
+                raise RuntimeError(f"fallo serie en {method_name}: {exc}")
 
     def _read_angles(self, retries=10, delay=0.15):
         for _ in range(retries):
@@ -539,6 +596,15 @@ class MechArmDriver(Node):
                 return [float(c) for c in coords]
             time.sleep(delay)
         return None
+
+    def _joint_error(self, index, current, target):
+        """Diferencia articular, respetando articulaciones de vuelta completa."""
+        low = self.joint_min[index]
+        high = self.joint_max[index]
+        difference = float(current) - float(target)
+        if high - low >= 359.0:
+            return abs((difference + 180.0) % 360.0 - 180.0)
+        return abs(difference)
 
     def _wait_for_arrival(
         self, goal_handle, target, kind, timeout, stall_timeout=None
@@ -581,6 +647,8 @@ class MechArmDriver(Node):
         read_failures = 0
         last_error = None
         last_progress_time = time.monotonic()
+        self._last_motion_detail = ""
+        self._last_motion_error = None
 
         while time.monotonic() < deadline:
             if goal_handle is not None and goal_handle.is_cancel_requested:
@@ -601,9 +669,28 @@ class MechArmDriver(Node):
 
             read_failures = 0
 
-            error = max(
-                abs(current[i] - target[i]) for i in range(components)
+            if kind == "angles":
+                residual = [
+                    self._joint_error(i, current[i], target[i])
+                    for i in range(components)
+                ]
+                error = max(
+                    residual
+                )
+            else:
+                residual = [
+                    abs(current[i] - target[i]) for i in range(components)
+                ]
+                error = max(
+                    residual
+                )
+            self._last_motion_detail = (
+                f"{kind}: objetivo={[round(v, 2) for v in target[:components]]}, "
+                f"lectura={[round(v, 2) for v in current[:components]]}, "
+                f"residuo={[round(v, 2) for v in residual]}, "
+                f"error_max={error:.2f}"
             )
+            self._last_motion_error = error
 
             if error <= tolerance:
                 stable += 1
@@ -623,7 +710,8 @@ class MechArmDriver(Node):
                 self.get_logger().warn(
                     f"El brazo dejo de acercarse al objetivo "
                     f"(error {error:.2f}, tolerancia {tolerance:.2f}). "
-                    f"Posible obstruccion o pose inalcanzable."
+                    f"Posible obstruccion o pose inalcanzable. "
+                    f"{self._last_motion_detail}"
                 )
                 return "timeout"
 
@@ -695,17 +783,42 @@ class MechArmDriver(Node):
 
     def _move_angles(self, goal_handle, angles, speed):
         angles = self._clamp_joints(angles)
-        try:
-            self._arm("send_angles", angles, speed)
-        except Exception as exc:  # noqa: BLE001 - valida pymycobot tambien
-            self._drop_connection(str(exc))
-            return "fault"
-        outcome = self._wait_for_arrival(
-            goal_handle, angles, "angles", self.move_timeout
-        )
-        if outcome != "ok":
-            self._log_arm_errors("tras send_angles fallido")
-        return outcome
+        current = self._read_angles(retries=2, delay=0.05)
+        if current is not None:
+            waypoint = list(angles)
+            large_jumps = []
+            for index, (actual, target) in enumerate(zip(current, angles)):
+                if self._joint_error(index, actual, target) > 180.0:
+                    waypoint[index] = (actual + target) / 2.0
+                    large_jumps.append(index + 1)
+            if large_jumps:
+                home_pose = self.poses.get("home")
+                safe_pose = self.poses.get("safe_navigation")
+                is_home = (
+                    home_pose is not None
+                    and max(abs(a - b) for a, b in zip(angles, home_pose)) < 0.01
+                )
+                if is_home and safe_pose is not None:
+                    waypoint = list(safe_pose)
+                    route_name = "safe_navigation"
+                else:
+                    route_name = "waypoint intermedio"
+                self.get_logger().info(
+                    f"Ruta {route_name}: "
+                    f"saltos articulares >180 grados en J{large_jumps}."
+                )
+                try:
+                    self._arm("send_angles", waypoint, speed)
+                except Exception as exc:  # noqa: BLE001 - valida pymycobot tambien
+                    self._drop_connection(str(exc))
+                    return "fault"
+                outcome = self._wait_for_arrival(
+                    goal_handle, waypoint, "angles", self.move_timeout
+                )
+                if outcome != "ok":
+                    self._log_arm_errors("tras waypoint intermedio fallido")
+                    return outcome
+        return self._move_taught_angles(goal_handle, angles, speed)
 
     def _within_limits(self, angles):
         # Fuente preferente: lo leido del firmware. Si no, el parametro.
@@ -792,16 +905,49 @@ class MechArmDriver(Node):
             if angles is None:
                 return "unreachable"
             return self._move_angles(goal_handle, angles, speed)
+        command_coords = list(coords)
+        command_coords[2] += self.coords_command_z_offset
+        if self.coords_command_z_offset:
+            self.get_logger().info(
+                f"send_coords: compensacion Z "
+                f"{self.coords_command_z_offset:+.1f} mm "
+                f"({coords[2]:.1f} -> {command_coords[2]:.1f})"
+            )
         try:
-            self._arm("send_coords", coords, speed, int(mode))
+            self._arm("send_coords", command_coords, speed, int(mode))
         except RuntimeError as exc:
             self._drop_connection(str(exc))
             return "fault"
-        return self._wait_for_arrival(
+        outcome = self._wait_for_arrival(
             goal_handle, coords, "coords", self.move_timeout
         )
+        if (
+            outcome == "timeout"
+            and self._last_motion_error is not None
+            and 0.0 < self._last_motion_error <= self.coords_retry_error
+        ):
+            self.get_logger().warn(
+                f"send_coords quedo a {self._last_motion_error:.2f} mm; "
+                "se reintenta una vez sin relajar la tolerancia."
+            )
+            try:
+                self._arm("send_coords", command_coords, speed, int(mode))
+            except RuntimeError as exc:
+                self._drop_connection(str(exc))
+                return "fault"
+            outcome = self._wait_for_arrival(
+                goal_handle, coords, "coords", self.move_timeout
+            )
+        return outcome
 
-    def _set_gripper(self, value, speed):
+    def _set_gripper(
+        self,
+        value,
+        speed,
+        torque=None,
+        force_control=None,
+        protect_current=None,
+    ):
         """Mueve la pinza a una apertura 0..100 (0 cerrada, 100 abierta).
 
         Se usa set_gripper_value porque es inequivoco. Si esa via falla
@@ -810,9 +956,105 @@ class MechArmDriver(Node):
         """
         value = int(round(clamp(value, 0.0, 100.0)))
         speed = int(round(clamp(speed, 1.0, 100.0)))
+        if torque is None:
+            torque = (
+                self._active_gripper_torque
+                if self._active_gripper_torque is not None
+                else self.gripper_torque
+            )
+        if force_control is None:
+            force_control = (
+                self._active_gripper_force_control
+                if self._active_gripper_force_control is not None
+                else self.gripper_force_control
+            )
+        if protect_current is None:
+            protect_current = (
+                self._active_gripper_protect_current
+                if self._active_gripper_protect_current is not None
+                else self.gripper_protect_current
+            )
+        torque = int(round(float(torque or 0)))
+        if torque and not 150 <= torque <= 980:
+            self.get_logger().error(
+                "gripper_torque debe estar entre 150 y 980"
+            )
+            return "fault"
+        protect_current = int(round(float(protect_current or 0)))
+        if protect_current and not 1 <= protect_current <= 500:
+            self.get_logger().error(
+                "gripper_protect_current debe estar entre 1 y 500"
+            )
+            return "fault"
 
         try:
-            self._arm("set_gripper_value", value, speed, self.gripper_type)
+            gripper_value_method = getattr(self.mc, "set_gripper_value")
+            supports_force_arg = "is_torque" in inspect.signature(
+                gripper_value_method
+            ).parameters
+        except (AttributeError, TypeError, ValueError):
+            supports_force_arg = False
+
+        if (force_control or torque > 0) and not supports_force_arg:
+            self.get_logger().error(
+                "La version instalada de pymycobot no soporta control de "
+                "fuerza en MechArm270 (falta is_torque en set_gripper_value)."
+            )
+            return "unsupported_force"
+
+        if protect_current:
+            try:
+                self._arm("set_gripper_protect_current", protect_current)
+                applied_current = self._arm("get_gripper_protect_current")
+                self.get_logger().info(
+                    f"Corriente de proteccion solicitada={protect_current}, "
+                    f"lectura={applied_current}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(
+                    f"No se pudo ajustar la corriente de proteccion a "
+                    f"{protect_current}: {exc}"
+                )
+                return "unsupported_force"
+
+        if torque:
+            try:
+                torque_result = self._arm("set_HTS_gripper_torque", torque)
+                if torque_result == 0:
+                    try:
+                        current_torque = self._arm("get_HTS_gripper_torque")
+                    except Exception:  # noqa: BLE001
+                        current_torque = "no_disponible"
+                    try:
+                        current_protect = self._arm(
+                            "get_gripper_protect_current"
+                        )
+                    except Exception:  # noqa: BLE001
+                        current_protect = "no_disponible"
+                    self.get_logger().error(
+                        f"El firmware rechazo el torque del gripper: {torque}; "
+                        f"torque_actual={current_torque}, "
+                        f"corriente_proteccion={current_protect}"
+                    )
+                    return "fault"
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(
+                    f"No se pudo ajustar el torque del gripper a {torque}: {exc}. "
+                    "Comprueba que el modelo/API soporte set_HTS_gripper_torque."
+                )
+                return "unsupported_force"
+
+        # Un torque explicito implica modo de control de fuerza; de otro
+        # modo el valor del torque se programa pero no participa en el
+        # comando de cierre.
+        is_torque = 1 if (force_control or torque > 0) else 0
+
+        value_args = [value, speed, self.gripper_type]
+        if supports_force_arg:
+            value_args.append(is_torque)
+
+        try:
+            self._arm("set_gripper_value", *value_args)
         except RuntimeError as exc:
             self._drop_connection(str(exc))
             return "fault"
@@ -823,12 +1065,31 @@ class MechArmDriver(Node):
             )
             try:
                 flag = 0 if value >= 50 else 1
-                self._arm("set_gripper_state", flag, speed, self.gripper_type)
+                state_args = [flag, speed, self.gripper_type]
+                if supports_force_arg:
+                    state_args.append(is_torque)
+                self._arm("set_gripper_state", *state_args)
             except Exception as exc2:  # noqa: BLE001
                 self.get_logger().error(f"set_gripper_state fallo: {exc2}")
                 return "fault"
 
         return self._wait_gripper_idle(self.gripper_timeout)
+
+    def _close_gripper_with_regrip(
+        self, goal_handle, result, value, speed, phase="gripper"
+    ):
+        """Cierra, deja asentarse la pieza y reaplica el cierre."""
+        outcome = self._set_gripper(value, speed)
+        if outcome != "ok":
+            return self._fault(goal_handle, result, phase)
+
+        if self.gripper_regrip > 0.0:
+            time.sleep(self.gripper_regrip)
+            outcome = self._set_gripper(value, speed)
+            if outcome != "ok":
+                return self._fault(goal_handle, result, f"{phase} (reapriete)")
+
+        return "ok"
 
     # =====================================================================
     # Servicios de prueba / calibracion
@@ -858,7 +1119,13 @@ class MechArmDriver(Node):
             )
             value = int(round(clamp(float(request.value), 0.0, 100.0)))
 
-            outcome = self._set_gripper(value, speed)
+            outcome = self._set_gripper(
+                value,
+                speed,
+                request.torque,
+                request.force_control,
+                request.protect_current,
+            )
 
             try:
                 read = self._arm("get_gripper_value")
@@ -867,9 +1134,13 @@ class MechArmDriver(Node):
             except Exception:  # noqa: BLE001
                 pass
 
-            if outcome == "fault":
+            if outcome != "ok":
                 response.success = False
-                response.message = "Fallo al mover la pinza."
+                response.message = (
+                    "Control de fuerza no soportado por pymycobot/MechArm270."
+                    if outcome == "unsupported_force"
+                    else "Fallo al mover la pinza."
+                )
             else:
                 response.success = True
                 response.message = (
@@ -906,7 +1177,9 @@ class MechArmDriver(Node):
                     "LIBERANDO SERVOS: sujeta el brazo, va a caer por su "
                     "propio peso."
                 )
-                self._arm("release_all_servos")
+                # En pymycobot, sin el 1 se conserva amortiguacion y una
+                # articulacion cargada como J3 puede seguir pareciendo fija.
+                self._arm("release_all_servos", 1)
                 response.success = True
                 response.message = (
                     "Servos liberados: mueve el brazo a mano y lee la "
@@ -914,8 +1187,12 @@ class MechArmDriver(Node):
                 )
             else:
                 self._arm("power_on")
+                # Al enseñar una pose fuera de limite el firmware deja el
+                # fallo enclavado. Tras devolver el brazo a un rango valido,
+                # limpiarlo aqui permite retomar las acciones sin reiniciar.
+                self._arm("clear_error_information")
                 response.success = True
-                response.message = "Servos alimentados de nuevo."
+                response.message = "Servos alimentados y error limpiado."
             return response
 
         except Exception as exc:  # noqa: BLE001
@@ -1039,7 +1316,10 @@ class MechArmDriver(Node):
             elif outcome == "timeout":
                 result.success = False
                 result.status = "TIMEOUT"
-                result.message = "Se agoto move_timeout_sec."
+                result.message = (
+                    "Se agoto move_timeout_sec. "
+                    + (self._last_motion_detail or "sin telemetria final")
+                )
                 goal_handle.abort()
             else:
                 result.success = False
@@ -1104,6 +1384,33 @@ class MechArmDriver(Node):
                 goal_handle.abort()
                 return result
 
+            if len(req.approach_coords_waypoints) % 6 != 0:
+                result.success = False
+                result.status = "INVALID_GOAL"
+                result.message = (
+                    "approach_coords_waypoints debe contener grupos de 6 coordenadas."
+                )
+                goal_handle.abort()
+                return result
+
+            if use_coords and req.approach_joint_waypoints:
+                result.success = False
+                result.status = "INVALID_GOAL"
+                result.message = (
+                    "Un objetivo cartesiano no puede incluir waypoints articulares."
+                )
+                goal_handle.abort()
+                return result
+
+            if use_joints and req.approach_coords_waypoints:
+                result.success = False
+                result.status = "INVALID_GOAL"
+                result.message = (
+                    "Un objetivo articular no puede incluir waypoints cartesianos."
+                )
+                goal_handle.abort()
+                return result
+
             if use_pose and req.target_pose_name not in self.poses:
                 result.success = False
                 result.status = "INVALID_GOAL"
@@ -1137,6 +1444,14 @@ class MechArmDriver(Node):
                 req.gripper_speed_percent
                 if req.gripper_speed_percent and req.gripper_speed_percent > 0.0
                 else self.default_gripper_speed
+            )
+
+            self._active_gripper_torque = int(req.gripper_torque)
+            self._active_gripper_force_control = bool(
+                req.gripper_force_control
+            )
+            self._active_gripper_protect_current = int(
+                req.gripper_protect_current
             )
 
             open_value = (
@@ -1183,6 +1498,12 @@ class MechArmDriver(Node):
                     closed_value,
                     result,
                     taught_pregrasp,
+                    [
+                        list(req.approach_coords_waypoints[index:index + 6])
+                        for index in range(
+                            0, len(req.approach_coords_waypoints), 6
+                        )
+                    ],
                 )
             elif use_joints:
                 taught_waypoints = [
@@ -1238,6 +1559,9 @@ class MechArmDriver(Node):
             return result
 
         finally:
+            self._active_gripper_torque = None
+            self._active_gripper_force_control = None
+            self._active_gripper_protect_current = None
             self._release_busy()
 
     def _feedback_pp(self, goal_handle, state):
@@ -1268,7 +1592,10 @@ class MechArmDriver(Node):
         elif outcome == "timeout":
             result.success = False
             result.status = "TIMEOUT"
-            result.message = f"Timeout en {phase}."
+            result.message = (
+                f"Timeout en {phase}. "
+                + (self._last_motion_detail or "sin telemetria final")
+            )
             goal_handle.abort()
         else:
             result.success = False
@@ -1289,23 +1616,30 @@ class MechArmDriver(Node):
         closed_value,
         result,
         taught_pregrasp=None,
+        taught_waypoints=None,
     ):
         # Un preagarre ensenado conserva el vector seguro real. Solo las
         # piezas sin calibracion explicita usan el respaldo target + Z.
-        if taught_pregrasp is None:
+        if taught_waypoints:
+            approaches = [list(coords) for coords in taught_waypoints]
+        elif taught_pregrasp is None:
             approach = list(target)
             approach[2] += approach_height
+            approaches = [approach]
         else:
-            approach = list(taught_pregrasp)
+            approaches = [list(taught_pregrasp)]
 
         if operation == "pick":
-            if self._set_gripper(open_value, gripper_speed) == "fault":
+            if self._set_gripper(open_value, gripper_speed) != "ok":
                 return self._fault(goal_handle, result, "abrir gripper")
 
         self._feedback_pp(goal_handle, "APPROACH")
-        outcome = self._move_coords(goal_handle, approach, speed, 0)
-        if not self._handle_outcome(outcome, goal_handle, result, "APPROACH"):
-            return outcome
+        for index, approach in enumerate(approaches, start=1):
+            outcome = self._move_coords(goal_handle, approach, speed, 0)
+            if not self._handle_outcome(
+                outcome, goal_handle, result, f"APPROACH waypoint {index}"
+            ):
+                return outcome
 
         self._feedback_pp(goal_handle, "DESCEND")
         outcome = self._move_coords(goal_handle, target, speed, 1)
@@ -1314,8 +1648,14 @@ class MechArmDriver(Node):
 
         self._feedback_pp(goal_handle, "GRIP")
         grip_value = closed_value if operation == "pick" else open_value
-        if self._set_gripper(grip_value, gripper_speed) == "fault":
-            return self._fault(goal_handle, result, "gripper")
+        if operation == "pick":
+            outcome = self._close_gripper_with_regrip(
+                goal_handle, result, grip_value, gripper_speed
+            )
+        else:
+            outcome = self._set_gripper(grip_value, gripper_speed)
+        if outcome != "ok":
+            return outcome
 
         if operation == "pick" and self.verify_grasp:
             if not self._grasp_ok(closed_value):
@@ -1328,9 +1668,12 @@ class MechArmDriver(Node):
                 return "grasp_failed"
 
         self._feedback_pp(goal_handle, "LIFT")
-        outcome = self._move_coords(goal_handle, approach, speed, 1)
-        if not self._handle_outcome(outcome, goal_handle, result, "LIFT"):
-            return outcome
+        for index, approach in enumerate(reversed(approaches), start=1):
+            outcome = self._move_coords(goal_handle, approach, speed, 1)
+            if not self._handle_outcome(
+                outcome, goal_handle, result, f"LIFT waypoint {index}"
+            ):
+                return outcome
 
         return "ok"
 
@@ -1349,21 +1692,70 @@ class MechArmDriver(Node):
             )
             self.get_logger().error(f"Ruta ensenada: {self._last_ik_error}.")
             return "unreachable"
-        try:
-            self._arm("send_angles", [float(angle) for angle in angles], speed)
-        except Exception as exc:  # noqa: BLE001 - valida pymycobot tambien
-            self._drop_connection(str(exc))
-            return "fault"
-        outcome = self._wait_for_arrival(
-            goal_handle,
-            angles,
-            "angles",
-            self.move_timeout,
-            self.taught_stall_timeout,
-        )
-        if outcome != "ok":
-            self._log_arm_errors("tras pose articular ensenada fallida")
-        return outcome
+        current = self._read_angles(retries=2, delay=0.05)
+        steps = 1
+        deltas = None
+        if current is not None and self.taught_max_joint_step > 0.0:
+            deltas = []
+            for index, target in enumerate(angles):
+                delta = float(target) - current[index]
+                if self.joint_max[index] - self.joint_min[index] >= 359.0:
+                    delta = (delta + 180.0) % 360.0 - 180.0
+                deltas.append(delta)
+            steps = max(
+                1,
+                int(math.ceil(
+                    max(abs(delta) for delta in deltas)
+                    / self.taught_max_joint_step
+                )),
+            )
+
+        for step in range(1, steps + 1):
+            if step == steps or current is None or deltas is None:
+                waypoint = [float(angle) for angle in angles]
+            else:
+                fraction = step / steps
+                waypoint = [
+                    current[index] + delta * fraction
+                    for index, delta in enumerate(deltas)
+                ]
+            try:
+                self._arm("send_angles", waypoint, speed)
+            except Exception as exc:  # noqa: BLE001 - valida pymycobot tambien
+                self._drop_connection(str(exc))
+                return "fault"
+            outcome = self._wait_for_arrival(
+                goal_handle,
+                waypoint,
+                "angles",
+                self.move_timeout,
+                self.taught_stall_timeout,
+            )
+            if outcome == "timeout" and steps == 1:
+                # Tras un IK 32 el firmware puede quedarse a medio camino
+                # aunque la pose final sea valida. Limpiar y reenviar una
+                # vez la pose completa es preferible a aceptar un residuo.
+                self.get_logger().warn(
+                    "Pose ensenada sin llegada; se limpia el error y "
+                    "se reintenta una vez el objetivo completo."
+                )
+                try:
+                    self._arm("clear_error_information")
+                    self._arm("send_angles", waypoint, speed)
+                except Exception as exc:  # noqa: BLE001
+                    self._drop_connection(str(exc))
+                    return "fault"
+                outcome = self._wait_for_arrival(
+                    goal_handle,
+                    waypoint,
+                    "angles",
+                    self.move_timeout,
+                    self.taught_stall_timeout,
+                )
+            if outcome != "ok":
+                self._log_arm_errors("tras pose articular ensenada fallida")
+                return outcome
+        return "ok"
 
     def _pick_place_taught_joints(
         self,
@@ -1378,7 +1770,7 @@ class MechArmDriver(Node):
         result,
     ):
         if operation == "pick":
-            if self._set_gripper(open_value, gripper_speed) == "fault":
+            if self._set_gripper(open_value, gripper_speed) != "ok":
                 return self._fault(goal_handle, result, "abrir gripper")
 
         self._feedback_pp(goal_handle, "APPROACH")
@@ -1396,8 +1788,14 @@ class MechArmDriver(Node):
 
         self._feedback_pp(goal_handle, "GRIP")
         grip_value = closed_value if operation == "pick" else open_value
-        if self._set_gripper(grip_value, gripper_speed) == "fault":
-            return self._fault(goal_handle, result, "gripper")
+        if operation == "pick":
+            outcome = self._close_gripper_with_regrip(
+                goal_handle, result, grip_value, gripper_speed
+            )
+        else:
+            outcome = self._set_gripper(grip_value, gripper_speed)
+        if outcome != "ok":
+            return outcome
 
         if operation == "pick" and self.verify_grasp:
             if not self._grasp_ok(closed_value):
@@ -1432,7 +1830,7 @@ class MechArmDriver(Node):
         result,
     ):
         if operation == "pick":
-            if self._set_gripper(open_value, gripper_speed) == "fault":
+            if self._set_gripper(open_value, gripper_speed) != "ok":
                 return self._fault(goal_handle, result, "abrir gripper")
 
         self._feedback_pp(goal_handle, "DESCEND")
@@ -1442,8 +1840,14 @@ class MechArmDriver(Node):
 
         self._feedback_pp(goal_handle, "GRIP")
         grip_value = closed_value if operation == "pick" else open_value
-        if self._set_gripper(grip_value, gripper_speed) == "fault":
-            return self._fault(goal_handle, result, "gripper")
+        if operation == "pick":
+            outcome = self._close_gripper_with_regrip(
+                goal_handle, result, grip_value, gripper_speed
+            )
+        else:
+            outcome = self._set_gripper(grip_value, gripper_speed)
+        if outcome != "ok":
+            return outcome
 
         if operation == "pick" and self.verify_grasp:
             if not self._grasp_ok(closed_value):

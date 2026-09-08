@@ -138,6 +138,18 @@ mecharm> list              # revisa lo guardado
 
 Cada `save` **reescribe** `src/myagv_mecharm_service/config/poses.yaml`.
 
+La calibracion de una pieza tambien puede ser la fuente de la pose `home`:
+`calibrate-grasp` la captura al principio antes de abrir la pinza. Para
+reensenar todas las poses globales (`home`, `safe_navigation`, `carry`,
+`observe`, `pick_table` y `place_table`) usa:
+
+```bash
+ALLOW_MOTION=1 ./scripts/tsummit.sh calibrate-grasp poste 100 \
+  --capture-global-poses
+```
+
+Todos los nodos y ensayos leen esas poses desde el mismo `poses.yaml`.
+
 ### Verificar que una pose se alcanza sola
 
 ```

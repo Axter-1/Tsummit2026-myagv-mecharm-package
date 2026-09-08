@@ -24,6 +24,11 @@ mecharm_driver_node:
     # adaptativo. Ajusta segun tu pinza y pieza.
     gripper_open_value: 100
     gripper_closed_value: 20
+    # Ajuste moderado de fuerza para la pinza adaptativa.
+    gripper_torque: 500
+    gripper_force_control: true
+    # Limite de corriente del gripper (1..500).
+    gripper_protect_current: 500
     # 1 = pinza adaptativa; se envia explicitamente por compatibilidad
     # con pymycobot, que en algunas versiones rechaza None.
     gripper_type: 1
@@ -38,6 +43,8 @@ mecharm_driver_node:
     settle_time_sec: 0.4
     # Tiempo extra tras mover la pinza para que asiente sobre la pieza.
     gripper_settle_sec: 0.6
+    # Reaplica el cierre tras asentarse sobre la pieza.
+    gripper_regrip_sec: 1.0
 
     # ---------------------------------------------------------------
     # Criterio de llegada
@@ -46,14 +53,15 @@ mecharm_driver_node:
     # del brazo entra en tolerancia, no cuando is_moving() dice 0
     # (esa lectura es intermitente y poco fiable por serie).
     # La telemetria de esta unidad fluctua algo mas de 2 deg al asentarse.
-    angle_tolerance_deg: 3.0
+    angle_tolerance_deg: 3.5
     coord_tolerance_mm: 6.0
     arrival_stable_samples: 3
     max_read_failures: 25
     # Si el error deja de reducirse durante este tiempo se aborta:
     # obstruccion, limite articular o pose fuera del alcance de 270 mm.
-    stall_timeout_sec: 4.0
+    stall_timeout_sec: 20.0
     taught_stall_timeout_sec: 12.0
+    taught_max_joint_step_deg: 0.0
 
     # ---------------------------------------------------------------
     # Limites articulares (grados) - MechArm 270 M5
@@ -67,6 +75,11 @@ mecharm_driver_node:
     # actual. Hasta corregir esa API, send_coords es la unica via IK
     # valida para objetivos cartesianos ensenados.
     coords_via_ik: false
+    # Medido: send_coords deja Z ~11 mm por debajo de la coordenada leida.
+    # Se compensa solo al mandar el comando; la llegada usa la pose ensenada.
+    coords_command_z_offset_mm: 11.0
+    # Reintenta una vez una pose cartesiana cercana sin aceptar el residuo.
+    coords_retry_error_mm: 15.0
 
     # ---------------------------------------------------------------
     # Poses con nombre

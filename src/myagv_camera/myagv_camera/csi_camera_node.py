@@ -79,11 +79,23 @@ def build_gstreamer_pipeline(
     output_height,
     framerate,
     flip_method,
+    exposure_time_us=0,
+    gain=0.0,
 ):
     """Pipeline ``nvarguscamerasrc`` para la Jetson (guia de camara)."""
 
+    manual_controls = ""
+    if exposure_time_us > 0:
+        manual_controls += (
+            " aelock=true exposuretimerange=\"{0} {0}\"".format(
+                int(exposure_time_us)
+            )
+        )
+    if gain > 0.0:
+        manual_controls += " gainrange=\"{0:.3f} {0:.3f}\"".format(gain)
+
     return (
-        "nvarguscamerasrc sensor-id={sensor_id} ! "
+        "nvarguscamerasrc{controls} sensor-id={sensor_id} ! "
         "video/x-raw(memory:NVMM), width=(int){cw}, height=(int){ch}, "
         "framerate=(fraction){fr}/1 ! "
         "nvvidconv flip-method={flip} ! "
@@ -92,6 +104,7 @@ def build_gstreamer_pipeline(
         "videoconvert ! video/x-raw, format=(string)BGR ! "
         "appsink drop=True max-buffers=1 emit-signals=True"
     ).format(
+        controls=manual_controls,
         sensor_id=int(sensor_id),
         cw=int(capture_width),
         ch=int(capture_height),
@@ -127,6 +140,8 @@ class CsiCameraNode(Node):
         self.declare_parameter("output_width", DEFAULT_WIDTH)
         self.declare_parameter("output_height", DEFAULT_HEIGHT)
         self.declare_parameter("framerate", 21)
+        self.declare_parameter("exposure_time_us", 0)
+        self.declare_parameter("gain", 0.0)
         # 2 = rot 180: el modulo CSI del myAGV va montado boca abajo.
         self.declare_parameter("flip_method", 2)
 
@@ -161,6 +176,10 @@ class CsiCameraNode(Node):
         self.output_width = int(self.get_parameter("output_width").value)
         self.output_height = int(self.get_parameter("output_height").value)
         self.framerate = int(self.get_parameter("framerate").value)
+        self.exposure_time_us = int(
+            self.get_parameter("exposure_time_us").value
+        )
+        self.gain = float(self.get_parameter("gain").value)
         self.flip_method = int(self.get_parameter("flip_method").value)
 
         camera_name = str(self.get_parameter("camera_name").value)
@@ -407,6 +426,8 @@ class CsiCameraNode(Node):
             self.output_height,
             self.framerate,
             self.flip_method,
+            self.exposure_time_us,
+            self.gain,
         )
         return cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 

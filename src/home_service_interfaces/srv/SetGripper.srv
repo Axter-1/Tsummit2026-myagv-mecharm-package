@@ -11,6 +11,15 @@ int32 value
 # 0..100. <= 0 -> usa la velocidad por defecto del nodo.
 float64 speed_percent
 
+# Par de la pinza adaptativa, 150..980. 0 = no cambiar el ajuste actual.
+int32 torque
+
+# Activa el modo de control de fuerza del firmware.
+bool force_control
+
+# Corriente de proteccion, 1..500. 0 = no cambiar el ajuste actual.
+int32 protect_current
+
 ---
 # ============================================================
 # RESPONSE

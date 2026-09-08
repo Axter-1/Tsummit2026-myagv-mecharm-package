@@ -55,13 +55,18 @@ except ImportError:
     sys.exit(1)
 
 
-DEFAULT_POSES_FILE = (
-    "/workspace/src/myagv_mecharm_service/config/poses.yaml"
+WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DEFAULT_POSES_FILE = os.path.join(
+    WORKSPACE_ROOT,
+    "src",
+    "myagv_mecharm_service",
+    "config",
+    "poses.yaml",
 )
 
-# Limites articulares del MechArm 270 M5 (hoja de datos).
-JOINT_MIN = [-160.0, -85.0, -180.0, -160.0, -100.0, -180.0]
-JOINT_MAX = [160.0, 90.0, 45.0, 160.0, 100.0, 180.0]
+# Limites reportados por el firmware del MechArm 270 M5.
+JOINT_MIN = [-160.0, -75.0, -175.0, -155.0, -115.0, -180.0]
+JOINT_MAX = [160.0, 120.0, 65.0, 155.0, 115.0, 180.0]
 
 
 def clamp(value, low, high):
@@ -305,7 +310,7 @@ class Console:
                 elif cmd == "free":
                     print("  !! SUJETA EL BRAZO: va a caer por su peso.")
                     if input("  escribe SI para continuar: ") == "SI":
-                        self.mc.release_all_servos()
+                        self.mc.release_all_servos(1)
                         print("  servos liberados. Mueve el brazo y usa "
                               "'save <nombre>'.")
                     else:
@@ -313,7 +318,8 @@ class Console:
 
                 elif cmd == "lock":
                     self.mc.power_on()
-                    print("  servos alimentados.")
+                    self.mc.clear_error_information()
+                    print("  servos alimentados y error limpiado.")
 
                 elif cmd == "save":
                     if not args:

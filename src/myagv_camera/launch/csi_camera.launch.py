@@ -70,6 +70,14 @@ def generate_launch_description():
     framerate_arg = DeclareLaunchArgument(
         "framerate", default_value="21"
     )
+    exposure_time_arg = DeclareLaunchArgument(
+        "exposure_time_us", default_value="0",
+        description="0 = exposicion automatica; >0 fija microsegundos Argus.",
+    )
+    gain_arg = DeclareLaunchArgument(
+        "gain", default_value="0.0",
+        description="0 = ganancia automatica; >0 fija ganancia Argus.",
+    )
     publish_raw_arg = DeclareLaunchArgument(
         "publish_raw", default_value="true"
     )
@@ -100,6 +108,8 @@ def generate_launch_description():
             "capture_width": LaunchConfiguration("capture_width"),
             "capture_height": LaunchConfiguration("capture_height"),
             "framerate": LaunchConfiguration("framerate"),
+            "exposure_time_us": LaunchConfiguration("exposure_time_us"),
+            "gain": LaunchConfiguration("gain"),
             "publish_raw": LaunchConfiguration("publish_raw"),
             "publish_compressed": LaunchConfiguration("publish_compressed"),
             "device_index": LaunchConfiguration("device_index"),
@@ -117,6 +127,8 @@ def generate_launch_description():
         capture_width_arg,
         capture_height_arg,
         framerate_arg,
+        exposure_time_arg,
+        gain_arg,
         publish_raw_arg,
         publish_compressed_arg,
         device_index_arg,

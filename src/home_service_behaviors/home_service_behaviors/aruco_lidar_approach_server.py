@@ -547,7 +547,7 @@ class ArucoLidarApproachServer(Node):
         )
 
         # =========================================================
-        # Normal por LIDAR  (fuente preferente)
+        # Normal por LiDAR (opcional; para comparar contra ArUco)
         # =========================================================
         #
         # La normal sacada de la POSE del ArUco es el punto debil de
@@ -563,7 +563,7 @@ class ArucoLidarApproachServer(Node):
         # direccion esta. El lidar, para la geometria.
         self.declare_parameter(
             'use_lidar_normal',
-            True
+            False
         )
 
         # Sector alrededor del marcador donde buscar la superficie.
@@ -815,10 +815,12 @@ class ArucoLidarApproachServer(Node):
             0.60
         )
 
-        # Parada de seguridad por LiDAR frontal.
+        # Parada de seguridad por LiDAR frontal. Debe quedar por debajo de
+        # la parada calibrada mas corta (rueda: 0.09 m), para permitir que
+        # el controlador termine de alinear dentro de su tolerancia.
         self.declare_parameter(
             'min_front_clearance',
-            0.12
+            0.08
         )
 
         # =========================================================
@@ -2285,6 +2287,7 @@ class ArucoLidarApproachServer(Node):
                         mx, my, nx, ny,
                         stamp_ns=now_ns,
                     )
+                    self.publish_target_goal_tf(target_id, estimate)
 
                     last_detection_ns = now_ns
                     stale_warned = False
@@ -2636,10 +2639,9 @@ class ArucoLidarApproachServer(Node):
             )
 
             if final_alignment_active and final_lidar_heading is not None:
-                # En el tramo final no usamos el rumbo filtrado de la
-                # camara: la normal LiDAR es la referencia horizontal del
-                # plano y permite girar perpendicularmente aunque la
-                # camara tenga offset angular.
+                # Prueba opcional: la normal LiDAR puede sustituir el rumbo
+                # fijado por la ultima normal ArUco. Por defecto se conserva
+                # el ArUco y LiDAR solo mide distancia y seguridad.
                 target_yaw = final_lidar_heading
                 if abs(normalize_angle(target_yaw - ryaw)) > self.pf(
                     'final_heading_tolerance'
@@ -2675,6 +2677,21 @@ class ArucoLidarApproachServer(Node):
                     period,
                 ),
             }
+
+            slow_final = (
+                safety_clearance is not None and
+                safety_clearance <= self.pf('final_slow_distance')
+            )
+            if slow_final:
+                limits['max_linear'] = min(
+                    limits['max_linear'], self.pf('final_max_linear_speed')
+                )
+                limits['max_lateral'] = min(
+                    limits['max_lateral'], self.pf('final_max_lateral_speed')
+                )
+                limits['max_angular'] = min(
+                    limits['max_angular'], self.pf('final_max_angular_speed')
+                )
 
             # -------------------------------------------------
             # GIRAR LO MENOS POSIBLE MIENTRAS SE APROXIMA
@@ -2808,6 +2825,8 @@ class ArucoLidarApproachServer(Node):
                     self.pf('command_latency'),
                     period,
                     sensor_period=lidar_dt,
+                    a_max=limits['accel'],
+                    v_max=limits['max_linear'],
                 )
 
                 # Cerca del objetivo el CAMINO manda -- su ultimo tramo
@@ -2852,13 +2871,13 @@ class ArucoLidarApproachServer(Node):
             ):
                 vy = clamp(
                     -self.pf('final_camera_lateral_kp') * center_error,
-                    -self.pf('max_lateral_speed'),
-                    self.pf('max_lateral_speed'),
+                    -limits['max_lateral'],
+                    limits['max_lateral'],
                 )
 
                 vy = planner.apply_deadband(
                     vy,
-                    self.pf('min_lateral_speed'),
+                    min(self.pf('min_lateral_speed'), limits['max_lateral']),
                 )
 
                 vx = 0.0
@@ -2974,7 +2993,7 @@ class ArucoLidarApproachServer(Node):
                 # esta disponible o la normal de camara/estimador en respaldo.
                 (
                     final_lidar_heading is not None or
-                    (detection is not None and estimate.ready)
+                    estimate.ready
                 )
             ):
                 reached = True

@@ -27,7 +27,8 @@ LOG_DIR="${LOG_DIR:-/workspace/log/robot_routine}"
 # Se puede ampliar por invocacion sin editar codigo.
 GRASP_APPROACH_TIMEOUT="${GRASP_APPROACH_TIMEOUT:-120.0}"
 # Distancia LiDAR (m) a la que se detiene la base antes de agarrar.
-GRASP_STOP_DISTANCE="${GRASP_STOP_DISTANCE:-0.20}"
+# Vacia: grasp_stack elige la parada calibrada de cada pieza.
+GRASP_STOP_DISTANCE="${GRASP_STOP_DISTANCE:-}"
 
 # Config DDS con la que este script habla con los nodos.
 #
@@ -40,10 +41,19 @@ GRASP_STOP_DISTANCE="${GRASP_STOP_DISTANCE:-0.20}"
 # sintoma es "mando el goal y el robot no se mueve".
 DISTRIBUTED="${DISTRIBUTED:-0}"
 
+ip_for_peer() {
+    local peer="$1"
+    ip -4 route get "${peer}" 2>/dev/null \
+        | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}' \
+        | head -1
+}
+
 if [ "${DISTRIBUTED}" = "1" ]; then
     if [ -n "${WIFI_IFACE:-}" ]; then
         ROBOT_IP="${ROBOT_IP:-$(ip -4 -o addr show "${WIFI_IFACE}" 2>/dev/null \
             | awk '{print $4}' | cut -d/ -f1 | head -1)}"
+    elif [ -n "${LAPTOP_IP:-}" ]; then
+        ROBOT_IP="${ROBOT_IP:-$(ip_for_peer "${LAPTOP_IP}")}"
     else
         ROBOT_IP="${ROBOT_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null \
             | awk '{for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -1)}"
@@ -60,7 +70,10 @@ if ! docker info >/dev/null 2>&1; then
     DOCKER=(sudo docker)
 fi
 
-source_env='source /opt/ros/humble/setup.bash; source /workspace/install/setup.bash'
+# El daemon de ros2 conserva el primer entorno DDS que vio y puede ocultar
+# nodos del mismo contenedor tras reinicios. Las operaciones del robot usan
+# descubrimiento directo para consultar siempre el grafo actual.
+source_env='export ROS2_DISABLE_DAEMON=1; source /opt/ros/humble/setup.bash; source /workspace/install/setup.bash'
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -69,6 +82,11 @@ routine() { "${ROUTINE}" "$@"; }
 
 in_container() {
     "${DOCKER[@]}" exec -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" \
+        bash -lc "${source_env}; $*"
+}
+
+in_container_interactive() {
+    "${DOCKER[@]}" exec -it -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" \
         bash -lc "${source_env}; $*"
 }
 
@@ -196,6 +214,10 @@ build() {
              --event-handlers console_direct+"
 }
 
+doctor() {
+    bash "${ROOT}/scripts/check_robot_integrity.sh"
+}
+
 # =====================================================================
 #  Fase 0 — Mapeo
 # =====================================================================
@@ -214,14 +236,31 @@ save_map() {
 #  Subsistemas
 # =====================================================================
 
+driver_uses_current_dds() {
+    local needle
+    if [ "${DISTRIBUTED}" = "1" ]; then
+        needle="NetworkInterface address=\"${ROBOT_IP}\""
+    else
+        needle='NetworkInterface name="lo"'
+    fi
+    "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
+        "pid=\$(pgrep -f '[m]echarm_driver_node' | head -n 1); \
+         [ -n \"\${pid}\" ] && tr '\\0' '\\n' < /proc/\${pid}/environ | \
+         grep -Fq '${needle}'"
+}
+
 arm() {
     ensure_container
-    if is_running '[m]echarm_driver_node'; then
-        printf 'Driver del MechArm ya iniciado.\n'
-        return
+    if is_running '[m]echarm_driver_node' && ! driver_uses_current_dds; then
+        printf 'Driver del MechArm iniciado con otro DDS: reiniciando.\n'
+        stop arm
     fi
-    run_bg mecharm 'ros2 launch myagv_mecharm_service mecharm_driver.launch.py'
-    sleep 3
+    if ! is_running '[m]echarm_driver_node'; then
+        run_bg mecharm 'ros2 launch myagv_mecharm_service mecharm_driver.launch.py'
+    fi
+
+    in_container 'python3 /workspace/scripts/check_move_arm_action.py --timeout 15' \
+        || die "mecharm_driver_node no publica /mecharm/move_arm; revisa ${LOG_DIR}/mecharm.log"
 }
 
 calibrate_grasp() {
@@ -241,7 +280,42 @@ calibrate_grasp() {
         die "deten el driver primero: ./scripts/tsummit.sh stop. La calibracion abre /dev/ttyACM0 directamente."
     fi
     say "Calibracion manual de ${object_name} sobre plataforma de ${table_mm} mm"
-    in_container "python3 /workspace/scripts/calibrate_grasp.py '${object_name}' '${table_mm}' $*"
+    in_container_interactive "python3 /workspace/scripts/calibrate_grasp.py '${object_name}' '${table_mm}' $*"
+}
+
+test_grasp_calibration() {
+    confirm_motion
+    ensure_container
+    local object_name="${1:?uso: test-grasp <pieza> <altura_mm>}"
+    local table_mm="${2:?uso: test-grasp <pieza> <altura_mm>}"
+    case "${object_name}" in
+        engranaje|poste|rueda|estrella) ;;
+        *) die "pieza desconocida: '${object_name}'" ;;
+    esac
+    case "${table_mm}" in
+        ''|*[!0-9]*) die "altura invalida: '${table_mm}' (mm, entero)" ;;
+    esac
+    arm
+    say "Ensayo de poses: ${object_name} a ${table_mm} mm"
+    in_container "python3 /workspace/scripts/test_grasp_calibration.py '${object_name}' '${table_mm}'"
+}
+
+test_pick_lift() {
+    confirm_motion
+    ensure_container
+    local object_name="${1:?uso: test-pick-lift <pieza> <altura_mm>}"
+    local table_mm="${2:?uso: test-pick-lift <pieza> <altura_mm>}"
+    case "${object_name}" in
+        engranaje|poste|rueda|estrella) ;;
+        *) die "pieza desconocida: '${object_name}'" ;;
+    esac
+    case "${table_mm}" in
+        ''|*[!0-9]*) die "altura invalida: '${table_mm}' (mm, entero)" ;;
+    esac
+    shift 2 || true
+    arm
+    say "Prueba de agarre y elevacion: ${object_name} a ${table_mm} mm"
+    in_container "python3 /workspace/scripts/test_pick_lift.py '${object_name}' '${table_mm}' $*"
 }
 
 perception() {
@@ -288,18 +362,10 @@ approach_stack() {
     sleep 3
     perception
     sleep 2
-    # sanity: que las 3 entradas del servidor de aproximacion tengan
-    # vida. 'ros2 topic hz' por CLI es poco fiable en esta Nano
-    # (rcl context invalid); un one-shot con echo --once es robusto.
+    # Una suscripcion ROS nativa evita el descubrimiento de tipo inestable
+    # de `ros2 topic echo` cuando CycloneDDS opera entre Nano y portatil.
     say "Comprobando entradas del servidor de aproximacion"
-    in_container "failed=0; for t in /scan_filtered /aruco/detections /odom; do \
-        if timeout 6 ros2 topic echo --once \"\$t\" >/dev/null 2>&1; then \
-            echo \"  OK    \$t\"; \
-        else \
-            echo \"  ? \$t  (sin respuesta; la CLI de ros2 falla a ratos \
-en la Nano, reintenta 'tsummit.sh status')\"; \
-            failed=1; \
-        fi; done; exit \$failed"
+    in_container 'python3 /workspace/scripts/check_approach_inputs.py --timeout 30'
 }
 
 approach_check() {
@@ -318,6 +384,9 @@ approach() {
     local stop_dist="${2:-0.20}"
     local timeout_s="${3:-${APPROACH_TIMEOUT:-180.0}}"
     approach_stack
+    if ! in_container 'python3 /workspace/scripts/check_aruco_approach_action.py --timeout 15'; then
+        die "no hay action server /aruco_lidar_approach en el DDS actual. Ejecuta en el portatil: ROBOT_IP=100.86.172.41 LAPTOP_IP=${LAPTOP_IP} ./scripts/tsummit_offboard.sh run"
+    fi
     say "Enviando goal /aruco_lidar_approach  (id=${marker_id}, stop=${stop_dist} m, timeout=${timeout_s} s)"
     in_container "ros2 action send_goal /aruco_lidar_approach \
         home_service_interfaces/action/ArucoApproach \
@@ -333,12 +402,20 @@ approach() {
 #  src/home_service_behaviors/config/grasp_catalog.yaml.
 #
 #      DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh grasp-dry
-#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh grasp auto
-#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh grasp engranaje
+#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh pick auto
+#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh pick engranaje
 # =====================================================================
 
 grasp_stack() {
-    local enable_arm="$1" enable_approach="$2"
+    local enable_arm="$1" enable_approach="$2" piece="${3:-auto}"
+    local stop_distance="${GRASP_STOP_DISTANCE}"
+    if [ -z "${stop_distance}" ]; then
+        case "${piece}" in
+            # Ensenada con la rueda a 0.09 m de la lectura LiDAR final.
+            rueda) stop_distance="0.09" ;;
+            *)     stop_distance="0.20" ;;
+        esac
+    fi
     ensure_container
     require_distributed_aruco
     if [ "${enable_approach}" = "true" ]; then
@@ -353,13 +430,13 @@ grasp_stack() {
     fi
     if is_running '[o]bject_grasp_server'; then
         printf 'object_grasp_server ya iniciado. Reinicia con: tsummit.sh stop\n'
-        return
+        return 1
     fi
     run_bg grasp \
         "ros2 launch home_service_behaviors object_grasp.launch.py \
-         enable_arm:=${enable_arm} enable_approach:=${enable_approach} \
-         approach_stop_distance:=${GRASP_STOP_DISTANCE} \
-         approach_timeout_sec:=${GRASP_APPROACH_TIMEOUT}"
+          enable_arm:=${enable_arm} enable_approach:=${enable_approach} \
+          approach_stop_distance:=${stop_distance} \
+          approach_timeout_sec:=${GRASP_APPROACH_TIMEOUT}"
     sleep 5
 }
 
@@ -368,13 +445,14 @@ grasp_send() {
     say "Enviando goal /grasp_object  (pieza: ${piece})"
     in_container "ros2 action send_goal /grasp_object \
         home_service_interfaces/action/PickPlace \
-        '{operation: pick, target_pose_name: ${piece}}' --feedback"
+        '{operation: pick, target_pose_name: ${piece}, retreat_pose_name: home}' --feedback"
 }
 
 grasp() {
     confirm_motion
-    grasp_stack true true
-    grasp_send "${1:-auto}"
+    local piece="${1:-auto}"
+    grasp_stack true true "${piece}" || return
+    grasp_send "${piece}"
 }
 
 grasp_dry() {
@@ -382,8 +460,17 @@ grasp_dry() {
     # nada al brazo ni a las ruedas. Es la forma de validar el catalogo
     # y el mapa ArUco->pieza sin riesgo.
     say "ENSAYO en seco: sin brazo y sin mover la base"
-    grasp_stack false false
-    grasp_send "${1:-auto}"
+    local piece="${1:-auto}"
+    grasp_stack false false "${piece}"
+    grasp_send "${piece}"
+}
+
+aruco_loss() {
+    ensure_container
+    require_distributed_aruco
+    local marker_id="${1:?uso: aruco-loss <id_aruco> [segundos]}"
+    local seconds="${2:-30}"
+    in_container "python3 /workspace/scripts/measure_aruco_loss.py '${marker_id}' '${seconds}'"
 }
 
 grasp_catalog() {
@@ -555,6 +642,73 @@ logs() {
 }
 
 stop() {
+    local target="${1:-}"
+    local pattern=""
+
+    if [ -n "${target}" ]; then
+        if [ "${target}" = "help" ]; then
+            printf '%s\n' \
+                'Uso: ./scripts/tsummit.sh stop [nodo]' \
+                'Sin nodo detiene todos los stacks locales.' \
+                'Nodos: arm grasp approach detector camera lidar odom scan mux model slam rviz foxglove'
+            return
+        fi
+        case "${target}" in
+            arm|mecharm|mecharm_driver_node)
+                pattern='[m]echarm_driver_node'
+                ;;
+            grasp|object_grasp_server)
+                pattern='[o]bject_grasp_server'
+                ;;
+            approach|aruco_lidar_approach_server)
+                pattern='[a]ruco_lidar_approach_server'
+                ;;
+            detector|aruco_detector|aruco_detector_node)
+                pattern='[a]ruco_detector_node'
+                ;;
+            camera|csi_camera|csi_camera_node)
+                pattern='[c]si_camera_node'
+                ;;
+            lidar|ydlidar|ydlidar_ros2_driver_node)
+                pattern='[y]dlidar_ros2_driver_node'
+                ;;
+            odom|myagv_odometry_node)
+                pattern='[m]yagv_odometry_node'
+                ;;
+            scan|scan_sanitizer|scan_sanitizer_node)
+                pattern='[s]can_sanitizer_node'
+                ;;
+            mux|twist_mux)
+                pattern='[r]os2 run twist_mux twist_mux'
+                ;;
+            model|robot_state_publisher)
+                pattern='[r]obot_state_publisher'
+                ;;
+            slam|slam_toolbox)
+                pattern='[s]lam_toolbox'
+                ;;
+            rviz|rviz2)
+                pattern='[r]viz2'
+                ;;
+            foxglove|foxglove_bridge)
+                pattern='[f]oxglove_bridge'
+                ;;
+            *)
+                die "nodo desconocido: '${target}'. Usa 'tsummit.sh stop help'."
+                ;;
+        esac
+
+        "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
+            "if pgrep -f '${pattern}' >/dev/null; then \
+                 pkill -INT -f '${pattern}'; sleep 2; \
+                 pgrep -f '${pattern}' >/dev/null && pkill -KILL -f '${pattern}' || true; \
+                 echo 'Nodo detenido: ${target}'; \
+             else \
+                 echo 'Nodo no estaba activo: ${target}'; \
+             fi"
+        return
+    fi
+
     "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
         "pkill -KILL -f '[o]bject_grasp_server' || true; \
          pkill -KILL -f '[m]echarm_driver_node' || true" 2>/dev/null || true
@@ -566,18 +720,22 @@ stop() {
 
 case "${1:-help}" in
     build)        shift; build "$@" ;;
+    doctor|check-integrity) doctor ;;
     mapping|mapear) mapping ;;
     save-map)     shift; save_map "$@" ;;
 
     arm|brazo)    arm ;;
     calibrate-grasp|calibrar-agarre) shift; calibrate_grasp "$@" ;;
+    test-grasp|probar-agarre) shift; test_grasp_calibration "$@" ;;
+    test-pick-lift|probar-pick-lift) shift; test_pick_lift "$@" ;;
     perception|vision) perception ;;
 
     approach-check|aprox-check) approach_check ;;
     approach|aproximar) shift; approach "$@" ;;
 
-    grasp|tomar)  shift; grasp "${1:-auto}" ;;
+    pick|grasp|tomar)  shift; grasp "${1:-auto}" ;;
     grasp-dry|ensayo) shift; grasp_dry "${1:-auto}" ;;
+    aruco-loss)      shift; aruco_loss "$@" ;;
     grasp-catalog|catalogo) grasp_catalog ;;
 
     reto1)        reto1 ;;
@@ -591,7 +749,7 @@ case "${1:-help}" in
     teleop)       routine teleop ;;
     status)       status ;;
     logs)         shift; logs "$@" ;;
-    stop)         stop ;;
+    stop)         shift; stop "$@" ;;
 
     help|-h|--help)
         cat <<'EOF'
@@ -609,8 +767,10 @@ T-SUMMIT Challenge — consola unica
 
   TOMA DE PIEZA  (retos 1 y 2)
     grasp-dry [pieza]       ENSAYO: identifica y calcula, no mueve nada
-    grasp [pieza]           cadena completa (exige ALLOW_MOTION=1,
-                            DISTRIBUTED=1 y LAPTOP_IP=<ip>)
+    pick [pieza]            cadena completa y termina en home (exige ALLOW_MOTION=1,
+                             DISTRIBUTED=1 y LAPTOP_IP=<ip>)
+    grasp [pieza]           alias de pick
+    aruco-loss <id> [seg]   mide flujo y ausencia de un ArUco sin mover
     grasp-catalog           vuelca el catalogo como lo lee el nodo
       pieza = auto | engranaje | poste | rueda
       auto  -> deduce la pieza del ArUco que este viendo
@@ -625,20 +785,37 @@ T-SUMMIT Challenge — consola unica
   SUBSISTEMAS
     arm                     driver del MechArm 270
     calibrate-grasp <pieza> <altura_mm>
-                             ensena intermedio, preagarre y contacto para esa
-                             pieza (engranaje|poste|rueda|estrella) sobre una
+                             primero captura/guarda home y despues ensena
+                             intermedio, preagarre y contacto para esa pieza
+                             (engranaje|poste|rueda|estrella) sobre una
                              plataforma de <altura_mm> (100 o 200); los guarda
                              anidados en grasp_calibrations.yaml y termina en
-                             home (exige ALLOW_MOTION=1 y driver parado)
+                             home. Anade --capture-global-poses para ensenar
+                             todas las poses de poses.yaml (exige
+                             ALLOW_MOTION=1 y driver parado)
+    test-grasp <pieza> <altura_mm>
+                             recorre las poses calibradas sin mover base ni pinza
+                             (exige ALLOW_MOTION=1)
+    test-pick-lift <pieza> <altura_mm>
+                             abre, baja a contacto, cierra y eleva a preagarre;
+                             vuelve a home; solo brazo y pinza, deja el objeto
+                             sujeto.
+                             Usa por defecto torque=200 y corriente=500;
+                             permite ajustar con --gripper-torque 150..980 y
+                             --gripper-protect-current 1..500
+                             (exige ALLOW_MOTION=1)
     perception              camara CSI + detector ArUco
     rviz / teleop           visualizacion y mando
     viz [rviz|foxglove|none]  abre la visualizacion elegida (o ninguna)
 
   UTIL
     build [paquetes]        colcon build dentro del contenedor
+    doctor                  verifica dependencias, paquetes y archivos criticos
     status                  nodos, acciones y procesos clave
     logs <nombre> [n]       tail -f de un log
-    stop                    para todos los stacks
+    stop [nodo]             sin nodo, para todos los stacks
+                            nodo = arm|grasp|approach|detector|camera|lidar|odom|
+                                   scan|mux|model|slam|rviz|foxglove
 
   Todo lo que mueve el robot exige ALLOW_MOTION=1 en cada llamada.
   El repo esta montado en /workspace: editar aqui = editar dentro del
