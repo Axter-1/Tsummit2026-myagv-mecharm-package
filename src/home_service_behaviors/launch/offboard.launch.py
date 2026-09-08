@@ -114,6 +114,12 @@ def generate_launch_description():
             default_value='0.25',
             description='Frenada del perfil trapezoidal, v=sqrt(2*a*d).',
         ),
+        DeclareLaunchArgument(
+            'final_braking_bias',
+            default_value='0.034',
+            description='Compensa el avance que queda por latencia y suelo '
+                        'de velocidad; no modifica la distancia reportada.',
+        ),
         # Las dos calibraciones que decidieron la prueba del 6 de
         # septiembre. Van aqui, no en la Jetson: el detector y el
         # servidor de aproximacion corren en ESTA maquina, asi que
@@ -222,6 +228,10 @@ def generate_launch_description():
             ),
             'linear_accel': ParameterValue(
                 LaunchConfiguration('linear_accel'),
+                value_type=float,
+            ),
+            'final_braking_bias': ParameterValue(
+                LaunchConfiguration('final_braking_bias'),
                 value_type=float,
             ),
             'lidar_to_front_bumper_m': ParameterValue(

@@ -2748,7 +2748,10 @@ class ArucoLidarApproachServer(Node):
                 lidar_dt = 1.0 / max(1.0, self.pf('lidar_rate_hint_hz'))
                 bt = planner.brake_target(
                     control_distance,
-                    stop_distance,
+                    max(
+                        0.0,
+                        stop_distance - self.pf('final_braking_bias'),
+                    ),
                     last_forward_speed,
                     self.pf('command_latency'),
                     period,
