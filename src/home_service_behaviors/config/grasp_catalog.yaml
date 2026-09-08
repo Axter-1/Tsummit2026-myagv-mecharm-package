@@ -97,6 +97,8 @@ grasp_catalog:
     4: engranaje
     5: poste
     6: rueda
+    # 'estrella' (star azul) todavia sin ID asignado: el jurado publica
+    # la asignacion real en pista. Mapear aqui cuando se sepa.
 
   # ===================================================================
   # PIEZAS
@@ -261,3 +263,37 @@ grasp_catalog:
         grasp_z_mm: 172.0
         approach_height_mm: 50.0
         lift_mm: 40.0
+
+    # -----------------------------------------------------------------
+    # ESTRELLA / STAR AZUL  (Contexto/Startazul20por15Nuevo.STL)
+    # -----------------------------------------------------------------
+    # Medido en el STL (pieza plana, 120 triangulos):
+    #   espesor .............. 30.0 mm   (dimension X)
+    #   ancho (punta a punta)  150.0 mm  (dimension Y)
+    #   alto ................ 270.0 mm  (dimension Z; incluye pie/soporte)
+    #
+    # NOTA / DISCREPANCIA: el nombre dice "20 por 15" pero el STL da
+    # 30 x 150 x 270. VERIFICAR con calibre sobre la pieza impresa
+    # antes de competir; ajustar span_mm/close_mm a lo que se pince.
+    #
+    # ESTRATEGIA (provisional): pinza vertical sobre el cuerpo plano de
+    # la estrella, agarrando el espesor de 30 mm cerca del centro de
+    # masa. Cabe de sobra en el recorrido de la pinza (45 mm).
+    # El agarre real lo fija la calibracion enseñada por altura
+    # (scripts/calibrate_grasp.py estrella 100 / 200); los *_mm de aqui
+    # son el respaldo documental.
+    # -----------------------------------------------------------------
+    estrella:
+      label: "Estrella azul"
+      approach: top
+      thickness_mm: 30.0
+      width_mm: 150.0
+      span_mm: 30.0
+      open_mm: 40.0
+      close_mm: 24.0            # aplasta 6 mm
+      grasp_z_mm: 15.0
+      approach_height_mm: 60.0
+      grasp_offset_mm: [0.0, 0.0]
+      wrist_deg: 0.0
+      lift_mm: 60.0
+      carry_pose: carry

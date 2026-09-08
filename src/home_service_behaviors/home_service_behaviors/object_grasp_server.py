@@ -303,8 +303,15 @@ class ObjectGraspServer(Node):
         self.declare_parameter("enable_arm", True)
         # Si es False no se mueve la base (la pieza ya esta delante).
         self.declare_parameter("enable_approach", True)
+        # Altura (mm) de la plataforma sobre la que esta la pieza. Cada
+        # objeto se calibra a varias alturas (scripts/calibrate_grasp.py,
+        # p.ej. 100 y 200); este parametro elige que calibracion se
+        # aplica. Si la calibracion de una pieza no esta anidada por
+        # altura, este valor se ignora para esa pieza.
+        self.declare_parameter("table_height_mm", 100)
 
         self.detections_topic = str(self.get_parameter("detections_topic").value)
+        self.table_height_mm = int(self.get_parameter("table_height_mm").value)
         # Distancia REAL a la que quedo la base tras la ultima
         # aproximacion, medida por LiDAR. None mientras no haya una.
         self.measured_stop_distance = None
@@ -379,6 +386,51 @@ class ObjectGraspServer(Node):
     # Catalogo
     # =================================================================
 
+    # Campos de una calibracion "plana" (una sola altura). Si la entrada
+    # de una pieza NO trae ninguno de estos en su primer nivel y todos
+    # sus valores son mapas, esta anidada por altura de plataforma.
+    _CALIB_LEAF_KEYS = (
+        "intermediate_joint_angles",
+        "pregrasp_joint_angles",
+        "contact_joint_angles",
+        "target_joint_angles",
+        "approach_joint_waypoints",
+        "target_coords",
+        "pregrasp_coords",
+    )
+
+    def _resolve_calibration_height(self, key, calibration):
+        """Devuelve la calibracion aplicable, resolviendo el anidado por
+        altura de plataforma con el parametro 'table_height_mm'."""
+        is_nested = (
+            calibration
+            and not any(k in calibration for k in self._CALIB_LEAF_KEYS)
+            and all(isinstance(v, dict) for v in calibration.values())
+        )
+        if not is_nested:
+            return calibration
+
+        wanted = str(self.table_height_mm)
+        if wanted in calibration:
+            self.get_logger().info(
+                f"Calibracion de '{key}': altura {wanted} mm."
+            )
+            return calibration[wanted]
+
+        if len(calibration) == 1:
+            only = next(iter(calibration))
+            self.get_logger().warn(
+                f"Calibracion de '{key}': no hay entrada para {wanted} mm; "
+                f"se usa la unica disponible ({only} mm)."
+            )
+            return calibration[only]
+
+        self.get_logger().error(
+            f"Calibracion de '{key}': no hay entrada para {wanted} mm "
+            f"(disponibles: {sorted(calibration)}). Pieza sin calibrar."
+        )
+        return None
+
     def _load_catalog(self, path):
         if not path:
             try:
@@ -437,12 +489,15 @@ class ObjectGraspServer(Node):
                 self.get_logger().warn(
                     f"Calibracion para pieza desconocida '{key}': ignorada."
                 )
-            elif not isinstance(calibration, dict):
+                continue
+            if not isinstance(calibration, dict):
                 self.get_logger().warn(
                     f"Calibracion de '{key}' no es un mapa: ignorada."
                 )
-            else:
-                objects[key] = {**objects[key], **calibration}
+                continue
+            resolved = self._resolve_calibration_height(key, calibration)
+            if resolved is not None:
+                objects[key] = {**objects[key], **resolved}
         cat["objects"] = objects
         gripper = cat.get("gripper", {})
         self.table_z_mm = float(cat.get("table_z_mm", 0.0))

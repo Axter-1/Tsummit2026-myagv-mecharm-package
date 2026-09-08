@@ -59,6 +59,12 @@ def generate_launch_description():
             "detections_topic",
             default_value="/aruco/detections",
         ),
+        DeclareLaunchArgument(
+            "table_height_mm",
+            default_value="100",
+            description="Altura (mm) de la plataforma: elige la calibracion "
+            "de agarre (grasp_calibrations.yaml). 100 o 200.",
+        ),
     ]
 
     node = Node(
@@ -77,6 +83,9 @@ def generate_launch_description():
                 LaunchConfiguration("approach_timeout_sec"), value_type=float
             ),
             "detections_topic": LaunchConfiguration("detections_topic"),
+            "table_height_mm": ParameterValue(
+                LaunchConfiguration("table_height_mm"), value_type=int
+            ),
         }],
     )
 

@@ -1,3 +1,23 @@
 # Poses articulares ensenadas en pista por scripts/calibrate_grasp.py.
-# Se aplican sobre grasp_catalog.yaml sin modificar su documentación.
+# Se aplican sobre grasp_catalog.yaml sin modificar su documentacion.
+#
+# FORMATO: anidado por objeto y por altura de plataforma (mm). El
+# object_grasp_server elige la altura con el parametro 'table_height_mm'.
+#
+#   calibrations:
+#     poste:
+#       "100":
+#         intermediate_joint_angles: [J1..J6]
+#         pregrasp_joint_angles:     [J1..J6]
+#         contact_joint_angles:      [J1..J6]
+#         table_height_mm: 100
+#         initial_pose_name: home
+#         carry_pose: home
+#         calibrated_at: "..."
+#       "200":
+#         ...
+#
+# Se admite tambien el formato plano antiguo (los *_joint_angles
+# directamente bajo el objeto, sin nivel de altura); el script lo migra
+# a la forma anidada la proxima vez que se calibre esa pieza.
 calibrations: {}

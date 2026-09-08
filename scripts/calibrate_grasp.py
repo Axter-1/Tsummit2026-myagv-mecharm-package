@@ -1,13 +1,35 @@
 #!/usr/bin/env python3
-"""Ensena las tres poses articulares de agarre de una pieza.
+"""Ensena las tres poses articulares de agarre de una pieza, POR ALTURA
+de plataforma.
 
-Guarda en config/grasp_calibrations.yaml, sin alterar grasp_catalog.yaml:
-  home -> intermedio -> preagarre -> contacto -> home
+Cada objeto se agarra distinto segun la altura de la mesa donde esta
+apoyado. Este script captura una calibracion (intermedio -> preagarre ->
+contacto) para UNA pieza a UNA altura y la guarda anidada:
 
-Uso dentro del contenedor, con mecharm_driver_node detenido:
-  python3 /workspace/scripts/calibrate_grasp.py poste
-  python3 /workspace/scripts/calibrate_grasp.py engranaje
-  python3 /workspace/scripts/calibrate_grasp.py rueda
+  calibrations:
+    <objeto>:
+      "<altura_mm>":
+        intermediate_joint_angles: [...]
+        pregrasp_joint_angles:     [...]
+        contact_joint_angles:      [...]
+        table_height_mm: <altura_mm>
+        calibrated_at: ...
+
+No toca grasp_catalog.yaml. El object_grasp_server elige la altura con
+el parametro 'table_height_mm'.
+
+Uso dentro del contenedor, con mecharm_driver_node detenido
+(scripts/tsummit.sh stop, o mata mecharm_driver_node):
+
+  # 4 objetos x 2 alturas = 8 corridas
+  python3 /workspace/scripts/calibrate_grasp.py poste     100
+  python3 /workspace/scripts/calibrate_grasp.py poste     200
+  python3 /workspace/scripts/calibrate_grasp.py engranaje 100
+  python3 /workspace/scripts/calibrate_grasp.py engranaje 200
+  python3 /workspace/scripts/calibrate_grasp.py rueda     100
+  python3 /workspace/scripts/calibrate_grasp.py rueda     200
+  python3 /workspace/scripts/calibrate_grasp.py estrella  100
+  python3 /workspace/scripts/calibrate_grasp.py estrella  200
 """
 
 import argparse
@@ -30,8 +52,19 @@ DEFAULT_CALIBRATIONS = (
     "/workspace/src/home_service_behaviors/config/grasp_calibrations.yaml"
 )
 DEFAULT_POSES = "/workspace/src/myagv_mecharm_service/config/poses.yaml"
+OBJECTS = ("engranaje", "poste", "rueda", "estrella")
+# Alturas de plataforma previstas en el reglamento (mm). Se aceptan
+# otras con --force-height por si el jurado cambia la pista.
+KNOWN_HEIGHTS = (100, 200)
+# Leidos del firmware (get_joint_min/max_angle), coinciden con la URDF.
 JOINT_MIN = [-160.0, -75.0, -175.0, -155.0, -115.0, -180.0]
 JOINT_MAX = [160.0, 120.0, 65.0, 155.0, 115.0, 180.0]
+SEGMENTS = ("intermedio", "preagarre", "contacto")
+SEGMENT_KEY = {
+    "intermedio": "intermediate_joint_angles",
+    "preagarre": "pregrasp_joint_angles",
+    "contacto": "contact_joint_angles",
+}
 
 
 def read_angles(arm, retries=12):
@@ -96,13 +129,35 @@ def load_home(path):
     return [float(value) for value in home]
 
 
-def save_calibration(path, object_name, calibration):
+def _looks_flat(entry):
+    """True si 'entry' es una calibracion antigua (sin anidar por altura)."""
+    return isinstance(entry, dict) and any(
+        k in entry for k in SEGMENT_KEY.values()
+    )
+
+
+def save_calibration(path, object_name, height_mm, calibration):
     data = {"calibrations": {}}
     if os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or data
     calibrations = data.setdefault("calibrations", {})
-    calibrations[object_name] = calibration
+
+    entry = calibrations.get(object_name)
+    if _looks_flat(entry):
+        # Migra una calibracion antigua (formato plano) a la forma
+        # anidada, bajo la altura que tuviera anotada o "sin_altura".
+        old_height = str(entry.get("table_height_mm", "sin_altura"))
+        calibrations[object_name] = {old_height: entry}
+        print(
+            f"AVISO: la calibracion previa de '{object_name}' estaba en "
+            f"formato plano; migrada a la altura '{old_height}'."
+        )
+    elif not isinstance(entry, dict):
+        calibrations[object_name] = {}
+
+    calibrations[object_name][str(height_mm)] = calibration
+
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".grasp_calibration_", dir=directory)
@@ -116,8 +171,21 @@ def save_calibration(path, object_name, calibration):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("object", choices=("engranaje", "poste", "rueda"))
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("object", choices=OBJECTS)
+    parser.add_argument(
+        "table_mm",
+        type=int,
+        help="altura de la plataforma en mm (100 o 200)",
+    )
+    parser.add_argument(
+        "--force-height",
+        action="store_true",
+        help="acepta una altura distinta de 100/200",
+    )
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--speed", type=int, default=20)
@@ -125,6 +193,19 @@ def main():
     parser.add_argument("--poses", default=DEFAULT_POSES)
     args = parser.parse_args()
 
+    if args.table_mm <= 0:
+        parser.error("table_mm debe ser positivo (mm)")
+    if args.table_mm not in KNOWN_HEIGHTS and not args.force_height:
+        parser.error(
+            f"altura {args.table_mm} mm no esperada (validas: "
+            f"{', '.join(str(h) for h in KNOWN_HEIGHTS)}). Usa "
+            f"--force-height si es a proposito."
+        )
+
+    print(
+        f"\n== CALIBRACION: {args.object.upper()} sobre plataforma de "
+        f"{args.table_mm} mm ==\n"
+    )
     print("Deten primero mecharm_driver_node; este script abre el puerto serie.")
     input("Confirma que el area esta despejada y pulsa ENTER para continuar... ")
     home = load_home(args.poses)
@@ -136,19 +217,24 @@ def main():
     except Exception:  # noqa: BLE001
         pass
 
-    intermediate = capture(arm, "intermedio")
-    pregrasp = capture(arm, "preagarre")
-    contact = capture(arm, "contacto")
+    captured = {}
+    for name in SEGMENTS:
+        captured[SEGMENT_KEY[name]] = capture(arm, name)
+
     calibration = {
-        "intermediate_joint_angles": intermediate,
-        "pregrasp_joint_angles": pregrasp,
-        "contact_joint_angles": contact,
+        "intermediate_joint_angles": captured["intermediate_joint_angles"],
+        "pregrasp_joint_angles": captured["pregrasp_joint_angles"],
+        "contact_joint_angles": captured["contact_joint_angles"],
+        "table_height_mm": args.table_mm,
         "initial_pose_name": "home",
         "carry_pose": "home",
         "calibrated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }
-    save_calibration(args.calibrations, args.object, calibration)
-    print(f"\nCalibracion de '{args.object}' guardada en {args.calibrations}.")
+    save_calibration(args.calibrations, args.object, args.table_mm, calibration)
+    print(
+        f"\nCalibracion de '{args.object}' a {args.table_mm} mm guardada en "
+        f"{args.calibrations}."
+    )
     input("Pulsa ENTER para volver a home (transporte)... ")
     arm.send_angles(home, args.speed)
     if wait_arrival(arm, home):

@@ -72,6 +72,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_object_grasp', default_value='false'),
         DeclareLaunchArgument('grasp_enable_arm', default_value='true'),
         DeclareLaunchArgument('grasp_enable_approach', default_value='true'),
+        DeclareLaunchArgument('table_height_mm', default_value='100'),
         # foxglove_bridge AQUI, no en la Jetson: en la Nano se comia CPU
         # serializando cada topic a CBOR, y mirar /aruco/image_annotated
         # (Image cruda que publica ESTA maquina) mandaba el frame de
@@ -253,6 +254,9 @@ def generate_launch_description():
             'detections_topic': '/aruco/detections',
             'enable_arm': LaunchConfiguration('grasp_enable_arm'),
             'enable_approach': LaunchConfiguration('grasp_enable_approach'),
+            'table_height_mm': ParameterValue(
+                LaunchConfiguration('table_height_mm'), value_type=int
+            ),
         }],
         condition=IfCondition(LaunchConfiguration('start_object_grasp')),
     )
