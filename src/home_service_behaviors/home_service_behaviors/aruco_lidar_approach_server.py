@@ -356,7 +356,7 @@ class ArucoLidarApproachServer(Node):
         # reportada ni la calibracion lidar->bumper.
         self.declare_parameter(
             'final_braking_bias',
-            0.034
+            0.018
         )
 
         # =========================================================
@@ -2637,6 +2637,17 @@ class ArucoLidarApproachServer(Node):
                 ):
                     yaw_settled = False
 
+            # La histeresis de marcha normal puede dejar yaw_settled activo
+            # hasta un umbral mas ancho que el criterio de llegada. En la
+            # zona final eso crea un bloqueo: yaw_error aun no es valido,
+            # pero el controlador ya no gira. La llegada debe prevalecer.
+            if (
+                final_alignment_active and
+                abs(normalize_angle(target_yaw - ryaw)) >
+                self.pf('final_heading_tolerance')
+            ):
+                yaw_settled = False
+
             limits = {
                 'max_linear': self.pf('max_linear_speed'),
                 'max_lateral': self.pf('max_lateral_speed'),
@@ -2926,10 +2937,12 @@ class ArucoLidarApproachServer(Node):
                 # de imagen es diagnostico: la camara tiene un offset
                 # angular propio y no debe invalidar una pose geometrica.
                 # El tramo ciego permite seguir avanzando con odometria,
-                # pero no permite aceptar la llegada sin una normal fresca:
-                # de lo contrario una normal LiDAR caducada podia dejar
-                # terminar el goal con una orientacion no perpendicular.
-                final_lidar_heading is not None
+                # pero exige una referencia de orientacion fresca: LiDAR si
+                # esta disponible o la normal de camara/estimador en respaldo.
+                (
+                    final_lidar_heading is not None or
+                    (detection is not None and estimate.ready)
+                )
             ):
                 reached = True
 

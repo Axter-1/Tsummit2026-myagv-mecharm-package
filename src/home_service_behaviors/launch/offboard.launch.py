@@ -116,7 +116,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'final_braking_bias',
-            default_value='0.034',
+            default_value='0.018',
             description='Compensa el avance que queda por latencia y suelo '
                         'de velocidad; no modifica la distancia reportada.',
         ),
