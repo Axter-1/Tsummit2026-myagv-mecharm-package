@@ -356,7 +356,7 @@ class ArucoLidarApproachServer(Node):
         # reportada ni la calibracion lidar->bumper.
         self.declare_parameter(
             'final_braking_bias',
-            0.018
+            0.055
         )
 
         # =========================================================
