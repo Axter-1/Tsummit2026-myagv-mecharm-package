@@ -342,6 +342,19 @@ class ArucoLidarApproachServer(Node):
             0.07
         )
 
+        # Limites del tramo final. Son los minimos fisicamente alcanzables
+        # de esta base; pedir menos genera tirones o inmovilidad.
+        self.declare_parameter('final_slow_distance', 0.30)
+        self.declare_parameter('final_max_linear_speed', 0.07)
+        self.declare_parameter('final_max_lateral_speed', 0.035)
+        self.declare_parameter('final_max_angular_speed', 0.37)
+
+        # Congela la referencia filtrada antes de que el ArUco llegue al
+        # borde optico y las esquinas degraden la estimacion PnP.
+        self.declare_parameter('angular_freeze_distance', 0.50)
+        self.declare_parameter('angular_freeze_min_samples', 8)
+        self.declare_parameter('angular_freeze_tolerance', 0.15)
+
         # 0.01 m no es alcanzable con la latencia de la tuberia
         # (JPEG -> WiFi -> portatil -> cmd_vel -> WiFi -> motores): a
         # 0.05 m/s el robot recorre ~1.5 cm solo en lo que llega la
@@ -514,6 +527,8 @@ class ArucoLidarApproachServer(Node):
             'final_heading_settle_sec',
             0.30
         )
+
+        self.declare_parameter('final_distance_settle_sec', 0.25)
 
         # Distancia de entrada a la fase final: aqui se detiene la
         # traslacion cuando el rumbo aun no esta asentado y se gira en
@@ -2196,8 +2211,11 @@ class ArucoLidarApproachServer(Node):
         final_distance = -1.0
         center_error = 0.0
         final_heading_since_ns = None
+        final_distance_since_ns = None
         last_lidar_outward_normal = None
         last_lidar_normal_ns = None
+        frozen_target = None
+        frozen_yaw = None
 
         period = 1.0 / max(
             1.0,
@@ -2480,7 +2498,31 @@ class ArucoLidarApproachServer(Node):
             state = 'PURSUING'
 
             rx, ry, ryaw = robot_pose
-            mx, my, nx, ny = estimate.pose
+            estimate_pose = estimate.pose
+
+            if (
+                frozen_target is None and
+                final_distance > 0.0 and
+                final_distance <= self.pf('angular_freeze_distance') and
+                estimate.samples >= int(self.pf('angular_freeze_min_samples'))
+            ):
+                candidate_yaw = math.atan2(-estimate_pose[3], -estimate_pose[2])
+                if abs(normalize_angle(candidate_yaw - ryaw)) <= self.pf(
+                    'angular_freeze_tolerance'
+                ):
+                    frozen_target = estimate_pose
+                    frozen_yaw = candidate_yaw
+                    self.get_logger().info(
+                        'Referencia ArUco congelada para tramo final: '
+                        f'distancia={final_distance:.3f} m, '
+                        f'muestras={estimate.samples}, '
+                        f'yaw={math.degrees(frozen_yaw):+.1f} deg'
+                    )
+
+            angular_frozen = frozen_target is not None
+            mx, my, nx, ny = (
+                frozen_target if angular_frozen else estimate_pose
+            )
 
             # -------------------------------------------------
             # Estimacion vieja: avisar, y abortar si es mucho.
@@ -2609,6 +2651,12 @@ class ArucoLidarApproachServer(Node):
                 remaining,
                 standoff * 2.0,
             )
+            if angular_frozen:
+                # En el tramo final no se persigue la orientacion de los
+                # frames de borde: la base mecanum conserva yaw y corrige
+                # solo la traslacion contra la referencia fijada en odom.
+                target_yaw = frozen_yaw
+                yaw_settled = True
 
             # Medicion independiente de la geometria ArUco. La distancia
             # `along` puede estar sesgada si marker_length o TF de camara no
@@ -2855,6 +2903,9 @@ class ArucoLidarApproachServer(Node):
                     yaw_settled=yaw_settled,
                 )
             )
+            if angular_frozen:
+                wz = 0.0
+                yaw_settled = True
 
             # Correccion lateral de precision en la zona final. El perfil
             # de frenado puede dejar vx=vy=0 cuando el LiDAR ya esta en la
@@ -2865,6 +2916,7 @@ class ArucoLidarApproachServer(Node):
                 endgame_speed and
                 front_clearance is not None and
                 detection is not None and
+                not angular_frozen and
                 abs(center_error) >
                 self.pf('final_camera_center_tolerance') and
                 abs(wz) < 1e-9
@@ -2949,6 +3001,7 @@ class ArucoLidarApproachServer(Node):
             reached = False
             camera_centered = (
                 detection is not None and
+                not angular_frozen and
                 abs(center_error) <= self.pf('final_camera_center_tolerance')
             )
 
@@ -2962,7 +3015,7 @@ class ArucoLidarApproachServer(Node):
             else:
                 final_heading_since_ns = None
 
-            aligned = (
+            aligned = angular_frozen or (
                 final_heading_since_ns is not None and
                 (now_ns - final_heading_since_ns) / 1e9 >=
                 self.pf('final_heading_settle_sec')
@@ -2975,14 +3028,28 @@ class ArucoLidarApproachServer(Node):
             # conserva el criterio odometrico.
             centred = (
                 camera_centered
-                if detection is not None
+                if detection is not None and not angular_frozen
                 else abs(lateral) <= self.pf('lateral_tolerance')
             )
 
-            if (
+            distance_in_band = (
                 front_clearance is not None and
                 abs(front_clearance - stop_distance) <=
-                self.pf('final_distance_tolerance') and
+                self.pf('final_distance_tolerance')
+            )
+            if distance_in_band:
+                if final_distance_since_ns is None:
+                    final_distance_since_ns = now_ns
+            else:
+                final_distance_since_ns = None
+            distance_settled = (
+                final_distance_since_ns is not None and
+                (now_ns - final_distance_since_ns) / 1e9 >=
+                self.pf('final_distance_settle_sec')
+            )
+
+            if (
+                distance_settled and
                 aligned and
                 centred and
                 # La perpendicularidad la juzga la normal LiDAR. El centro
