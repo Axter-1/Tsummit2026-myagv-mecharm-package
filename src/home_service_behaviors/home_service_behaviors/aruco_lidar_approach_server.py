@@ -458,6 +458,15 @@ class ArucoLidarApproachServer(Node):
             0.12
         )
 
+        # Ganancia del centrado lateral final usando la posicion del ArUco
+        # en la imagen. Cuando el LiDAR ya esta en la distancia de parada,
+        # no se debe seguir avanzando solo porque la geometria TF discrepe;
+        # se corrige de lado hasta devolver el marcador al centro.
+        self.declare_parameter(
+            'final_camera_lateral_kp',
+            0.12
+        )
+
         # Criterio final contra la normal del plano. No usar
         # `yaw_settled` como criterio de llegada: ese estado tambien puede
         # significar que se dejo de girar para priorizar la traslacion.
@@ -2741,6 +2750,32 @@ class ArucoLidarApproachServer(Node):
                     yaw_settled=yaw_settled,
                 )
             )
+
+            # Correccion lateral de precision en la zona final. El perfil
+            # de frenado puede dejar vx=vy=0 cuando el LiDAR ya esta en la
+            # banda objetivo, aunque el ArUco siga fuera del centro por un
+            # sesgo de TF o de la pose estimada. En ese punto solo hay que
+            # desplazar la base: avanzar volveria a empeorar la distancia.
+            if (
+                endgame_speed and
+                front_clearance is not None and
+                detection is not None and
+                abs(center_error) >
+                self.pf('final_camera_center_tolerance') and
+                abs(wz) < 1e-9
+            ):
+                vy = clamp(
+                    -self.pf('final_camera_lateral_kp') * center_error,
+                    -self.pf('max_lateral_speed'),
+                    self.pf('max_lateral_speed'),
+                )
+
+                vy = planner.apply_deadband(
+                    vy,
+                    self.pf('min_lateral_speed'),
+                )
+
+                vx = 0.0
 
             # -------------------------------------------------
             # El LiDAR manda en la distancia
