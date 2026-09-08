@@ -50,6 +50,7 @@ objetivo fuera de max_reach_mm antes de mandar nada al brazo.
 import math
 import os
 import threading
+import traceback
 
 import yaml
 
@@ -68,6 +69,17 @@ from home_service_interfaces.msg import ArucoDetectionArray
 
 def clamp(value, low, high):
     return max(low, min(high, value))
+
+
+_GOAL_STATUS_NAMES = {
+    0: "UNKNOWN",
+    1: "ACCEPTED",
+    2: "EXECUTING",
+    3: "CANCELING",
+    4: "SUCCEEDED",
+    5: "CANCELED",
+    6: "ABORTED",
+}
 
 
 class GraspSpec:
@@ -719,33 +731,69 @@ class ObjectGraspServer(Node):
         MIDE donde ha parado de verdad y ese numero no se puede tirar.
         Ver _execute, donde sustituye a la distancia nominal.
         """
-        # En el arranque distribuido CycloneDDS puede descubrir la accion
-        # del brazo despues de que el orquestador ya este listo. Cinco
-        # segundos producen falsos "no disponible" aunque el driver vive.
-        if not client.wait_for_server(timeout_sec=min(timeout_sec, 15.0)):
-            return False, f"{name} no disponible", None
+        try:
+            # En el arranque distribuido CycloneDDS puede descubrir la accion
+            # del brazo despues de que el orquestador ya este listo. Cinco
+            # segundos producen falsos "no disponible" aunque el driver vive.
+            if not client.wait_for_server(timeout_sec=min(timeout_sec, 15.0)):
+                return False, f"{name} no disponible", None
 
-        send_future = client.send_goal_async(goal)
-        if not wait_future(self, send_future, timeout_sec):
-            return False, f"{name}: timeout aceptando el goal", None
+            send_future = client.send_goal_async(goal)
+            if not wait_future(self, send_future, timeout_sec):
+                return False, f"{name}: timeout aceptando el goal", None
 
-        handle = send_future.result()
-        if handle is None or not handle.accepted:
-            return False, f"{name}: goal rechazado", None
+            handle = send_future.result()
+            if handle is None or not handle.accepted:
+                return False, f"{name}: goal rechazado", None
 
-        result_future = handle.get_result_async()
-        if not wait_future(self, result_future, timeout_sec):
-            handle.cancel_goal_async()
-            return False, f"{name}: timeout esperando el resultado", None
+            result_future = handle.get_result_async()
+            if not wait_future(self, result_future, timeout_sec):
+                handle.cancel_goal_async()
+                return False, f"{name}: timeout esperando el resultado", None
 
-        wrapped = result_future.result()
-        if wrapped is None:
-            return False, f"{name}: sin resultado", None
+            wrapped = result_future.result()
+            if wrapped is None:
+                return False, f"{name}: sin resultado", None
 
-        res = wrapped.result
-        ok = bool(getattr(res, "success", False))
-        msg = getattr(res, "message", "") or getattr(res, "status", "")
-        return ok, f"{name}: {msg}", res
+            res = wrapped.result
+            ok = bool(getattr(res, "success", False))
+            if ok:
+                return True, f"{name}: OK", res
+            return False, self._action_failure_message(name, wrapped), res
+        except Exception as exc:  # noqa: BLE001
+            # repr conserva el tipo incluso cuando str(exc) es vacio.
+            detail = f"{type(exc).__name__}: {exc!r}"
+            self.get_logger().error(
+                f"Fallo inesperado esperando {name}: {detail}\n"
+                f"{traceback.format_exc()}"
+            )
+            return False, f"{name}: exception {detail}", None
+
+    def _action_failure_message(self, name, wrapped):
+        """Describe un resultado fallido sin perder campos vacios de ROS."""
+        result = getattr(wrapped, "result", None)
+        goal_status = int(getattr(wrapped, "status", 0))
+        goal_status_name = _GOAL_STATUS_NAMES.get(goal_status, str(goal_status))
+        result_status = str(getattr(result, "status", "")).strip()
+        result_message = str(getattr(result, "message", "")).strip()
+        final_distance = getattr(result, "final_distance", None)
+        details = [
+            f"goal_status={goal_status_name}",
+            f"result_status={result_status or '<empty>'}",
+            f"result_message={result_message or '<empty>'}",
+        ]
+        if final_distance is not None:
+            details.append(f"final_distance={float(final_distance):.3f} m")
+
+        # Cada ActionServer publica exactamente un status topic. Dos
+        # publicadores son un protocolo ambiguo: rclpy puede aceptar la
+        # respuesta de un servidor y descartar la del goal real.
+        status_topic = f"{name}/_action/status"
+        server_count = len(self.get_publishers_info_by_topic(status_topic))
+        details.append(f"status_publishers={server_count}")
+        if server_count != 1:
+            details.append("ERROR=accion duplicada o ausente; debe haber exactamente un servidor")
+        return f"{name}: " + "; ".join(details)
 
     # =================================================================
     # Ejecucion
@@ -840,7 +888,7 @@ class ObjectGraspServer(Node):
             self.get_logger().info(msg)
             if not ok:
                 goal_handle.abort()
-                return self._result(False, "GRASP_FAILED", msg)
+                return self._result(False, "GRASP_FAILED", f"stage=APPROACH; {msg}")
 
             # DONDE PARO DE VERDAD, no donde se le pidio.
             #

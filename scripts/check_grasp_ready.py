@@ -26,7 +26,7 @@ TOPICS = (
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--timeout", type=float, default=1.0)
+    parser.add_argument("--timeout", type=float, default=0.2)
     args = parser.parse_args()
 
     rclpy.init()
@@ -41,7 +41,16 @@ def main() -> int:
         for name, action_type in clients:
             client = ActionClient(node, action_type, name)
             if client.wait_for_server(timeout_sec=args.timeout):
-                print(f"  OK    {name}")
+                status_topic = f"{name}/_action/status"
+                server_count = len(node.get_publishers_info_by_topic(status_topic))
+                if server_count == 1:
+                    print(f"  OK    {name}")
+                else:
+                    print(
+                        f"  FALTA {name}: {server_count} servidores detectados "
+                        "(se requiere exactamente uno)"
+                    )
+                    missing.append(name)
             else:
                 print(f"  FALTA {name}")
                 missing.append(name)

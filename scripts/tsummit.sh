@@ -29,6 +29,9 @@ GRASP_APPROACH_TIMEOUT="${GRASP_APPROACH_TIMEOUT:-120.0}"
 # Distancia LiDAR (m) a la que se detiene la base antes de agarrar.
 # Vacia: prepare grasp elige la parada calibrada de cada pieza.
 GRASP_STOP_DISTANCE="${GRASP_STOP_DISTANCE:-}"
+# Marca de tiempo monotona de la invocacion. Solo se informa al enviar el
+# goal: no mide busqueda, aproximacion ni movimiento del brazo.
+GRASP_COMMAND_STARTED_NS="$(date +%s%N)"
 
 # Config DDS con la que este script habla con los nodos.
 #
@@ -527,7 +530,7 @@ require_prepared_grasp() {
             "${piece}" "${table_mm}" >&2
         exit 1
     fi
-    if ! in_container 'python3 /workspace/scripts/check_grasp_ready.py --timeout 1 >/dev/null'; then
+    if ! in_container 'python3 /workspace/scripts/check_grasp_ready.py --timeout 0.2 >/dev/null'; then
         die "La infraestructura requerida no esta disponible. Repite la preparacion del portatil y de la Jetson."
     fi
 }
@@ -615,6 +618,9 @@ prepare() {
 grasp_send() {
     local piece="${1:-auto}" action="${2:-}"
     [ -n "${action}" ] || die "la accion es obligatoria: --action pick|place"
+    local elapsed_ms=$(( ($(date +%s%N) - GRASP_COMMAND_STARTED_NS) / 1000000 ))
+    printf 'Infraestructura reutilizada; inicio de mision tras %s ms.\n' \
+        "${elapsed_ms}"
     say "Enviando goal /grasp_object  (pieza: ${piece}, accion: ${action})"
     in_container "ros2 action send_goal /grasp_object \
         home_service_interfaces/action/PickPlace \
