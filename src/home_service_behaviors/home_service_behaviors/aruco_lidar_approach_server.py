@@ -755,6 +755,15 @@ class ArucoLidarApproachServer(Node):
             0.20
         )
 
+        # Tasa a la que llegan los ecos frontales del LiDAR. El lazo va
+        # a control_rate (20 Hz) pero el scan a ~8, asi que la distancia
+        # con la que se decide frenar puede estar hasta 1/8 s rancia.
+        # Entra en la compensacion de inercia (brake_target).
+        self.declare_parameter(
+            'lidar_rate_hint_hz',
+            8.0
+        )
+
         # Parada de seguridad por LiDAR frontal.
         self.declare_parameter(
             'min_front_clearance',
@@ -1927,20 +1936,28 @@ class ArucoLidarApproachServer(Node):
         arrancar cuesta cuatro lineas.
         """
         latency = self.pf('command_latency')
+        lidar_dt = 1.0 / max(1.0, self.pf('lidar_rate_hint_hz'))
 
-        for nombre, tol, suelo, unidad in (
+        for nombre, tol, suelo, unidad, extra in (
             ('heading_tolerance',
              math.radians(0.0) + self.pf('heading_tolerance'),
-             self.pf('min_heading_speed'), 'rad'),
+             self.pf('min_heading_speed'), 'rad', 0.0),
+            # La distancia lleva compensacion de inercia (brake_target),
+            # asi que el robot NO se pasa por la latencia -- pero la
+            # frenada se decide con un eco de LiDAR que puede estar
+            # lidar_dt rancio, y ESO no se compensa. Ese es el residuo.
             ('distance_tolerance',
              self.pf('distance_tolerance'),
-             self.pf('min_linear_speed'), 'm'),
+             self.pf('min_linear_speed'), 'm', lidar_dt),
             ('lateral_tolerance',
              self.pf('lateral_tolerance'),
-             self.pf('min_lateral_speed'), 'm'),
+             self.pf('min_lateral_speed'), 'm', 0.0),
         ):
 
-            parada = planner.stopping_distance(suelo, latency, period)
+            parada = suelo * (
+                lidar_dt + period if extra > 0.0
+                else latency + period
+            )
 
             if tol < parada:
 
@@ -2087,6 +2104,13 @@ class ArucoLidarApproachServer(Node):
         # Ciclos seguidos sin mando y sin llegada declarada. Ver el
         # bloque "Ni avanza ni llega" mas abajo.
         stalled = 0
+
+        # Velocidad de avance del ciclo anterior. Alimenta la
+        # compensacion de inercia de la frenada: el robot sigue
+        # avanzando ~v*(latency+period+lidar_dt) tras decidir parar, y
+        # eso es lo que le hacia pasarse 4 cm (pedir 0.15, quedarse a
+        # 0.11).
+        last_forward_speed = 0.0
 
         start_ns = (
             self.get_clock()
@@ -2654,9 +2678,23 @@ class ArucoLidarApproachServer(Node):
                 control_distance = safety_clearance
 
             if control_distance > 0.0:
+                # `lidar_dt`: los ecos frontales van a ~8 Hz y el lazo a
+                # 20, asi que la distancia con la que se decide puede
+                # llegar hasta un periodo de LiDAR rancia. Se suma a la
+                # inercia real.
+                lidar_dt = 1.0 / max(1.0, self.pf('lidar_rate_hint_hz'))
                 remaining_ctrl = min(
                     remaining,
-                    control_distance - stop_distance,
+                    planner.brake_target(
+                        control_distance,
+                        stop_distance,
+                        last_forward_speed,
+                        self.pf('command_latency'),
+                        period,
+                        sensor_period=lidar_dt,
+                        v_max=self.pf('max_linear_speed'),
+                        a_max=self.pf('linear_accel'),
+                    ),
                 )
 
             vx, vy, wz, yaw_error, reached, yaw_settled = (
@@ -2852,6 +2890,11 @@ class ArucoLidarApproachServer(Node):
                 self.get_logger().error(result.message)
 
                 return result
+
+            # Para la compensacion de inercia del proximo ciclo: la
+            # componente de AVANCE del mando, no el modulo (vy no
+            # empuja hacia el marcador).
+            last_forward_speed = vx
 
             self.publish_cmd(vx, vy, wz)
 

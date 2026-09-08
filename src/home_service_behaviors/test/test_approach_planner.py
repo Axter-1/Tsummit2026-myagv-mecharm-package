@@ -31,6 +31,7 @@ from home_service_behaviors.approach_planner import (
     stopping_distance,
     tolerance_is_reachable,
     plane_returns,
+    brake_target,
 )
 
 
@@ -768,3 +769,103 @@ def test_la_banda_puede_dejar_el_sector_vacio():
     ecos = [0.90, 0.95]
 
     assert plane_returns(ecos, expected=0.30, band=0.08) == []
+
+
+# =====================================================================
+#  Compensacion de inercia de la frenada
+#  (pedir 0.15 y quedarse a 0.11)
+# =====================================================================
+
+
+def _simular_frenada(stop_distance, latency, period, sensor_period,
+                     v_max=0.18, a_max=0.25, v_min=0.07, compensar=True):
+    """Integra una aproximacion 1-D hasta que el robot para.
+
+    El mando de velocidad surte efecto `latency + period` mas tarde, y
+    la distancia con la que se decide es `sensor_period` vieja. Devuelve
+    donde acaba el bumper respecto al plano.
+    """
+    dt = 0.01
+    pos = 0.0            # recorrido del bumper desde el arranque
+    plano = stop_distance + 0.60
+    v_actual = 0.0
+    cola = []            # (t_efecto, v_mandada)
+    medidas = []         # (t_medida, distancia) para simular el retardo del sensor
+    t = 0.0
+    v_prev = 0.0
+
+    while t < 30.0:
+        dist_real = plano - pos
+        medidas.append((t, dist_real))
+        # distancia que ve el control: la de hace sensor_period
+        vista = dist_real
+        for tm, d in medidas:
+            if tm <= t - sensor_period:
+                vista = d
+        if compensar:
+            objetivo = brake_target(vista, stop_distance, v_prev,
+                                    latency, period, sensor_period,
+                                    v_max=v_max, a_max=a_max)
+        else:
+            objetivo = vista - stop_distance
+        v_cmd = profile_speed(objetivo, v_max, a_max, v_min=v_min,
+                              tolerance=0.0, stop_margin=0.0)
+        v_prev = v_cmd
+        cola.append((t + latency + period, v_cmd))
+        for te, vv in cola:
+            if te <= t:
+                v_actual = vv
+        pos += v_actual * dt
+        t += dt
+        if v_actual == 0.0 and v_cmd == 0.0 and t > latency + period + 0.2:
+            break
+
+    return (plano - pos) - stop_distance      # + se queda corto, - se pasa
+
+
+def test_sin_compensacion_se_pasa():
+    """Reproduce el sintoma: pedir 0.15 y plantarse a ~0.11."""
+    err = _simular_frenada(0.15, latency=0.20, period=0.05,
+                           sensor_period=0.125, compensar=False)
+    # se pasa de largo entre 3 y 6 cm
+    assert err < -0.025, f'error {err*1000:.0f} mm (esperaba pasarse)'
+
+
+def test_con_compensacion_llega():
+    """Con brake_target el bumper cae dentro de distance_tolerance.
+
+    El sesgo es a quedarse LIGERAMENTE corto (mas despeje), que es el
+    lado seguro para no chocar y para que el brazo alcance. Lo que no
+    puede es pasarse: eso es lo que rompia el agarre y disparaba
+    STALLED.
+    """
+    for pedido in (0.15, 0.20, 0.30):
+        err = _simular_frenada(pedido, latency=0.20, period=0.05,
+                               sensor_period=0.125, compensar=True)
+        assert -0.012 < err < 0.028, f'pedido {pedido}: error {err*1000:.0f} mm'
+
+
+def test_compensacion_robusta_a_la_latencia():
+    """Aunque la latencia real sea la mitad de la supuesta, no choca ni
+    se queda absurdamente corto."""
+    for lat_real in (0.05, 0.10, 0.20, 0.30):
+        err = _simular_frenada(0.15, latency=0.20, period=0.05,
+                               sensor_period=0.125, compensar=True)
+        # nunca se pasa mas de 2 cm; si sobra compensacion, corto pero < 8 cm
+        assert err > -0.02
+        assert err < 0.08
+
+
+def test_brake_target_nunca_negativo_es_parar():
+    """Si la compensacion da negativo, profile_speed devuelve 0."""
+    bt = brake_target(0.16, 0.15, speed=0.15, latency=0.20, period=0.05,
+                      sensor_period=0.125, v_max=0.18, a_max=0.25)
+    assert bt < 0.0
+    assert profile_speed(bt, 0.18, 0.25, v_min=0.07) == 0.0
+
+
+def test_brake_target_sin_velocidad_es_la_resta_de_siempre():
+    """Parado, la compensacion no cambia nada: control - objetivo."""
+    # Parado y sin rampa de referencia -> la resta de siempre.
+    assert brake_target(0.40, 0.15, speed=0.0, latency=0.20,
+                        period=0.05, sensor_period=0.125) == 0.25

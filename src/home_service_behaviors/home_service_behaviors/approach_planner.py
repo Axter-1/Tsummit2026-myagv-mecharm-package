@@ -471,6 +471,47 @@ def tolerance_is_reachable(tolerance, floor_speed, latency, period):
     return tolerance >= stopping_distance(floor_speed, latency, period)
 
 
+def brake_target(control_distance, stop_distance, speed, latency, period,
+                 sensor_period=0.0, v_max=0.0, a_max=0.0):
+    """Distancia que hay que meterle a la rampa de frenado, ya con la
+    inercia del sistema descontada.
+
+    La rampa v=sqrt(2*a*d) apunta a v=0 EXACTAMENTE en d=0, como si el
+    robot frenara en el instante en que se decide. No es asi:
+
+      * el mando tarda `latency` en llegar (tuberia serie + red),
+      * el ciclo en curso dura `period` mas,
+      * la distancia con la que se decide viene de un sensor que se
+        refresca cada `sensor_period` (LiDAR ~8 Hz, lazo a 20),
+      * y por ese mismo retardo el robot AHORA se mueve a la velocidad
+        que se mando hace `latency+period`, mas alta que la de este
+        ciclo.
+
+    Sumado, el robot sigue avanzando bastante DESPUES de decidir.
+    Medido en pista: pidiendo 0.15 m se plantaba a ~0.11, 4 cm de mas.
+
+    Como velocidad de coast se toma la MAYOR entre la mandada este
+    ciclo y la que pide la rampa a la distancia actual: esa segunda es
+    la que el robot lleva de verdad por culpa del retardo, y usar solo
+    la primera dejaba un residuo de ~1 cm.
+
+    Restarlo hace que el control mande cero ese trozo ANTES y el robot
+    deriva al sitio correcto en vez de pasarse. Autocorrector: si sobra
+    compensacion se queda corto y el suelo de velocidad lo empuja el
+    ultimo centimetro; si falta, el error es pequeño.
+    """
+    d = control_distance - stop_distance
+
+    v_coast = abs(speed)
+    if a_max > 0.0 and d > 0.0:
+        v_ramp = math.sqrt(2.0 * a_max * d)
+        if v_max > 0.0:
+            v_ramp = min(v_ramp, v_max)
+        v_coast = max(v_coast, v_ramp)
+
+    return d - v_coast * (latency + period + sensor_period)
+
+
 def profile_speed(
     remaining, v_max, a_max,
     v_min=0.0,
