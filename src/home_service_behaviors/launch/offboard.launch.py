@@ -73,6 +73,10 @@ def generate_launch_description():
         DeclareLaunchArgument('grasp_enable_arm', default_value='true'),
         DeclareLaunchArgument('grasp_enable_approach', default_value='true'),
         DeclareLaunchArgument('table_height_mm', default_value='100'),
+        DeclareLaunchArgument(
+            'search_angular_speed', default_value='0.27',
+            description='Velocidad moderada del paso de busqueda (rad/s).',
+        ),
         # foxglove_bridge AQUI, no en la Jetson: en la Nano se comia CPU
         # serializando cada topic a CBOR, y mirar /aruco/image_annotated
         # (Image cruda que publica ESTA maquina) mandaba el frame de
@@ -84,9 +88,10 @@ def generate_launch_description():
         # mueve el robot. Calibrar (2 min, ver HANDOFF_OFFBOARD.md); por
         # debajo de esto el mando se publica y las ruedas no giran.
         DeclareLaunchArgument('min_lateral_speed', default_value='0.035'),
-        DeclareLaunchArgument('min_linear_speed', default_value='0.05'),
+        DeclareLaunchArgument('min_linear_speed', default_value='0.07'),
         DeclareLaunchArgument('max_linear_speed', default_value='0.09'),
         DeclareLaunchArgument('use_lidar_normal', default_value='false'),
+        DeclareLaunchArgument('min_chassis_clearance', default_value='0.08'),
         # Aproximacion con punto de encare y carrot. Ver
         # home_service_behaviors/approach_planner.py.
         DeclareLaunchArgument(
@@ -122,17 +127,12 @@ def generate_launch_description():
             description='Compensa el avance que queda por latencia y suelo '
                         'de velocidad; no modifica la distancia reportada.',
         ),
-        # Las dos calibraciones que decidieron la prueba del 6 de
-        # septiembre. Van aqui, no en la Jetson: el detector y el
-        # servidor de aproximacion corren en ESTA maquina, asi que
-        # marker_length y lidar_to_front_bumper_m se cambian aqui.
+        # El detector y el servidor de aproximacion corren en esta maquina.
         DeclareLaunchArgument(
             'lidar_to_front_bumper_m',
             default_value='0.09',
-            description='Del sensor LiDAR al borde delantero, '
-                        'medido sobre el robot. Entra directo en el '
-                        'criterio de llegada y en el ancho maximo del '
-                        'pasillo.',
+            description='Alias legado para geometria del pasillo; la '
+                        'seguridad usa TF laser->base_link y footprint.',
         ),
         DeclareLaunchArgument(
             'blind_endgame_distance',
@@ -159,6 +159,19 @@ def generate_launch_description():
                         'la expectativa sale de la camara, y con la '
                         'camara mal escalada rechaza el eco bueno.',
         ),
+        DeclareLaunchArgument('final_slow_distance', default_value='0.30'),
+        DeclareLaunchArgument('final_max_linear_speed', default_value='0.07'),
+        DeclareLaunchArgument('final_max_lateral_speed', default_value='0.035'),
+        DeclareLaunchArgument('final_max_angular_speed', default_value='0.37'),
+        DeclareLaunchArgument('final_distance_tolerance', default_value='0.020'),
+        DeclareLaunchArgument(
+            'final_linear_velocity_tolerance', default_value='0.015'
+        ),
+        DeclareLaunchArgument(
+            'final_angular_velocity_tolerance', default_value='0.03'
+        ),
+        DeclareLaunchArgument('command_latency', default_value='0.27'),
+        DeclareLaunchArgument('lidar_rate_hint_hz', default_value='8.0'),
     ]
 
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -208,6 +221,9 @@ def generate_launch_description():
             'detection_timeout': 0.8,
             'scan_timeout': 0.8,
             'control_rate': 20.0,
+            'search_angular_speed': ParameterValue(
+                LaunchConfiguration('search_angular_speed'), value_type=float
+            ),
             'min_lateral_speed': ParameterValue(
                 LaunchConfiguration('min_lateral_speed'),
                 value_type=float,
@@ -251,6 +267,39 @@ def generate_launch_description():
             'lidar_front_depth_band': ParameterValue(
                 LaunchConfiguration('lidar_front_depth_band'),
                 value_type=float,
+            ),
+            'min_chassis_clearance': ParameterValue(
+                LaunchConfiguration('min_chassis_clearance'),
+                value_type=float,
+            ),
+            'final_slow_distance': ParameterValue(
+                LaunchConfiguration('final_slow_distance'), value_type=float
+            ),
+            'final_max_linear_speed': ParameterValue(
+                LaunchConfiguration('final_max_linear_speed'), value_type=float
+            ),
+            'final_max_lateral_speed': ParameterValue(
+                LaunchConfiguration('final_max_lateral_speed'), value_type=float
+            ),
+            'final_max_angular_speed': ParameterValue(
+                LaunchConfiguration('final_max_angular_speed'), value_type=float
+            ),
+            'final_distance_tolerance': ParameterValue(
+                LaunchConfiguration('final_distance_tolerance'), value_type=float
+            ),
+            'final_linear_velocity_tolerance': ParameterValue(
+                LaunchConfiguration('final_linear_velocity_tolerance'),
+                value_type=float,
+            ),
+            'final_angular_velocity_tolerance': ParameterValue(
+                LaunchConfiguration('final_angular_velocity_tolerance'),
+                value_type=float,
+            ),
+            'command_latency': ParameterValue(
+                LaunchConfiguration('command_latency'), value_type=float
+            ),
+            'lidar_rate_hint_hz': ParameterValue(
+                LaunchConfiguration('lidar_rate_hint_hz'), value_type=float
             ),
             'blind_endgame_distance': ParameterValue(
                 LaunchConfiguration('blind_endgame_distance'),

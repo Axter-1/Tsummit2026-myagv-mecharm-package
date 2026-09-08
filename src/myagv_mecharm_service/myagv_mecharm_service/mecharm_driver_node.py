@@ -1783,7 +1783,17 @@ class MechArmDriver(Node):
 
         self._feedback_pp(goal_handle, "DESCEND")
         outcome = self._move_taught_angles(goal_handle, target, speed)
-        if not self._handle_outcome(outcome, goal_handle, result, "DESCEND"):
+        if outcome != "ok":
+            if operation == "pick" and waypoints:
+                # El error de seguimiento durante el descenso es la unica
+                # señal disponible de contacto prematuro. Volver al ultimo
+                # preagarre evita dejar la muñeca cargando contra la pieza.
+                self.get_logger().warn(
+                    "DESCEND no completo; retirando al ultimo preagarre "
+                    "antes de abortar el agarre."
+                )
+                self._move_taught_angles(goal_handle, waypoints[-1], speed)
+            self._handle_outcome(outcome, goal_handle, result, "DESCEND")
             return outcome
 
         self._feedback_pp(goal_handle, "GRIP")
@@ -1877,7 +1887,12 @@ class MechArmDriver(Node):
             return True  # sin lectura fiable, no penalizamos
         if not isinstance(value, (int, float)) or value < 0:
             return True
-        return value > closed_value + 3
+        held = value > closed_value + 3
+        self.get_logger().info(
+            f"Verificacion de agarre: cierre pedido={closed_value}, "
+            f"lectura={value}, pieza_detectada={held}"
+        )
+        return held
 
     def _fault(self, goal_handle, result, phase):
         result.success = False

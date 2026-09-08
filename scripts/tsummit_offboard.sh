@@ -28,6 +28,7 @@
 #      # 2. arrancar el procesamiento
 #      ROBOT_IP=192.168.43.10 LAPTOP_IP=192.168.43.20 \
 #          ./scripts/tsummit_offboard.sh run
+#      #    `prepare` es un alias explicito de `run` para la pila persistente.
 #
 #      # imprimir los exports para usar ros2 a mano en otra terminal
 #      eval "$(ROBOT_IP=... LAPTOP_IP=... ./scripts/tsummit_offboard.sh env)"
@@ -355,6 +356,12 @@ run() {
     exec ros2 launch home_service_behaviors offboard.launch.py "${args[@]}"
 }
 
+# Alias semantico: en el portatil `prepare` es la mitad externa de la misma
+# preparacion que `run` en la Jetson. Se mantiene `run` como nombre original.
+prepare() {
+    run "$@"
+}
+
 # Informe de calidad de la normal de un ArUco: dice si la alineacion
 # perpendicular es viable con esta camara y este marcador, o si su rumbo
 # es ruido. No mueve el robot. Requiere el marcador a la vista y 'run'
@@ -461,6 +468,7 @@ case "${1:-help}" in
     check)  check ;;
     bundle) shift; bundle "${1:-/tmp/tsummit_offboard.tar.gz}" ;;
     run)    shift; run "$@" ;;
+    prepare|preparar) shift; prepare "$@" ;;
     env)    print_env ;;
     approach) shift; approach "$@" ;;
     viz)    viz ;;
@@ -468,5 +476,5 @@ case "${1:-help}" in
     help|-h|--help)
         sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         ;;
-    *) die "comando desconocido: $1  (check | run | viz | analyze | approach | bundle | env | help)" ;;
+    *) die "comando desconocido: $1  (check | run | prepare | viz | analyze | approach | bundle | env | help)" ;;
 esac

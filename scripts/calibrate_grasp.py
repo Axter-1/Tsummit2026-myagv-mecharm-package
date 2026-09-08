@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Ensena las tres poses cartesianas de agarre de una pieza, POR ALTURA
-de plataforma.
+"""Ensena las tres poses de una accion (pick/place), POR ALTURA de plataforma.
 
 Cada objeto se agarra distinto segun la altura de la mesa donde esta
 apoyado. Este script reutiliza la pose global ``home`` existente y despues
@@ -12,14 +11,18 @@ de ``poses.yaml`` antes de calibrar la pieza.
   calibrations:
     <objeto>:
       "<altura_mm>":
-        intermediate_coords: [X,Y,Z,RX,RY,RZ]
-        pregrasp_coords:     [X,Y,Z,RX,RY,RZ]
-        contact_coords:      [X,Y,Z,RX,RY,RZ]
-        intermediate_joint_angles: [...]  # diagnostico/respaldo
-        pregrasp_joint_angles:     [...]  # diagnostico/respaldo
-        contact_joint_angles:      [...]  # diagnostico/respaldo
-        table_height_mm: <altura_mm>
-        calibrated_at: ...
+        pick:  # o place; ambos pueden coexistir
+          intermediate_coords: [X,Y,Z,RX,RY,RZ]
+          pregrasp_coords:     [X,Y,Z,RX,RY,RZ]
+          contact_coords:      [X,Y,Z,RX,RY,RZ]
+          intermediate_joint_angles: [...]  # diagnostico/respaldo
+          pregrasp_joint_angles:     [...]  # diagnostico/respaldo
+          contact_joint_angles:      [...]  # diagnostico/respaldo
+          table_height_mm: <altura_mm>
+          operation: pick
+          frame_id: base_link
+          gripper: {open_value: 0, close_value: 0, speed_percent: 0}
+          calibrated_at: ...
 
 No toca grasp_catalog.yaml. El object_grasp_server elige la altura con
 el parametro 'table_height_mm'.
@@ -27,22 +30,17 @@ el parametro 'table_height_mm'.
 Uso dentro del contenedor, con mecharm_driver_node detenido
 (scripts/tsummit.sh stop, o mata mecharm_driver_node):
 
-  # 4 objetos x 2 alturas = 8 corridas
-  python3 /workspace/scripts/calibrate_grasp.py poste     100
-  python3 /workspace/scripts/calibrate_grasp.py poste     200
-  python3 /workspace/scripts/calibrate_grasp.py engranaje 100
-  python3 /workspace/scripts/calibrate_grasp.py engranaje 200
-  python3 /workspace/scripts/calibrate_grasp.py rueda     100
-  python3 /workspace/scripts/calibrate_grasp.py rueda     200
-  python3 /workspace/scripts/calibrate_grasp.py estrella  100
-  python3 /workspace/scripts/calibrate_grasp.py estrella  200
-  python3 /workspace/scripts/calibrate_grasp.py poste 100 --capture-global-poses
+  python3 /workspace/scripts/calibrate_grasp.py poste 100 --action pick
+  python3 /workspace/scripts/calibrate_grasp.py rueda 100 --action place
+  python3 /workspace/scripts/calibrate_grasp.py poste 100 --action pick \
+      --capture-global-poses
+  python3 /workspace/scripts/calibrate_grasp.py --menu
 """
 
 import argparse
 import datetime as dt
 import os
-import sys
+import shutil
 import tempfile
 import time
 
@@ -51,8 +49,7 @@ import yaml
 try:
     from pymycobot.mecharm270 import MechArm270
 except ImportError:
-    print("ERROR: falta pymycobot.")
-    sys.exit(1)
+    MechArm270 = None
 
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -251,6 +248,8 @@ def save_pose(path, name, angles):
                 default_flow_style=True,
                 sort_keys=False,
             )
+        if os.path.isfile(path):
+            shutil.copy2(path, path + ".bak")
         os.replace(temporary, path)
         os.chmod(path, 0o664)
     except Exception:
@@ -265,7 +264,7 @@ def _looks_flat(entry):
     )
 
 
-def save_calibration(path, object_name, height_mm, calibration):
+def save_calibration(path, object_name, height_mm, calibration, action="pick"):
     data = {"calibrations": {}}
     if os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as handle:
@@ -285,7 +284,25 @@ def save_calibration(path, object_name, height_mm, calibration):
     elif not isinstance(entry, dict):
         calibrations[object_name] = {}
 
-    calibrations[object_name][str(height_mm)] = calibration
+    calibration = dict(calibration)
+    calibration["operation"] = action
+    height_key = str(height_mm)
+    existing = calibrations[object_name].get(height_key)
+    if isinstance(existing, dict) and _looks_flat(existing):
+        if action == "pick":
+            calibrations[object_name][height_key] = calibration
+        else:
+            calibrations[object_name][height_key] = {
+                "pick": existing,
+                "place": calibration,
+            }
+    elif isinstance(existing, dict):
+        # Formato por accion: conserva pick/place independientes.
+        entry = dict(existing)
+        entry[action] = calibration
+        calibrations[object_name][height_key] = entry
+    else:
+        calibrations[object_name][height_key] = calibration
 
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
@@ -293,6 +310,8 @@ def save_calibration(path, object_name, height_mm, calibration):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             yaml.safe_dump(data, handle, allow_unicode=False, sort_keys=False)
+        if os.path.isfile(path):
+            shutil.copy2(path, path + ".bak")
         os.replace(temporary, path)
         # El script corre como root dentro del contenedor. Dejar el YAML
         # legible y editable desde el host permite revisarlo y subirlo a Git.
@@ -302,16 +321,161 @@ def save_calibration(path, object_name, height_mm, calibration):
         raise
 
 
+def load_calibrations(path):
+    if not os.path.isfile(path):
+        return {"calibrations": {}}
+    with open(path, "r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data.get("calibrations", {}), dict):
+        raise RuntimeError("'calibrations' debe ser un mapa")
+    return data
+
+
+def save_yaml(path, data):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".grasp_menu_", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(data, handle, allow_unicode=False, sort_keys=False)
+        if os.path.isfile(path):
+            shutil.copy2(path, path + ".bak")
+        os.replace(temporary, path)
+        os.chmod(path, 0o664)
+    except Exception:
+        os.unlink(temporary)
+        raise
+
+
+def menu_records(data):
+    records = []
+    for object_name, heights in (data.get("calibrations", {}) or {}).items():
+        if not isinstance(heights, dict):
+            continue
+        for height, entry in heights.items():
+            if not isinstance(entry, dict):
+                continue
+            if _looks_flat(entry):
+                records.append((str(object_name), str(height), "pick", entry))
+            else:
+                for action in ("pick", "place"):
+                    if isinstance(entry.get(action), dict):
+                        records.append((str(object_name), str(height), action,
+                                        entry[action]))
+    return records
+
+
+def choose_record(records):
+    if not records:
+        print("No hay calibraciones guardadas.")
+        return None
+    for index, (obj, height, action, _) in enumerate(records, start=1):
+        print(f"  {index}. {obj} / {action} / {height} mm")
+    try:
+        selected = int(input("Selecciona numero (0 cancela): "))
+    except ValueError:
+        return None
+    if selected <= 0 or selected > len(records):
+        return None
+    return records[selected - 1]
+
+
+def calibration_menu(path, poses_path, port, baud, speed):
+    """Menu de mantenimiento de calibraciones, sin editar YAML a mano."""
+    del poses_path
+    while True:
+        data = load_calibrations(path)
+        records = menu_records(data)
+        print("\n== CALIBRACIONES ==")
+        print("  l) listar   v) ver   e) editar   r) recapturar   d) eliminar   q) salir")
+        choice = input("Opcion: ").strip().lower()
+        if choice in ("q", "quit", "salir"):
+            return
+        if choice in ("l", "listar"):
+            for index, (obj, height, action, entry) in enumerate(records, 1):
+                stamp = entry.get("calibrated_at", "sin fecha")
+                print(f"  {index}. {obj} / {action} / {height} mm ({stamp})")
+            continue
+        selected = choose_record(records)
+        if selected is None:
+            continue
+        object_name, height, action, entry = selected
+        if choice in ("v", "ver"):
+            print(yaml.safe_dump(entry, allow_unicode=False, sort_keys=False))
+        elif choice in ("e", "editar"):
+            stage = input("Etapa (intermedio/preagarre/contacto): ").strip()
+            if stage not in SEGMENTS:
+                print("Etapa invalida.")
+                continue
+            kind = input("Representacion (joints/coords) [joints]: ").strip().lower()
+            if kind not in ("", "joints", "coords"):
+                print("Representacion invalida.")
+                continue
+            kind = kind or "joints"
+            key = SEGMENT_KEY[stage] if kind == "joints" else COORD_SEGMENT_KEY[stage]
+            raw = input(f"Valores actuales {entry.get(key)}; nuevos 6 numeros: ")
+            try:
+                values = [float(value) for value in raw.replace(",", " ").split()]
+                if len(values) != 6:
+                    raise ValueError
+                if kind == "joints":
+                    validate(values)
+            except ValueError:
+                print("Valores invalidos o fuera de limites.")
+                continue
+            entry[key] = [round(value, 2) for value in values]
+            save_yaml(path, data)
+            print(f"Posicion {kind} actualizada.")
+        elif choice in ("d", "eliminar"):
+            if input(f"Escribe ELIMINAR para borrar {object_name}/{action}/{height}: ") != "ELIMINAR":
+                continue
+            heights = data["calibrations"][object_name]
+            height_entry = heights[height]
+            if _looks_flat(height_entry):
+                del heights[height]
+            else:
+                del height_entry[action]
+                if not height_entry:
+                    del heights[height]
+            if not heights:
+                del data["calibrations"][object_name]
+            save_yaml(path, data)
+            print("Calibracion eliminada.")
+        elif choice in ("r", "recapturar"):
+            if MechArm270 is None:
+                print("No se puede recapturar: falta pymycobot.")
+                continue
+            stage = input("Etapa (intermedio/preagarre/contacto): ").strip()
+            if stage not in SEGMENTS:
+                print("Etapa invalida.")
+                continue
+            input("Area despejada. Pulsa ENTER para abrir el brazo... ")
+            arm = MechArm270(port, baud)
+            arm.power_on()
+            angles, coords = capture(arm, stage, include_coords=True)
+            entry[SEGMENT_KEY[stage]] = angles
+            entry[COORD_SEGMENT_KEY[stage]] = coords
+            entry["calibrated_at"] = dt.datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
+            save_yaml(path, data)
+            print("Posicion recapturada y guardada.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("object", choices=OBJECTS)
+    parser.add_argument("object", nargs="?", choices=OBJECTS)
+    parser.add_argument("table_mm", nargs="?", type=int)
     parser.add_argument(
-        "table_mm",
-        type=int,
-        help="altura de la plataforma en mm (100 o 200)",
+        "--action", choices=("pick", "place"),
+        help="accion que se calibrara; obligatoria fuera del menu",
+    )
+    parser.add_argument(
+        "--menu", action="store_true",
+        help="gestiona calibraciones existentes sin editar YAML a mano",
     )
     parser.add_argument(
         "--force-height",
@@ -321,6 +485,9 @@ def main():
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--speed", type=int, default=20)
+    parser.add_argument("--gripper-open-value", type=int, default=0)
+    parser.add_argument("--gripper-close-value", type=int, default=0)
+    parser.add_argument("--gripper-speed-percent", type=float, default=0.0)
     parser.add_argument(
         "--capture-global-poses",
         action="store_true",
@@ -341,6 +508,13 @@ def main():
     parser.add_argument("--poses", default=DEFAULT_POSES)
     args = parser.parse_args()
 
+    if args.menu:
+        calibration_menu(args.calibrations, args.poses, args.port, args.baud,
+                         args.speed)
+        return
+    if args.object is None or args.table_mm is None or args.action is None:
+        parser.error("object, table_mm y --action pick|place son obligatorios")
+
     if args.table_mm <= 0:
         parser.error("table_mm debe ser positivo (mm)")
     if args.table_mm not in KNOWN_HEIGHTS and not args.force_height:
@@ -349,6 +523,9 @@ def main():
             f"{', '.join(str(h) for h in KNOWN_HEIGHTS)}). Usa "
             f"--force-height si es a proposito."
         )
+
+    if MechArm270 is None:
+        parser.error("falta pymycobot; solo el menu de lectura no lo necesita")
 
     print(
         f"\n== CALIBRACION: {args.object.upper()} sobre plataforma de "
@@ -410,8 +587,16 @@ def main():
         "initial_pose_name": "home",
         "carry_pose": "carry" if "carry" in captured_global else "home",
         "calibrated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "frame_id": "base_link",
+        "gripper": {
+            "open_value": args.gripper_open_value,
+            "close_value": args.gripper_close_value,
+            "speed_percent": args.gripper_speed_percent,
+        },
     }
-    save_calibration(args.calibrations, args.object, args.table_mm, calibration)
+    save_calibration(
+        args.calibrations, args.object, args.table_mm, calibration, args.action
+    )
     print(
         f"\nCalibracion de '{args.object}' a {args.table_mm} mm guardada en "
         f"{args.calibrations}."

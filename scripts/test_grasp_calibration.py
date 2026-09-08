@@ -40,7 +40,7 @@ COORD_KEYS = (
 )
 
 
-def load_calibration(path, object_name, table_mm):
+def load_calibration(path, object_name, table_mm, action="pick"):
     if not os.path.isfile(path):
         raise RuntimeError(f"no existe el archivo de calibraciones: {path}")
     with open(path, "r", encoding="utf-8") as handle:
@@ -51,6 +51,12 @@ def load_calibration(path, object_name, table_mm):
 
     if not any(key in calibration for key in POSE_KEYS):
         calibration = calibration.get(str(table_mm))
+    if (
+        isinstance(calibration, dict)
+        and action in calibration
+        and not any(key in calibration for key in POSE_KEYS)
+    ):
+        calibration = calibration[action]
     if not isinstance(calibration, dict):
         raise RuntimeError(
             f"no hay calibracion de '{object_name}' para {table_mm} mm"
@@ -115,11 +121,12 @@ def main():
         "object", choices=("engranaje", "poste", "rueda", "estrella")
     )
     parser.add_argument("table_mm", type=int)
+    parser.add_argument("--action", choices=("pick", "place"), default="pick")
     parser.add_argument("--calibrations", default=DEFAULT_CALIBRATIONS)
     args = parser.parse_args()
 
     calibration_mode, calibration_poses = load_calibration(
-        args.calibrations, args.object, args.table_mm
+        args.calibrations, args.object, args.table_mm, args.action
     )
     intermediate, pregrasp, contact = calibration_poses
     rclpy.init()

@@ -38,7 +38,9 @@ def generate_launch_description():
         'action_name': '/aruco_lidar_approach',
         'odom_frame': 'odom',
 
-        'search_angular_speed': 0.22,
+        # Incremento pequeno respecto de 0.22 rad/s: con el dwell de 0.70 s
+        # aun quedan varios frames estables de la camara entre pasos.
+        'search_angular_speed': 0.27,
 
         'lock_duration': 0.50,
         'lock_min_samples': 5,

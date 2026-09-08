@@ -484,6 +484,38 @@ def stopping_distance(speed, latency, period):
     return abs(speed) * (latency + period)
 
 
+def ray_polygon_exit_distance(origin, direction, polygon):
+    """Distancia hasta que un rayo sale de un footprint convexo.
+
+    ``origin`` y ``polygon`` estan en el mismo frame. ``direction`` debe
+    ser unitario. El rayo empieza dentro del footprint (el sensor esta
+    montado dentro del chasis) y se usa para convertir un eco LiDAR en el
+    despeje desde el borde real del robot, sin asumir que el sensor mira
+    exactamente hacia +X.
+    """
+    ox, oy = origin
+    dx, dy = direction
+    if not polygon or len(polygon) < 3:
+        return None
+
+    best = None
+    for index, (x2, y2) in enumerate(polygon):
+        x1, y1 = polygon[index - 1]
+        ex = x2 - x1
+        ey = y2 - y1
+        cross = dx * ey - dy * ex
+        if abs(cross) < 1e-9:
+            continue
+        rx = x1 - ox
+        ry = y1 - oy
+        distance = (rx * ey - ry * ex) / cross
+        edge_fraction = (rx * dy - ry * dx) / cross
+        if distance >= -1e-9 and -1e-9 <= edge_fraction <= 1.0 + 1e-9:
+            if best is None or distance < best:
+                best = max(0.0, distance)
+    return best
+
+
 def tolerance_is_reachable(tolerance, floor_speed, latency, period):
     """La tolerancia, es alcanzable con este suelo y este retardo?"""
     return tolerance >= stopping_distance(floor_speed, latency, period)

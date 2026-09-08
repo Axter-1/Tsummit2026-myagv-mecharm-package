@@ -31,7 +31,7 @@ Accion ``/grasp_object``, tipo home_service_interfaces/action/PickPlace
 (se reutiliza el tipo existente para no anadir interfaces nuevas, que en
 la Nano obligan a recompilar rosidl). Los campos se interpretan asi:
 
-    operation         "pick" (unico soportado por ahora)
+    operation         "pick" o "place"
     target_pose_name  clave del catalogo ("engranaje"|"poste"|"rueda")
                       o "auto" -> se deduce del ArUco que se vea
     target_coords     [x, y, z] mm opcional. Si va vacio, se calcula a
@@ -93,6 +93,7 @@ class GraspSpec:
             raw.get("require_calibrated_target", False)
         )
         self.execution_mode = str(raw.get("execution_mode", "coords")).strip().lower()
+        self.frame_id = str(raw.get("frame_id", "base_link")).strip()
 
         self.target_coords = None
         raw_target = raw.get(
@@ -155,10 +156,33 @@ class GraspSpec:
         self.gripper_protect_current = int(raw.get(
             "gripper_protect_current", gripper_cfg.get("protect_current", 0)
         ))
+        gripper_override = raw.get("gripper", {}) or {}
+        self.open_value_override = gripper_override.get("open_value")
+        self.close_value_override = gripper_override.get("close_value")
+        self.speed_override = gripper_override.get("speed_percent")
+        if (
+            self.open_value_override is not None
+            and float(self.open_value_override) <= 0
+        ):
+            self.open_value_override = None
+        if (
+            self.close_value_override is not None
+            and float(self.close_value_override) <= 0
+        ):
+            self.close_value_override = None
+        if (
+            self.speed_override is not None
+            and float(self.speed_override) <= 0
+        ):
+            self.speed_override = None
 
         # Comprobaciones que atrapan una edicion mala del YAML antes de
         # que el brazo intente algo imposible.
         problems = []
+        if self.frame_id not in ("base_link", ""):
+            problems.append(
+                f"frame_id='{self.frame_id}' no soportado; se requiere base_link"
+            )
         if self.execution_mode not in ("coords", "joints"):
             problems.append("execution_mode debe ser 'coords' o 'joints'")
         if raw_target is not None:
@@ -228,10 +252,18 @@ class GraspSpec:
                         problems.append(
                             f"approach_joint_waypoints[{index}] contiene un valor no numerico"
                         )
-        if self.require_calibrated_target and self.target_coords is None:
-            problems.append("requiere target_coords ensenadas antes de usar el brazo")
-        if self.require_calibrated_target and self.pregrasp_coords is None:
-            problems.append("requiere pregrasp_coords ensenadas antes de usar el brazo")
+        if self.require_calibrated_target:
+            if self.target_coords is None and self.target_joint_angles is None:
+                problems.append(
+                    "requiere target_coords o target_joint_angles ensenadas"
+                )
+            if self.target_coords is not None and self.pregrasp_coords is None:
+                problems.append("requiere pregrasp_coords ensenadas")
+            if (
+                self.target_joint_angles is not None
+                and not self.approach_joint_waypoints
+            ):
+                problems.append("requiere waypoints articulares ensenados")
         if self.span_mm > stroke:
             problems.append(
                 f"span_mm={self.span_mm:.1f} supera el recorrido de la "
@@ -259,10 +291,14 @@ class GraspSpec:
 
     @property
     def open_value(self):
+        if self.open_value_override is not None:
+            return int(clamp(float(self.open_value_override), 0.0, 100.0))
         return self.mm_to_value(self.open_mm)
 
     @property
     def close_value(self):
+        if self.close_value_override is not None:
+            return int(clamp(float(self.close_value_override), 0.0, 100.0))
         return self.mm_to_value(self.close_mm)
 
     @property
@@ -463,17 +499,9 @@ class ObjectGraspServer(Node):
             )
             return calibration[wanted]
 
-        if len(calibration) == 1:
-            only = next(iter(calibration))
-            self.get_logger().warn(
-                f"Calibracion de '{key}': no hay entrada para {wanted} mm; "
-                f"se usa la unica disponible ({only} mm)."
-            )
-            return calibration[only]
-
         self.get_logger().error(
             f"Calibracion de '{key}': no hay entrada para {wanted} mm "
-            f"(disponibles: {sorted(calibration)}). Pieza sin calibrar."
+            f"(disponibles: {sorted(calibration)}). No se elige otra altura."
         )
         return None
 
@@ -529,22 +557,9 @@ class ObjectGraspServer(Node):
                     f"'{calibration_path}': {exc}"
                 )
 
+        self.calibrations = calibrations
+
         objects = cat.get("objects", {}) or {}
-        for key, calibration in calibrations.items():
-            if key not in objects:
-                self.get_logger().warn(
-                    f"Calibracion para pieza desconocida '{key}': ignorada."
-                )
-                continue
-            if not isinstance(calibration, dict):
-                self.get_logger().warn(
-                    f"Calibracion de '{key}' no es un mapa: ignorada."
-                )
-                continue
-            resolved = self._resolve_calibration_height(key, calibration)
-            if resolved is not None:
-                objects[key] = {**objects[key], **resolved}
-        cat["objects"] = objects
         gripper = cat.get("gripper", {})
         self.table_z_mm = float(cat.get("table_z_mm", 0.0))
         self.max_reach_mm = float(cat.get("max_reach_mm", 250.0))
@@ -562,12 +577,23 @@ class ObjectGraspServer(Node):
             int(k): str(v) for k, v in (cat.get("aruco_to_object", {}) or {}).items()
         }
 
-        self.specs = {}
-        for key, raw in (cat.get("objects", {}) or {}).items():
-            spec = GraspSpec(str(key), raw, gripper, self.table_z_mm)
-            for problem in spec.problems:
-                self.get_logger().error(f"catalogo[{key}]: {problem}")
-            self.specs[str(key)] = spec
+        self.base_objects = objects
+        self.specs_by_operation = {"pick": {}, "place": {}}
+        for key in objects:
+            for operation in self.specs_by_operation:
+                raw = self._raw_for_operation(key, operation)
+                if raw is None:
+                    continue
+                spec = GraspSpec(str(key), raw, gripper, self.table_z_mm)
+                for problem in spec.problems:
+                    self.get_logger().error(
+                        f"catalogo[{key}/{operation}]: {problem}"
+                    )
+                self.specs_by_operation[operation][str(key)] = spec
+
+        # Compatibilidad con el resto del nodo, que historicamente usaba
+        # self.specs para las tomas.
+        self.specs = self.specs_by_operation["pick"]
 
         if not self.specs:
             raise RuntimeError("El catalogo no define ninguna pieza.")
@@ -584,6 +610,35 @@ class ObjectGraspServer(Node):
             )
 
         self.get_logger().info(f"Catalogo cargado de {path}")
+
+    def _raw_for_operation(self, key, operation):
+        """Combina catalogo y calibracion de una accion concreta.
+
+        El formato antiguo (objeto -> altura -> hoja) se interpreta como
+        ``pick``. El formato nuevo permite objeto -> altura -> pick/place,
+        sin sobrescribir la calibracion anterior.
+        """
+        base = self.base_objects.get(key)
+        if not isinstance(base, dict):
+            return None
+        calibration = self.calibrations.get(key)
+        if not isinstance(calibration, dict):
+            return dict(base) if operation == "pick" else None
+        resolved = self._resolve_calibration_height(key, calibration)
+        if resolved is None:
+            # Si existe un fichero de calibracion pero falta esta altura, no
+            # se reutiliza una altura distinta ni se cae al calculo teorico.
+            return None
+        if operation in resolved and isinstance(resolved[operation], dict):
+            merged = {**base, **resolved[operation]}
+            if operation == "place":
+                merged["require_calibrated_target"] = True
+            return merged
+        if operation == "pick" and any(
+            field in resolved for field in self._CALIB_LEAF_KEYS
+        ):
+            return {**base, **resolved}
+        return dict(base) if operation == "pick" else None
 
     def _move_to_safe_pose(self, goal_handle):
         """Recoge el brazo antes de permitir que se mueva la base."""
@@ -698,13 +753,13 @@ class ObjectGraspServer(Node):
 
     def _execute(self, goal_handle):
         req = goal_handle.request
-        operation = (req.operation or "pick").strip().lower()
+        operation = (req.operation or "").strip().lower()
 
-        if operation != "pick":
+        if operation not in ("pick", "place"):
             goal_handle.abort()
             return self._result(
                 False, "INVALID_GOAL",
-                f"operation '{operation}' no soportada; solo 'pick'."
+                f"operation '{operation}' invalida; usa explicitamente 'pick' o 'place'."
             )
 
         # --- 1. Que pieza es -----------------------------------------
@@ -741,7 +796,14 @@ class ObjectGraspServer(Node):
                     marker_id = mid
                     break
 
-        spec = self.specs[key]
+        spec = self.specs_by_operation[operation].get(key)
+        if spec is None:
+            goal_handle.abort()
+            return self._result(
+                False, "INVALID_GOAL",
+                f"No existe calibracion de {operation} para '{key}' a "
+                f"{self.table_height_mm} mm. Calibrala antes de ejecutar."
+            )
         if spec.problems:
             goal_handle.abort()
             return self._result(
@@ -759,7 +821,10 @@ class ObjectGraspServer(Node):
             self.get_logger().info(msg)
             if not ok:
                 goal_handle.abort()
-                return self._result(False, "GRASP_FAILED", msg)
+                return self._result(
+                    False, "GRASP_FAILED",
+                    f"stage=APPROACH; {msg}"
+                )
 
         # --- 3. Aproximacion de la base ------------------------------
         if self.enable_approach and marker_id is not None:
@@ -857,7 +922,7 @@ class ObjectGraspServer(Node):
         # --- 5. Toma con el brazo ------------------------------------
         self._feedback(goal_handle, "DESCEND")
         pick = PickPlace.Goal()
-        pick.operation = "pick"
+        pick.operation = operation
         # Las poses cartesianas enseñadas tienen prioridad sobre los angulos:
         # el firmware puede elegir una rama IK valida sin forzar J2 fuera de
         # sus limites. Los angulos quedan como respaldo para calibraciones
@@ -906,7 +971,10 @@ class ObjectGraspServer(Node):
         )
         pick.gripper_speed_percent = (
             req.gripper_speed_percent if req.gripper_speed_percent > 0.0
-            else spec.gripper_speed
+            else (
+                spec.speed_override
+                if spec.speed_override is not None else spec.gripper_speed
+            )
         )
         pick.gripper_torque = spec.gripper_torque
         pick.gripper_force_control = spec.gripper_force_control
@@ -923,14 +991,18 @@ class ObjectGraspServer(Node):
 
         if not ok:
             goal_handle.abort()
-            return self._result(False, "GRASP_FAILED", msg)
+            return self._result(
+                False, "GRASP_FAILED",
+                f"stage={'PICK' if operation == 'pick' else 'PLACE'}; {msg}"
+            )
 
         self._feedback(goal_handle, "LIFT")
         goal_handle.succeed()
         return self._result(
             True, "OK",
-            f"{spec.label} tomada (ArUco {marker_id}, "
-            f"pinza {spec.close_mm:.0f} mm sobre {spec.span_mm:.1f} mm)."
+            f"{spec.label} {('tomada' if operation == 'pick' else 'colocada')} "
+            f"(ArUco {marker_id}, pinza {spec.close_mm:.0f} mm sobre "
+            f"{spec.span_mm:.1f} mm)."
         )
 
     def _grasp_coords(self, spec, req):

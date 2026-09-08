@@ -27,7 +27,7 @@ LOG_DIR="${LOG_DIR:-/workspace/log/robot_routine}"
 # Se puede ampliar por invocacion sin editar codigo.
 GRASP_APPROACH_TIMEOUT="${GRASP_APPROACH_TIMEOUT:-120.0}"
 # Distancia LiDAR (m) a la que se detiene la base antes de agarrar.
-# Vacia: grasp_stack elige la parada calibrada de cada pieza.
+# Vacia: prepare grasp elige la parada calibrada de cada pieza.
 GRASP_STOP_DISTANCE="${GRASP_STOP_DISTANCE:-}"
 
 # Config DDS con la que este script habla con los nodos.
@@ -75,6 +75,11 @@ fi
 # descubrimiento directo para consultar siempre el grafo actual.
 source_env='export ROS2_DISABLE_DAEMON=1; source /opt/ros/humble/setup.bash; source /workspace/install/setup.bash'
 
+# Requisitos de los perfiles de operacion. Es shell intencionadamente: esta
+# consola se ejecuta antes de entrar al contenedor y no depende de PyYAML.
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/command_requirements.sh"
+
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -113,6 +118,38 @@ ensure_container() {
     "${DOCKER[@]}" inspect -f '{{.State.Running}}' "${CONTAINER}" \
         2>/dev/null | grep -qx true \
         || die "no se pudo levantar ${CONTAINER}"
+}
+
+require_container_running() {
+    if ! "${DOCKER[@]}" inspect -f '{{.State.Running}}' "${CONTAINER}" \
+        2>/dev/null | grep -qx true; then
+        die "el contenedor ${CONTAINER} no esta en marcha; ejecuta la preparacion del robot"
+    fi
+}
+
+clear_prepare_state() {
+    "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
+        "rm -f '${PREPARE_GRASP_READY_FILE}' '${PREPARE_APPROACH_READY_FILE}'" \
+        >/dev/null 2>&1 || true
+}
+
+prepared_state_matches() {
+    local file="$1" profile="$2" piece="$3" table_mm="$4"
+    in_container "test -r '${file}' \
+        && grep -Fxq 'profile=${profile}' '${file}' \
+        && grep -Fxq 'piece=${piece}' '${file}' \
+        && grep -Fxq 'table_height_mm=${table_mm}' '${file}' \
+        && grep -Fxq 'distributed=1' '${file}' \
+        && grep -Fxq 'robot_ip=${ROBOT_IP}' '${file}' \
+        && grep -Fxq 'laptop_ip=${LAPTOP_IP}' '${file}'"
+}
+
+write_prepared_state() {
+    local file="$1" profile="$2" piece="$3" table_mm="$4"
+    in_container "mkdir -p \"\$(dirname '${file}')\"; printf '%s\\n' \
+        'profile=${profile}' 'piece=${piece}' \
+        'table_height_mm=${table_mm}' 'distributed=1' \
+        'robot_ip=${ROBOT_IP}' 'laptop_ip=${LAPTOP_IP}' > '${file}'"
 }
 
 confirm_motion() {
@@ -264,10 +301,15 @@ arm() {
 }
 
 calibrate_grasp() {
+    if [ "${1:-}" = "--menu" ] || [ "${1:-}" = "menu" ]; then
+        ensure_container
+        in_container_interactive 'python3 /workspace/scripts/calibrate_grasp.py --menu'
+        return
+    fi
     confirm_motion
     ensure_container
-    local object_name="${1:?uso: calibrate-grasp <engranaje|poste|rueda|estrella> <altura_mm>}"
-    local table_mm="${2:?uso: calibrate-grasp <pieza> <altura_mm> (100 o 200)}"
+    local object_name="${1:?uso: calibrate-grasp <pieza> <altura_mm> --action pick|place}"
+    local table_mm="${2:?uso: calibrate-grasp <pieza> <altura_mm> --action pick|place}"
     case "${object_name}" in
         engranaje|poste|rueda|estrella) ;;
         *) die "pieza desconocida: '${object_name}' (usa engranaje|poste|rueda|estrella)" ;;
@@ -366,6 +408,19 @@ approach_stack() {
     # de `ros2 topic echo` cuando CycloneDDS opera entre Nano y portatil.
     say "Comprobando entradas del servidor de aproximacion"
     in_container 'python3 /workspace/scripts/check_approach_inputs.py --timeout 30'
+    write_prepared_state "${PREPARE_APPROACH_READY_FILE}" approach any 0
+}
+
+require_prepared_approach() {
+    require_container_running
+    require_distributed_aruco
+    if ! prepared_state_matches "${PREPARE_APPROACH_READY_FILE}" approach any 0; then
+        printf 'ERROR: La infraestructura requerida no esta preparada.\n' >&2
+        printf 'Ejecuta primero:\n  ROBOT_IP=<jetson> LAPTOP_IP=<laptop> ./scripts/tsummit_offboard.sh prepare\n  DISTRIBUTED=1 LAPTOP_IP=<laptop> ./scripts/tsummit.sh prepare grasp rueda --table-height 100\n' >&2
+        exit 1
+    fi
+    in_container 'python3 /workspace/scripts/check_aruco_approach_action.py --timeout 1' \
+        || die "La infraestructura requerida no esta disponible. Repite la preparacion del portatil y de la Jetson."
 }
 
 approach_check() {
@@ -383,10 +438,7 @@ approach() {
     local marker_id="${1:?uso: approach <id_aruco> [stop_distance_m]}"
     local stop_dist="${2:-0.20}"
     local timeout_s="${3:-${APPROACH_TIMEOUT:-180.0}}"
-    approach_stack
-    if ! in_container 'python3 /workspace/scripts/check_aruco_approach_action.py --timeout 15'; then
-        die "no hay action server /aruco_lidar_approach en el DDS actual. Ejecuta en el portatil: ROBOT_IP=100.86.172.41 LAPTOP_IP=${LAPTOP_IP} ./scripts/tsummit_offboard.sh run"
-    fi
+    require_prepared_approach
     say "Enviando goal /aruco_lidar_approach  (id=${marker_id}, stop=${stop_dist} m, timeout=${timeout_s} s)"
     in_container "ros2 action send_goal /aruco_lidar_approach \
         home_service_interfaces/action/ArucoApproach \
@@ -402,12 +454,14 @@ approach() {
 #  src/home_service_behaviors/config/grasp_catalog.yaml.
 #
 #      DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh grasp-dry
-#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh pick auto
-#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> ./scripts/tsummit.sh pick engranaje
+#      ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> \
+#          ./scripts/tsummit.sh grasp rueda --action pick --table-height 100
 # =====================================================================
 
+# Compatibilidad para `grasp-dry`: esta variante no forma parte de la ruta
+# normal de pick/place. Las misiones reales usan exclusivamente `prepare`.
 grasp_stack() {
-    local enable_arm="$1" enable_approach="$2" piece="${3:-auto}"
+    local enable_arm="$1" enable_approach="$2" piece="${3:-auto}" table_mm="${4:-100}"
     local stop_distance="${GRASP_STOP_DISTANCE}"
     if [ -z "${stop_distance}" ]; then
         case "${piece}" in
@@ -418,6 +472,16 @@ grasp_stack() {
     fi
     ensure_container
     require_distributed_aruco
+
+    # Tras `prepare grasp` no repitas sleeps ni comprobaciones DDS costosas.
+    # Los pgrep son deliberadamente baratos; si un proceso desaparecio se
+    # cae al camino normal, que vuelve a levantar y verificar la pila.
+    if grasp_stack_ready "${enable_arm}" "${enable_approach}" "${table_mm}"; then
+        printf 'Pila de grasp ya preparada (tabla=%s mm); reutilizando nodos.\n' \
+            "${table_mm}"
+        return
+    fi
+
     if [ "${enable_approach}" = "true" ]; then
         # La toma comparte las precondiciones de la accion publica de
         # aproximacion: base, LiDAR, odometria y detector remoto.
@@ -429,30 +493,166 @@ grasp_stack() {
         arm
     fi
     if is_running '[o]bject_grasp_server'; then
-        printf 'object_grasp_server ya iniciado. Reinicia con: tsummit.sh stop\n'
-        return 1
+        if grasp_server_table_matches "${table_mm}"; then
+            printf 'object_grasp_server ya iniciado (tabla=%s mm); reutilizando.\n' \
+                "${table_mm}"
+            return
+        fi
+        printf 'object_grasp_server usa otra altura; reiniciando.\n'
+        stop grasp
     fi
+    start_grasp_server "${enable_arm}" "${enable_approach}" \
+        "${table_mm}" "${stop_distance}"
+}
+
+start_grasp_server() {
+    local enable_arm="$1" enable_approach="$2" table_mm="$3" stop_distance="$4"
     run_bg grasp \
         "ros2 launch home_service_behaviors object_grasp.launch.py \
           enable_arm:=${enable_arm} enable_approach:=${enable_approach} \
           approach_stop_distance:=${stop_distance} \
+          table_height_mm:=${table_mm} \
           approach_timeout_sec:=${GRASP_APPROACH_TIMEOUT}"
     sleep 5
 }
 
+require_prepared_grasp() {
+    local piece="$1" table_mm="$2"
+    require_container_running
+    require_distributed_aruco
+    if ! prepared_state_matches "${PREPARE_GRASP_READY_FILE}" grasp "${piece}" "${table_mm}"; then
+        printf 'ERROR: La infraestructura requerida no esta preparada para %s a %s mm.\n' \
+            "${piece}" "${table_mm}" >&2
+        printf 'Ejecuta primero:\n  ROBOT_IP=<jetson> LAPTOP_IP=<laptop> ./scripts/tsummit_offboard.sh prepare\n  DISTRIBUTED=1 LAPTOP_IP=<laptop> ./scripts/tsummit.sh prepare grasp %s --table-height %s\n' \
+            "${piece}" "${table_mm}" >&2
+        exit 1
+    fi
+    if ! in_container 'python3 /workspace/scripts/check_grasp_ready.py --timeout 1 >/dev/null'; then
+        die "La infraestructura requerida no esta disponible. Repite la preparacion del portatil y de la Jetson."
+    fi
+}
+
+grasp_server_table_matches() {
+    local table_mm="$1"
+    in_container "ros2 param get /object_grasp_server table_height_mm 2>/dev/null \
+        | grep -Eq 'Integer value: ${table_mm}$'"
+}
+
+grasp_stack_ready() {
+    local enable_arm="$1" enable_approach="$2" table_mm="$3"
+    is_running '[o]bject_grasp_server' \
+        && grasp_server_table_matches "${table_mm}" \
+        || return 1
+
+    if [ "${enable_arm}" = "true" ]; then
+        is_running '[m]echarm_driver_node' || return 1
+    fi
+    if [ "${enable_approach}" = "true" ]; then
+        is_running '[m]yagv_odometry_node' || return 1
+        is_running '[r]os2 run twist_mux twist_mux' || return 1
+        is_running '[c]si_camera_node' || return 1
+    fi
+}
+
+prepare() {
+    ensure_container
+    require_distributed_aruco
+
+    local profile="${1:-grasp}" piece="auto" table_mm="${PREPARE_GRASP_DEFAULT_TABLE_MM}"
+    shift || true
+    [ "${profile}" = "grasp" ] \
+        || die "perfil desconocido: ${profile} (usa prepare grasp)"
+    if [ "${1:-}" != "" ] && [[ "${1}" != --* ]]; then
+        piece="$1"
+        shift
+    fi
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --table-height|--height) table_mm="${2:?falta valor para --table-height}"; shift 2 ;;
+            *) die "opcion desconocida para prepare: $1" ;;
+        esac
+    done
+    case "${piece}" in
+        auto|engranaje|poste|rueda|estrella) ;;
+        *) die "pieza desconocida: '${piece}'" ;;
+    esac
+    case "${table_mm}" in
+        ''|*[!0-9]*) die "altura invalida: ${table_mm}" ;;
+    esac
+
+    say "Preparando cadena de grasp (pieza=${piece}, tabla=${table_mm} mm)"
+    approach_stack
+    arm
+    if ! in_container 'python3 /workspace/scripts/check_aruco_approach_action.py --timeout 15'; then
+        die "falta /aruco_lidar_approach; ejecuta en el portatil: ROBOT_IP=<ip> LAPTOP_IP=<ip> ${PREPARE_GRASP_REMOTE_COMMAND}"
+    fi
+
+    local stop_distance="${GRASP_STOP_DISTANCE}"
+    if [ -z "${stop_distance}" ]; then
+        case "${piece}" in
+            rueda) stop_distance="0.09" ;;
+            *) stop_distance="0.20" ;;
+        esac
+    fi
+    if grasp_stack_ready true true "${table_mm}"; then
+        printf 'object_grasp_server ya preparado para tabla=%s mm.\n' "${table_mm}"
+    else
+        if is_running '[o]bject_grasp_server'; then
+            stop grasp
+        fi
+        start_grasp_server true true "${table_mm}" "${stop_distance}"
+    fi
+    if ! in_container 'python3 /workspace/scripts/check_grasp_ready.py --timeout 2'; then
+        die "La preparacion no termino: alguna accion requerida no esta disponible."
+    fi
+    write_prepared_state "${PREPARE_GRASP_READY_FILE}" grasp "${piece}" "${table_mm}"
+    printf '\nPreparacion completa. Las siguientes llamadas pueden reutilizar la pila:\n'
+    printf '  ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> \\\n'
+    printf '    ./scripts/tsummit.sh grasp %s --action pick --table-height %s\n' \
+        "${piece}" "${table_mm}"
+}
+
 grasp_send() {
-    local piece="${1:-auto}"
-    say "Enviando goal /grasp_object  (pieza: ${piece})"
+    local piece="${1:-auto}" action="${2:-}"
+    [ -n "${action}" ] || die "la accion es obligatoria: --action pick|place"
+    say "Enviando goal /grasp_object  (pieza: ${piece}, accion: ${action})"
     in_container "ros2 action send_goal /grasp_object \
         home_service_interfaces/action/PickPlace \
-        '{operation: pick, target_pose_name: ${piece}, retreat_pose_name: home}' --feedback"
+        '{operation: ${action}, target_pose_name: ${piece}, retreat_pose_name: home}' --feedback"
 }
 
 grasp() {
     confirm_motion
     local piece="${1:-auto}"
-    grasp_stack true true "${piece}" || return
-    grasp_send "${piece}"
+    [ -n "${1:-}" ] || die "uso: grasp <pieza> --action pick|place [--table-height mm]"
+    shift
+    local action="" table_mm=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --action) action="${2:?falta valor para --action}"; shift 2 ;;
+            --table-height|--height) table_mm="${2:?falta valor para --table-height}"; shift 2 ;;
+            *) die "opcion desconocida para grasp: $1" ;;
+        esac
+    done
+    case "${action}" in pick|place) ;; *) die "la accion es obligatoria: --action pick|place" ;; esac
+    case "${table_mm}" in '' ) die "indica --table-height mm; no se adivina la altura" ;; *[!0-9]*) die "altura invalida: ${table_mm}" ;; esac
+    require_prepared_grasp "${piece}" "${table_mm}"
+    grasp_send "${piece}" "${action}"
+}
+
+pick() {
+    confirm_motion
+    local piece="${1:-auto}" table_mm="${TABLE_HEIGHT_MM:-}"
+    shift || true
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --table-height|--height) table_mm="${2:?falta valor para --table-height}"; shift 2 ;;
+            *) die "opcion desconocida para pick: $1" ;;
+        esac
+    done
+    [ -n "${table_mm}" ] || die "indica --table-height mm; no se adivina la altura"
+    require_prepared_grasp "${piece}" "${table_mm}"
+    grasp_send "${piece}" pick
 }
 
 grasp_dry() {
@@ -462,7 +662,7 @@ grasp_dry() {
     say "ENSAYO en seco: sin brazo y sin mover la base"
     local piece="${1:-auto}"
     grasp_stack false false "${piece}"
-    grasp_send "${piece}"
+    grasp_send "${piece}" pick
 }
 
 aruco_loss() {
@@ -494,7 +694,7 @@ grasp_catalog() {
 reto1() {
     confirm_motion
     say "Reto 1 — Clasificacion"
-    grasp_stack true true
+    require_prepared_grasp auto "${PREPARE_GRASP_DEFAULT_TABLE_MM}"
     printf 'Pila lista. Lanza la toma con:\n'
     printf '%s\n' '  ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> \' \
         '  ./scripts/tsummit.sh grasp <engranaje|poste|rueda|auto>'
@@ -503,7 +703,7 @@ reto1() {
 reto2() {
     confirm_motion
     say "Reto 2 — Kitting"
-    grasp_stack true true
+    require_prepared_grasp auto "${PREPARE_GRASP_DEFAULT_TABLE_MM}"
     printf 'Pila lista (misma que reto 1; la secuencia de kitting la\n'
     printf 'orquesta home_service_mission/mission_manager).\n'
 }
@@ -644,6 +844,7 @@ logs() {
 stop() {
     local target="${1:-}"
     local pattern=""
+    local invalidate_prepare=0
 
     if [ -n "${target}" ]; then
         if [ "${target}" = "help" ]; then
@@ -656,33 +857,43 @@ stop() {
         case "${target}" in
             arm|mecharm|mecharm_driver_node)
                 pattern='[m]echarm_driver_node'
+                invalidate_prepare=1
                 ;;
             grasp|object_grasp_server)
                 pattern='[o]bject_grasp_server'
+                invalidate_prepare=1
                 ;;
             approach|aruco_lidar_approach_server)
                 pattern='[a]ruco_lidar_approach_server'
+                invalidate_prepare=1
                 ;;
             detector|aruco_detector|aruco_detector_node)
                 pattern='[a]ruco_detector_node'
+                invalidate_prepare=1
                 ;;
             camera|csi_camera|csi_camera_node)
                 pattern='[c]si_camera_node'
+                invalidate_prepare=1
                 ;;
             lidar|ydlidar|ydlidar_ros2_driver_node)
                 pattern='[y]dlidar_ros2_driver_node'
+                invalidate_prepare=1
                 ;;
             odom|myagv_odometry_node)
                 pattern='[m]yagv_odometry_node'
+                invalidate_prepare=1
                 ;;
             scan|scan_sanitizer|scan_sanitizer_node)
                 pattern='[s]can_sanitizer_node'
+                invalidate_prepare=1
                 ;;
             mux|twist_mux)
                 pattern='[r]os2 run twist_mux twist_mux'
+                invalidate_prepare=1
                 ;;
             model|robot_state_publisher)
                 pattern='[r]obot_state_publisher'
+                invalidate_prepare=1
                 ;;
             slam|slam_toolbox)
                 pattern='[s]lam_toolbox'
@@ -705,13 +916,15 @@ stop() {
                  echo 'Nodo detenido: ${target}'; \
              else \
                  echo 'Nodo no estaba activo: ${target}'; \
-             fi"
+              fi"
+        [ "${invalidate_prepare}" -eq 1 ] && clear_prepare_state
         return
     fi
 
     "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
         "pkill -KILL -f '[o]bject_grasp_server' || true; \
-         pkill -KILL -f '[m]echarm_driver_node' || true" 2>/dev/null || true
+          pkill -KILL -f '[m]echarm_driver_node' || true" 2>/dev/null || true
+    clear_prepare_state
     "${MAZE}" stop 2>/dev/null || true
     routine stop
 }
@@ -733,7 +946,10 @@ case "${1:-help}" in
     approach-check|aprox-check) approach_check ;;
     approach|aproximar) shift; approach "$@" ;;
 
-    pick|grasp|tomar)  shift; grasp "${1:-auto}" ;;
+    prepare|preparar) shift; prepare "$@" ;;
+
+    pick|tomar)         shift; pick "$@" ;;
+    grasp)              shift; grasp "$@" ;;
     grasp-dry|ensayo) shift; grasp_dry "${1:-auto}" ;;
     aruco-loss)      shift; aruco_loss "$@" ;;
     grasp-catalog|catalogo) grasp_catalog ;;
@@ -760,16 +976,23 @@ T-SUMMIT Challenge — consola unica
     save-map <nombre>       guarda /workspace/maps/<nombre>.{yaml,pgm}
 
   APROXIMACION A UN ARUCO
+    prepare grasp [pieza] [--table-height mm]
+                             arranca y comprueba la pila reutilizable;
+                             no mueve el robot. Repite este comando para
+                             recuperar una dependencia parada.
     approach-check         arranca base + camara y comprueba entradas, NO mueve
     approach <id> [stop_m] aproxima la BASE al marcador <id> (exige ALLOW_MOTION=1,
                             DISTRIBUTED=1 y LAPTOP_IP=<ip>)
-                           stop_m = distancia final, por defecto 0.20 m
+                            stop_m = distancia LiDAR-pared, por defecto 0.20 m;
+                                    la seguridad usa despeje del footprint
 
   TOMA DE PIEZA  (retos 1 y 2)
     grasp-dry [pieza]       ENSAYO: identifica y calcula, no mueve nada
-    pick [pieza]            cadena completa y termina en home (exige ALLOW_MOTION=1,
-                             DISTRIBUTED=1 y LAPTOP_IP=<ip>)
-    grasp [pieza]           alias de pick
+     pick [pieza]            cadena completa de pick y termina en home (exige ALLOW_MOTION=1,
+                              DISTRIBUTED=1 y LAPTOP_IP=<ip>)
+     grasp <pieza> --action pick|place --table-height mm
+                             cadena completa con accion y altura explicitas;
+                             exige haber ejecutado prepare grasp antes
     aruco-loss <id> [seg]   mide flujo y ausencia de un ArUco sin mover
     grasp-catalog           vuelca el catalogo como lo lee el nodo
       pieza = auto | engranaje | poste | rueda
@@ -784,18 +1007,21 @@ T-SUMMIT Challenge — consola unica
 
   SUBSISTEMAS
     arm                     driver del MechArm 270
-    calibrate-grasp <pieza> <altura_mm>
+     calibrate-grasp <pieza> <altura_mm> --action pick|place
                              primero captura/guarda home y despues ensena
                              intermedio, preagarre y contacto para esa pieza
                              (engranaje|poste|rueda|estrella) sobre una
                              plataforma de <altura_mm> (100 o 200); los guarda
                              anidados en grasp_calibrations.yaml y termina en
                              home. Anade --capture-global-poses para ensenar
-                             todas las poses de poses.yaml (exige
-                             ALLOW_MOTION=1 y driver parado)
-    test-grasp <pieza> <altura_mm>
-                             recorre las poses calibradas sin mover base ni pinza
-                             (exige ALLOW_MOTION=1)
+                              todas las poses de poses.yaml (exige
+                              ALLOW_MOTION=1 y driver parado)
+     calibrate-grasp --menu   menu para listar, ver, editar, recapturar o
+                              eliminar calibraciones con confirmacion
+     test-grasp <pieza> <altura_mm>
+                              recorre las poses calibradas sin mover base ni pinza
+                              (exige ALLOW_MOTION=1)
+                              admite --action pick|place
     test-pick-lift <pieza> <altura_mm>
                              abre, baja a contacto, cierra y eleva a preagarre;
                              vuelve a home; solo brazo y pinza, deja el objeto

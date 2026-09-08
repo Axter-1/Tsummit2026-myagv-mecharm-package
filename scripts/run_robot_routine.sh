@@ -306,7 +306,13 @@ stop() {
          pkill -KILL -f '[b]t_navigator' || true; pkill -KILL -f '[l]ifecycle_manager' || true; \
          pkill -KILL -f '[f]oxglove_bridge' || true; pkill -KILL -f '[r]viz2' || true; \
          pkill -KILL -f '[r]qt' || true; pkill -KILL -f '[s]lam_toolbox' || true; \
-         pkill -KILL -f '[r]obot_state_publisher' || true"
+          pkill -KILL -f '[r]obot_state_publisher' || true"
+    # Una parada explicita invalida la marca que permite a grasp saltarse la
+    # preparacion; la siguiente mision debe ejecutar `tsummit.sh prepare`.
+    "${DOCKER[@]}" exec "${CONTAINER}" rm -f \
+        /workspace/log/robot_routine/tsummit-grasp-ready \
+        /workspace/log/robot_routine/tsummit-approach-ready \
+        >/dev/null 2>&1 || true
     printf 'Stacks detenidos.\n'
 }
 

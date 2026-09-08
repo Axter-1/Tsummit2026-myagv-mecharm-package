@@ -19,6 +19,7 @@ bool success
 # SUCCEEDED
 # TARGET_NOT_FOUND
 # TARGET_LOST
+# BLOCKED / TF_ERROR
 # TIMEOUT
 # CANCELED
 string status

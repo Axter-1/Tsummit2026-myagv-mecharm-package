@@ -101,6 +101,7 @@ class ArucoLidarApproachServer(Node):
             'odom_frame',
             'odom'
         )
+        self.declare_parameter('chassis_frame', 'base_footprint')
 
         # =========================================================
         # Search
@@ -398,19 +399,11 @@ class ArucoLidarApproachServer(Node):
             6.0
         )
 
-        # El LiDAR no esta en el borde delantero que mide el operador.
-        # En la prueba de poste leia 0.206 m con el borde a ~0.01 m, por
-        # lo que el borde queda unos 0.195 m por delante del sensor.
+        # Compatibilidad con configuraciones antiguas. La seguridad actual
+        # no resta este valor: calcula el borde de salida del rayo contra
+        # chassis_footprint usando la TF completa del sensor.
         self.declare_parameter(
             'lidar_to_front_bumper_m',
-            # 0.09, medido por el usuario directamente sobre el robot:
-            # del sensor al borde delantero, sin marcador de por medio.
-            # El 0.195 salio de la prueba de poste y era de otra escena.
-            #
-            # Las dos reconciliaciones indirectas daban 0.081 y 0.122
-            # segun de que corrida se partiera, o sea que ninguna era de
-            # fiar. Una medida estatica del propio robot no depende de
-            # donde este ni de que este mirando.
             0.09
         )
 
@@ -440,9 +433,8 @@ class ArucoLidarApproachServer(Node):
         # empeora las cosas.
         #
         # Orden correcto: medir el marcador con calibre, corregir
-        # marker_length y lidar_to_front_bumper_m (0.195 salio de la
-        # prueba de poste, otra escena; la cinta apunta a ~0.081), y
-        # SOLO entonces poner esto a ~0.08. Hasta ahi, si el sector
+        # marker_length y SOLO entonces poner esto a un valor pequeno. Hasta
+        # ahi, si el sector
         # midiera el fondo, el aborto por STALLED lo dice en 2 s.
         self.declare_parameter(
             'lidar_front_depth_band',
@@ -529,6 +521,13 @@ class ArucoLidarApproachServer(Node):
         )
 
         self.declare_parameter('final_distance_settle_sec', 0.25)
+
+        # No se acepta una buena distancia mientras aun hay movimiento. La
+        # odometria se usa como comprobacion de la velocidad real y el mando
+        # como comprobacion inmediata del controlador.
+        self.declare_parameter('final_linear_velocity_tolerance', 0.015)
+        self.declare_parameter('final_angular_velocity_tolerance', 0.03)
+        self.declare_parameter('final_velocity_settle_sec', 0.20)
 
         # Distancia de entrada a la fase final: aqui se detiene la
         # traslacion cuando el rumbo aun no esta asentado y se gira en
@@ -838,6 +837,23 @@ class ArucoLidarApproachServer(Node):
             0.08
         )
 
+        # El nombre antiguo era ambiguo: esta magnitud es el despeje entre
+        # el eco y el borde del chasis, no la distancia del LiDAR a la pared.
+        # Se conserva como alias para configuraciones existentes.
+        self.declare_parameter(
+            'min_chassis_clearance',
+            -1.0
+        )
+
+        # Poligono medido del myAGV en chassis_frame. Se usa el
+        # mismo footprint que Nav2, pero aqui se intersecta el rayo real del
+        # LiDAR con sus vertices, incluyendo x/y/yaw del montaje del sensor.
+        self.declare_parameter(
+            'chassis_footprint',
+            [0.188, 0.130, 0.188, -0.130,
+             -0.174, -0.130, -0.174, 0.130]
+        )
+
         # =========================================================
         # State
         # =========================================================
@@ -852,8 +868,21 @@ class ArucoLidarApproachServer(Node):
         # Cache del frente deducido de la TF (ver get_lidar_front_angle).
         self._lidar_front_angle = None
 
-        # Cache de base_link <- laser_frame: (x, y, yaw). Es estatica.
+        # Caches de base_link/footprint <- laser_frame: (x, y, yaw).
         self._laser_to_base = None
+        self._laser_to_chassis = None
+        raw_footprint = self.get_parameter('chassis_footprint').value
+        try:
+            if len(raw_footprint) < 6 or len(raw_footprint) % 2:
+                raise ValueError
+            self.chassis_footprint = [
+                (float(raw_footprint[i]), float(raw_footprint[i + 1]))
+                for i in range(0, len(raw_footprint), 2)
+            ]
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                'chassis_footprint debe ser una lista plana de pares x,y'
+            )
 
         # Motivo del ultimo fallo del lidar. WAITING_LIDAR era una caja
         # negra: no distinguia "el scan no llega" de "llega pero el
@@ -1015,6 +1044,17 @@ class ArucoLidarApproachServer(Node):
         )
 
         return x, y, yaw
+
+    def get_robot_velocity(self):
+        with self.lock:
+            odom = self.latest_odom
+        if odom is None:
+            return None
+        twist = odom.twist.twist
+        return (
+            math.hypot(float(twist.linear.x), float(twist.linear.y)),
+            abs(float(twist.angular.z)),
+        )
 
     # =============================================================
     # Current detection
@@ -1638,15 +1678,121 @@ class ArucoLidarApproachServer(Node):
 
         return self._laser_to_base
 
-    def planner_stop_distance(self, bumper_clearance):
-        """Convierte el despeje del borde en distancia desde base_link."""
-        laser_to_base = self.get_laser_to_base()
-        laser_x = laser_to_base[0] if laser_to_base is not None else 0.0
-        return (
-            bumper_clearance +
-            self.pf('lidar_to_front_bumper_m') +
-            laser_x
+    def get_laser_to_chassis(self):
+        """TF del sensor al frame donde estan definidos los vertices."""
+        if self._laser_to_chassis is not None:
+            return self._laser_to_chassis
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.get_parameter('chassis_frame').value,
+                'laser_frame',
+                Time(),
+                timeout=Duration(seconds=0.2),
+            )
+        except Exception:
+            return None
+        self._laser_to_chassis = (
+            transform.transform.translation.x,
+            transform.transform.translation.y,
+            yaw_from_quaternion(transform.transform.rotation),
         )
+        return self._laser_to_chassis
+
+    def planner_stop_distance(self, lidar_distance, normal=None):
+        """Convierte distancia LiDAR-pared en una distancia de planificacion.
+
+        Este valor solo se usa para el camino geométrico. La llegada la
+        decide ``stop_distance`` en el frame LiDAR y la seguridad el
+        footprint, porque una conversion escalar no vale para un sensor
+        descentrado u orientado.
+        """
+        laser_to_base = self.get_laser_to_base()
+        if laser_to_base is None:
+            return lidar_distance
+        laser_x, laser_y, _ = laser_to_base
+        if normal is None:
+            # Solo para la comprobacion de configuracion antigua.
+            return lidar_distance + self.pf('lidar_to_front_bumper_m') + laser_x
+        nx, ny = normal
+        # stop_distance es LiDAR->pared. La base debe quedar en la
+        # posicion que produce ese rango segun la proyeccion real del
+        # sensor sobre la normal, no segun una resta fija frontal.
+        return lidar_distance - (laser_x * nx + laser_y * ny)
+
+    def chassis_clearance_for_scan(self, scan, index, distance):
+        """Despeje del chasis para un haz concreto del LiDAR."""
+        laser_to_base = self.get_laser_to_chassis()
+        if laser_to_base is None:
+            return None
+        offset_x, offset_y, laser_yaw = laser_to_base
+        angle = scan.angle_min + index * scan.angle_increment
+        direction = (
+            math.cos(angle + laser_yaw),
+            math.sin(angle + laser_yaw),
+        )
+        exit_distance = planner.ray_polygon_exit_distance(
+            (offset_x, offset_y), direction, self.chassis_footprint
+        )
+        if exit_distance is None:
+            return None
+        return max(0.0, float(distance) - exit_distance)
+
+    def get_front_lidar_observation(
+        self, expected=None, nearest=False, robust_nearest_mode=False
+    ):
+        """Devuelve ``(distancia_lidar, despeje_chasis)`` coherentes.
+
+        La primera magnitud es el rango medido desde el LiDAR hasta la
+        pared. La segunda usa el mismo haz y la interseccion de ese haz con
+        el footprint, por lo que no depende de una resta fija.
+        """
+        now_ns = self.get_clock().now().nanoseconds
+        with self.lock:
+            scan = self.latest_scan
+            stamp_ns = self.latest_scan_time_ns
+        if scan is None or stamp_ns is None:
+            return None
+        if (now_ns - stamp_ns) / 1e9 > self.pf('scan_timeout'):
+            return None
+
+        half_angle = math.radians(self.pf('lidar_sector_half_angle_deg'))
+        front_angle = self.get_lidar_front_angle(scan)
+        values = []
+        for index, distance in enumerate(scan.ranges):
+            angle = scan.angle_min + index * scan.angle_increment
+            if abs(normalize_angle(angle - front_angle)) > half_angle:
+                continue
+            if not math.isfinite(distance):
+                continue
+            if distance < scan.range_min or distance > scan.range_max:
+                continue
+            values.append((float(distance), index))
+        if not values:
+            return None
+
+        gated_values = planner.plane_returns(
+            [value for value, _ in values],
+            expected,
+            self.pf('lidar_front_depth_band'),
+        )
+        if not gated_values:
+            return None
+        if nearest:
+            selected_range = min(gated_values)
+        elif robust_nearest_mode:
+            selected_range = planner.robust_nearest(
+                gated_values, self.pf('lidar_nearest_cluster_band')
+            )
+        else:
+            selected_range = float(np.median(gated_values))
+
+        selected_distance, selected_index = min(
+            values, key=lambda item: abs(item[0] - selected_range)
+        )
+        clearance = self.chassis_clearance_for_scan(
+            scan, selected_index, selected_distance
+        )
+        return selected_distance, clearance
 
     def get_front_lidar_range(
         self,
@@ -2212,6 +2358,7 @@ class ArucoLidarApproachServer(Node):
         center_error = 0.0
         final_heading_since_ns = None
         final_distance_since_ns = None
+        final_velocity_since_ns = None
         last_lidar_outward_normal = None
         last_lidar_normal_ns = None
         frozen_target = None
@@ -2626,7 +2773,9 @@ class ArucoLidarApproachServer(Node):
                 )
 
             standoff = self.pf('staging_standoff')
-            path_stop_distance = self.planner_stop_distance(stop_distance)
+            path_stop_distance = self.planner_stop_distance(
+                stop_distance, (nx, ny)
+            )
             # El punto de encare debe quedar antes que el objetivo final.
             standoff = max(standoff, path_stop_distance + 0.10)
 
@@ -2662,14 +2811,32 @@ class ArucoLidarApproachServer(Node):
             # `along` puede estar sesgada si marker_length o TF de camara no
             # estan calibrados; el eco frontal mas cercano debe limitar el
             # mando del ciclo actual, no esperar al ciclo siguiente.
-            safety_front = self.get_front_lidar_range(
+            safety_observation = self.get_front_lidar_observation(
                 None,
                 nearest=True,
             )
-            safety_clearance = (
-                safety_front - self.pf('lidar_to_front_bumper_m')
-                if safety_front is not None else None
+            safety_front = (
+                safety_observation[0]
+                if safety_observation is not None else None
             )
+            safety_chassis_clearance = (
+                safety_observation[1]
+                if safety_observation is not None else None
+            )
+
+            if safety_front is not None and safety_chassis_clearance is None:
+                self.stop_robot()
+                goal_handle.abort()
+                result = ArucoApproach.Result()
+                result.success = False
+                result.status = 'TF_ERROR'
+                result.message = (
+                    'No se puede calcular el despeje del chasis: falta TF '
+                    f'{self.get_parameter("chassis_frame").value} <- laser_frame.'
+                )
+                result.final_distance = safety_front
+                self.get_logger().error(result.message)
+                return result
 
             final_lidar_heading = None
             if (
@@ -2682,8 +2849,9 @@ class ArucoLidarApproachServer(Node):
                 final_lidar_heading = math.atan2(-lny, -lnx)
 
             final_alignment_active = (
-                safety_clearance is not None and
-                safety_clearance <= self.pf('final_alignment_distance')
+                safety_front is not None and
+                safety_front - stop_distance <=
+                self.pf('final_alignment_distance')
             )
 
             if final_alignment_active and final_lidar_heading is not None:
@@ -2727,8 +2895,8 @@ class ArucoLidarApproachServer(Node):
             }
 
             slow_final = (
-                safety_clearance is not None and
-                safety_clearance <= self.pf('final_slow_distance')
+                safety_front is not None and
+                safety_front - stop_distance <= self.pf('final_slow_distance')
             )
             if slow_final:
                 limits['max_linear'] = min(
@@ -2848,14 +3016,14 @@ class ArucoLidarApproachServer(Node):
             # restrictiva, nunca menos.
             control_distance = final_distance
             if (
-                safety_clearance is not None and
+                safety_front is not None and
                 (
                     control_distance <= 0.0 or
-                    safety_clearance < control_distance -
+                    safety_front < control_distance -
                     self.pf('lidar_safety_obstacle_margin')
                 )
             ):
-                control_distance = safety_clearance
+                control_distance = safety_front
 
             if control_distance > 0.0:
                 # `lidar_dt`: los ecos frontales van a ~8 Hz y el lazo a
@@ -2914,7 +3082,7 @@ class ArucoLidarApproachServer(Node):
             # desplazar la base: avanzar volveria a empeorar la distancia.
             if (
                 endgame_speed and
-                front_clearance is not None and
+                safety_chassis_clearance is not None and
                 detection is not None and
                 not angular_frozen and
                 abs(center_error) >
@@ -2952,7 +3120,9 @@ class ArucoLidarApproachServer(Node):
             laser_x = (
                 laser_to_base[0] if laser_to_base is not None else 0.0
             )
-            expected_plane = along - laser_x
+            expected_plane = along + laser_x * nx + (
+                laser_to_base[1] * ny if laser_to_base is not None else 0.0
+            )
 
             # UNA SOLA MEDIDA para frenar Y para declarar llegada.
             #
@@ -2971,28 +3141,30 @@ class ArucoLidarApproachServer(Node):
             # estable frente al ruido puntual.
             endgame = along < self.pf('lidar_nearest_below')
 
-            front_median = self.get_front_lidar_range(expected_plane)
-            front_robust_nearest = (
-                self.get_front_lidar_range(
+            front_median_observation = self.get_front_lidar_observation(
+                expected_plane
+            )
+            front_robust_observation = (
+                self.get_front_lidar_observation(
                     expected_plane,
                     robust_nearest_mode=True,
                 )
             )
-            front = None
-            if endgame and front_robust_nearest is not None:
-                front = front_robust_nearest
-            elif front_median is not None:
-                front = front_median
-            elif safety_front is not None:
-                front = safety_front
+            front_observation = None
+            if endgame and front_robust_observation is not None:
+                front_observation = front_robust_observation
+            elif front_median_observation is not None:
+                front_observation = front_median_observation
+            elif safety_observation is not None:
+                front_observation = safety_observation
 
-            front_clearance = None
-            if front is not None:
-                front_clearance = front - self.pf('lidar_to_front_bumper_m')
-                final_distance = front_clearance
-            elif safety_clearance is not None:
-                front_clearance = safety_clearance
-                final_distance = safety_clearance
+            front = None
+            front_chassis_clearance = None
+            if front_observation is not None:
+                front, front_chassis_clearance = front_observation
+                # final_distance is explicitly LiDAR -> wall. The chassis
+                # clearance is kept separately for collision safety.
+                final_distance = front
             else:
                 final_distance = along
 
@@ -3033,8 +3205,8 @@ class ArucoLidarApproachServer(Node):
             )
 
             distance_in_band = (
-                front_clearance is not None and
-                abs(front_clearance - stop_distance) <=
+                front is not None and
+                abs(front - stop_distance) <=
                 self.pf('final_distance_tolerance')
             )
             if distance_in_band:
@@ -3048,8 +3220,36 @@ class ArucoLidarApproachServer(Node):
                 self.pf('final_distance_settle_sec')
             )
 
+            odom_velocity = self.get_robot_velocity()
+            linear_velocity_tolerance = self.pf(
+                'final_linear_velocity_tolerance'
+            )
+            angular_velocity_tolerance = self.pf(
+                'final_angular_velocity_tolerance'
+            )
+            command_slow = (
+                math.hypot(vx, vy) <= linear_velocity_tolerance and
+                abs(wz) <= angular_velocity_tolerance
+            )
+            odom_slow = (
+                odom_velocity is not None and
+                odom_velocity[0] <= linear_velocity_tolerance and
+                odom_velocity[1] <= angular_velocity_tolerance
+            )
+            if command_slow and odom_slow:
+                if final_velocity_since_ns is None:
+                    final_velocity_since_ns = now_ns
+            else:
+                final_velocity_since_ns = None
+            velocity_settled = (
+                final_velocity_since_ns is not None and
+                (now_ns - final_velocity_since_ns) / 1e9 >=
+                self.pf('final_velocity_settle_sec')
+            )
+
             if (
                 distance_settled and
+                velocity_settled and
                 aligned and
                 centred and
                 # La perpendicularidad la juzga la normal LiDAR. El centro
@@ -3069,11 +3269,16 @@ class ArucoLidarApproachServer(Node):
             # Parada de seguridad
             # -------------------------------------------------
 
-            clearance = self.pf('min_front_clearance')
+            configured_clearance = self.pf('min_chassis_clearance')
+            clearance = (
+                configured_clearance
+                if configured_clearance >= 0.0
+                else self.pf('min_front_clearance')
+            )
 
             if (
-                front_clearance is not None and
-                front_clearance < clearance
+                front_chassis_clearance is not None and
+                front_chassis_clearance < clearance
             ):
 
                 self.stop_robot()
@@ -3084,10 +3289,11 @@ class ArucoLidarApproachServer(Node):
                 result.success = False
                 result.status = 'BLOCKED'
                 result.message = (
-                    f'Obstaculo a {front_clearance:.3f} m '
-                    f'(minimo {clearance:.3f} m)'
+                    f'Obstaculo: despeje chasis={front_chassis_clearance:.3f} m '
+                    f'(minimo {clearance:.3f} m), '
+                    f'LiDAR-pared={front:.3f} m'
                 )
-                result.final_distance = front_clearance
+                result.final_distance = front if front is not None else -1.0
 
                 self.get_logger().error(result.message)
 
@@ -3109,14 +3315,20 @@ class ArucoLidarApproachServer(Node):
                 result_range = (
                     front if front is not None else safety_front
                 )
+                chassis_text = (
+                    f'despeje_chasis={front_chassis_clearance:.3f} m, '
+                    if front_chassis_clearance is not None else
+                    'despeje_chasis=desconocido, '
+                )
                 result.message = (
-                    f'Llegada: despeje_lidar={final_distance:.3f} m '
-                    f'(rango={result_range:.3f} m), '
+                    f'Llegada: lidar_pared={final_distance:.3f} m, '
+                    f'{chassis_text}'
+                    f'rango={result_range:.3f} m, '
                     f'geometria={along:.3f} m, '
                     f'lateral={lateral:+.3f} m, '
                     f'camara={center_error:+.2f}, '
                     f'yaw={math.degrees(yaw_error):+.1f} deg, '
-                    f'{elapsed:.1f} s'
+                    f'velocidad_estable={velocity_settled}, {elapsed:.1f} s'
                 )
                 result.final_distance = final_distance
 
@@ -3155,8 +3367,8 @@ class ArucoLidarApproachServer(Node):
             # stall_timeout largo para el pulido fino, el corto solo si
             # de verdad no llega en distancia.
             cerca_en_distancia = (
-                front_clearance is not None and
-                abs(front_clearance - stop_distance) <=
+                front is not None and
+                abs(front - stop_distance) <=
                 self.pf('distance_tolerance') * 2.0
             )
 

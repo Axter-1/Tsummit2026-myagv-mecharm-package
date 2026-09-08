@@ -33,6 +33,7 @@ from home_service_behaviors.approach_planner import (
     plane_returns,
     robust_nearest,
     brake_target,
+    ray_polygon_exit_distance,
 )
 
 
@@ -67,6 +68,31 @@ def test_staging_pose_esta_sobre_la_normal():
 
 def test_normal_saliente_invierte_el_signo():
     assert outward_normal(1.0, 0.0) == (-1.0, -0.0)
+
+
+def test_rayo_lidar_convierte_rango_a_despeje_del_chasis():
+    footprint = [
+        (0.188, 0.130), (0.188, -0.130),
+        (-0.174, -0.130), (-0.174, 0.130),
+    ]
+    # Sensor adelantado 65 mm y girado 180 grados: el haz frontal del
+    # robot sale por x=188 mm, no por una resta fija de 90 mm.
+    exit_distance = ray_polygon_exit_distance(
+        (0.065, 0.0), (1.0, 0.0), footprint
+    )
+    assert abs(exit_distance - 0.123) < 1e-9
+    assert abs((0.50 - exit_distance) - 0.377) < 1e-9
+
+
+def test_rayo_lidar_respeta_yaw_y_lateral_del_sensor():
+    footprint = [
+        (0.188, 0.130), (0.188, -0.130),
+        (-0.174, -0.130), (-0.174, 0.130),
+    ]
+    distance = ray_polygon_exit_distance(
+        (0.0, 0.10), (1.0, 0.0), footprint
+    )
+    assert abs(distance - 0.188) < 1e-9
 
 
 def test_corridor_coords_separa_avance_y_lateral():

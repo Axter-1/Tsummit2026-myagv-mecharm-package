@@ -45,6 +45,9 @@ mecharm_driver_node:
     gripper_settle_sec: 0.6
     # Reaplica el cierre tras asentarse sobre la pieza.
     gripper_regrip_sec: 1.0
+    # No eleva en vacio: el AG-320 debe quedar mas abierto que el cierre
+    # solicitado para demostrar que encontro una pieza entre las mordazas.
+    verify_grasp: true
 
     # ---------------------------------------------------------------
     # Criterio de llegada
