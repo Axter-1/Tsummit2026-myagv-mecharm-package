@@ -58,6 +58,15 @@ def generate_launch_description():
         # habia que hacer en el robot.
         DeclareLaunchArgument('max_process_hz', default_value='0.0'),
         DeclareLaunchArgument('detect_scale', default_value='1.0'),
+        # Ritmo FIJO de deteccion. El portatil da de sobra; 15 Hz es mas
+        # que suficiente para la aproximacion y deja el bus de imagen
+        # tranquilo. Sube a 20 si quieres, o 0 para procesar cada
+        # fotograma que llegue (mas Hz pero a rafagas).
+        DeclareLaunchArgument('process_hz', default_value='15.0'),
+        # 0 = OpenCV usa todos los nucleos para detectMarkers/imdecode.
+        DeclareLaunchArgument('opencv_threads', default_value='0'),
+        # La imagen anotada, limitada aunque Foxglove este mirando.
+        DeclareLaunchArgument('annotated_hz', default_value='5.0'),
         DeclareLaunchArgument('start_aruco_detector', default_value='true'),
         DeclareLaunchArgument('start_aruco_approach', default_value='true'),
         DeclareLaunchArgument('start_object_grasp', default_value='false'),
@@ -158,6 +167,12 @@ def generate_launch_description():
             'marker_length': LaunchConfiguration('marker_length'),
             'max_process_hz': LaunchConfiguration('max_process_hz'),
             'detect_scale': LaunchConfiguration('detect_scale'),
+            'process_hz': ParameterValue(
+                LaunchConfiguration('process_hz'), value_type=float),
+            'opencv_threads': ParameterValue(
+                LaunchConfiguration('opencv_threads'), value_type=int),
+            'annotated_hz': ParameterValue(
+                LaunchConfiguration('annotated_hz'), value_type=float),
             'equalize_hist': True,
             'publish_tf': True,
         }],

@@ -35,6 +35,12 @@ def generate_launch_description():
             ),
             'equalize_hist': True,
             'publish_tf': True,
+            # En la Nano: ritmo fijo bajo y OpenCV acotado para no
+            # pisar el nucleo del laser.
+            'process_hz': 8.0,
+            'opencv_threads': 2,
+            'annotated_hz': 3.0,
+            'detect_scale': 0.6,
         }],
     )
 

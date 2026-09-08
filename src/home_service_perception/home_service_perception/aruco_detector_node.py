@@ -6,6 +6,8 @@ import cv2
 import numpy as np
 
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
@@ -173,6 +175,47 @@ class ArucoDetector(Node):
         )
         self._last_process_t = 0.0
 
+        # ------------------------------------------------------------
+        # DESACOPLAR CAPTURA DE PROCESO
+        #
+        # El callback de imagen hacia TODO -- decodificar el JPEG,
+        # equalizar, detectMarkers, solvePnP por marcador, TF, publicar
+        # -- de forma sincrona en el unico hilo del executor. Con una
+        # cola de 5 y un coste por fotograma que varia mucho (detectar
+        # depende de cuantos cuadrilateros candidatos encuentre, y eso
+        # se dispara con ruido o clutter), unos fotogramas se
+        # amontonaban y salian a rafaga: de ahi las CAIDAS BRUSCAS de Hz
+        # que impedian que la aproximacion se asentara.
+        #
+        # Ahora el callback solo GUARDA el ultimo fotograma (coste casi
+        # nulo) y un timer lo procesa a ritmo fijo. Siempre el mas
+        # fresco, nunca uno rancio de la cola, y a tasa determinista.
+        # process_hz <= 0 -> comportamiento antiguo (procesar en el
+        # callback), por si hace falta volver atras.
+        self.declare_parameter('process_hz', 15.0)
+        self.process_hz = float(self.get_parameter('process_hz').value)
+
+        # Hilos que OpenCV usa en detectMarkers / imdecode. 0 = deja
+        # que OpenCV decida (suele coger todos). En la Nano conviene
+        # limitarlo para no pisar el nucleo del laser; en el portatil,
+        # cuantos mas mejor.
+        self.declare_parameter('opencv_threads', 0)
+        _cvt = int(self.get_parameter('opencv_threads').value)
+        if _cvt > 0:
+            cv2.setNumThreads(_cvt)
+
+        # La imagen anotada (dibujo + axes + encode + publicar) es cara
+        # y nadie necesita verla a 30 fps. Se limita aparte aunque haya
+        # suscriptor.
+        self.declare_parameter('annotated_hz', 5.0)
+        self.annotated_hz = float(self.get_parameter('annotated_hz').value)
+        self._last_annotated_t = 0.0
+
+        # Estado de la captura desacoplada.
+        self._latest_frame = None      # (header, image_bgr) ya decodificado
+        self._latest_stamp_ns = None   # sello del ultimo procesado
+        self._frame_lock = None        # se crea abajo (threading)
+
         # Escala a la que se corre detectMarkers (1.0 = resolucion real).
         # detectMarkers es O(pixeles): a 960x540 tardaba ~250 ms en la
         # Nano. A 0.6 (~576x324) baja a ~90 ms y un ArUco de 8 cm a 1 m
@@ -199,15 +242,52 @@ class ArucoDetector(Node):
             cv2.aruco.DetectorParameters_create()
         )
 
+        # Un ArUco de 8 cm entre 0.15 y 1.5 m ocupa una fraccion GRANDE
+        # del encuadre. El 0.03 de fabrica acepta candidatos minusculos
+        # -> muchos cuadrilateros que rechazar, coste alto y sobre todo
+        # MUY VARIABLE con el ruido. Subir el minimo recorta ese trabajo
+        # inutil y estabiliza el tiempo por fotograma.
+        self.declare_parameter('min_marker_perimeter_rate', 0.06)
+        self.detector_parameters.minMarkerPerimeterRate = float(
+            self.get_parameter('min_marker_perimeter_rate').value
+        )
+
+        # Refinado subpixel de esquinas: ~1 ms con pocos marcadores y
+        # mejora center_x_normalized y la normal del ArUco, que es lo
+        # que usa el alineamiento. CORNER_REFINE_SUBPIX = 1.
+        self.declare_parameter('corner_refine', True)
+        if bool(self.get_parameter('corner_refine').value):
+            self.detector_parameters.cornerRefinementMethod = 1
+            self.detector_parameters.cornerRefinementWinSize = 4
+            self.detector_parameters.cornerRefinementMaxIterations = 20
+
+        import threading as _threading
+        self._frame_lock = _threading.Lock()
+
+        # Estadisticas de rendimiento: cada 5 s se registra la tasa real
+        # de proceso y el coste medio, para ver de un vistazo si el
+        # portatil va sobrado o pega tirones.
+        self._stat_n = 0
+        self._stat_ms = 0.0
+        self._stat_hits = 0
+        self._stat_t0 = None
+
         # ----------------------------------------------------------
         # Subscribers
         # ----------------------------------------------------------
+
+        # Grupos: la ingesta de imagen y camera_info NO deben esperar a
+        # que termine el procesado pesado. El timer de proceso va en su
+        # propio grupo exclusivo (un solo procesado a la vez).
+        self._io_group = ReentrantCallbackGroup()
+        self._proc_group = MutuallyExclusiveCallbackGroup()
 
         self.camera_info_sub = self.create_subscription(
             CameraInfo,
             self.camera_info_topic,
             self.camera_info_callback,
-            10
+            10,
+            callback_group=self._io_group,
         )
 
         # BEST_EFFORT + KEEP_LAST 1: la camara publica asi (perfil sensor
@@ -219,14 +299,23 @@ class ArucoDetector(Node):
                 CompressedImage,
                 self.image_topic + '/compressed',
                 self.compressed_callback,
-                qos_profile_sensor_data
+                qos_profile_sensor_data,
+                callback_group=self._io_group,
             )
         else:
             self.image_sub = self.create_subscription(
                 Image,
                 self.image_topic,
                 self.image_callback,
-                qos_profile_sensor_data
+                qos_profile_sensor_data,
+                callback_group=self._io_group,
+            )
+
+        if self.process_hz > 0.0:
+            self._proc_timer = self.create_timer(
+                1.0 / self.process_hz,
+                self._process_timer,
+                callback_group=self._proc_group,
             )
 
         # ----------------------------------------------------------
@@ -397,7 +486,7 @@ class ArucoDetector(Node):
     # ==============================================================
 
     def compressed_callback(self, msg):
-        """JPEG -> BGR y de ahi al mismo camino que la imagen cruda."""
+        """JPEG -> BGR. Con process_hz>0 solo guarda; procesa el timer."""
         try:
             buf = np.frombuffer(msg.data, dtype=np.uint8)
             image = cv2.imdecode(buf, cv2.IMREAD_COLOR)
@@ -410,10 +499,10 @@ class ArucoDetector(Node):
         if image is None:
             return
 
-        self._process(msg.header, image)
+        self._ingest(msg.header, image)
 
     def image_callback(self, msg):
-        """Imagen cruda -> BGR y de ahi al camino comun."""
+        """Imagen cruda -> BGR. Con process_hz>0 solo guarda."""
         try:
             image = self.bridge.imgmsg_to_cv2(
                 msg,
@@ -425,13 +514,44 @@ class ArucoDetector(Node):
             )
             return
 
-        self._process(msg.header, image)
+        self._ingest(msg.header, image)
+
+    def _ingest(self, header, image):
+        """Guarda el fotograma para que lo procese el timer.
+
+        Si process_hz<=0 se procesa aqui mismo (modo antiguo).
+        """
+        if self.process_hz <= 0.0:
+            self._process(header, image)
+            return
+        with self._frame_lock:
+            self._latest_frame = (header, image)
+
+    def _process_timer(self):
+        """Toma el ultimo fotograma disponible y lo procesa. Salta si no
+        ha llegado ninguno nuevo desde la ultima vez (no reprocesa)."""
+        with self._frame_lock:
+            frame = self._latest_frame
+        if frame is None:
+            return
+        header, image = frame
+        stamp_ns = (
+            int(header.stamp.sec) * 1_000_000_000 + int(header.stamp.nanosec)
+        )
+        if self._latest_stamp_ns == stamp_ns:
+            return
+        self._latest_stamp_ns = stamp_ns
+        self._process(header, image)
 
     # ==============================================================
     # Camino comun (lo alimentan image_callback y compressed_callback)
     # ==============================================================
 
     def _process(self, header, image):
+
+        _t_start = self.get_clock().now().nanoseconds * 1e-9
+        if self._stat_t0 is None:
+            self._stat_t0 = _t_start
 
         if self.camera_matrix is None:
             self.get_logger().warn(
@@ -451,8 +571,17 @@ class ArucoDetector(Node):
             self._last_process_t = now
 
         # ¿Alguien mira la imagen anotada? Si no, no dibujamos ni la
-        # codificamos: es lo que mas frena el callback en la Nano.
+        # codificamos: es lo que mas frena el callback. Y si la mira,
+        # aun asi la limitamos a annotated_hz -- nadie necesita el
+        # recuadro a 30 fps y encode+publish de la imagen entera compite
+        # con la deteccion.
         draw_annotated = self.annotated_pub.get_subscription_count() > 0
+        if draw_annotated and self.annotated_hz > 0.0:
+            _now_a = self.get_clock().now().nanoseconds * 1e-9
+            if (_now_a - self._last_annotated_t) < (1.0 / self.annotated_hz):
+                draw_annotated = False
+            else:
+                self._last_annotated_t = _now_a
 
         gray = cv2.cvtColor(
             image,
@@ -720,6 +849,25 @@ class ArucoDetector(Node):
                     f'Annotated image publish error: {exc}'
                 )
 
+        # --- estadisticas de rendimiento ---
+        _now = self.get_clock().now().nanoseconds * 1e-9
+        self._stat_n += 1
+        self._stat_ms += (_now - _t_start) * 1000.0
+        if detection_array.detections:
+            self._stat_hits += 1
+        _win = _now - self._stat_t0
+        if _win >= 5.0:
+            hz = self._stat_n / _win
+            avg_ms = self._stat_ms / max(1, self._stat_n)
+            self.get_logger().info(
+                f'deteccion {hz:.1f} Hz  ({avg_ms:.0f} ms/frame, '
+                f'{self._stat_hits}/{self._stat_n} con marcador)'
+            )
+            self._stat_n = 0
+            self._stat_ms = 0.0
+            self._stat_hits = 0
+            self._stat_t0 = _now
+
 
 def main(args=None):
 
@@ -727,9 +875,15 @@ def main(args=None):
 
     node = ArucoDetector()
 
+    # Multihilo: la ingesta de fotogramas y camera_info no se quedan
+    # bloqueadas detras del procesado pesado. 3 hilos bastan (io + proc
+    # + margen); mas no ayuda porque el proc_group es exclusivo.
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
+
     try:
 
-        rclpy.spin(node)
+        executor.spin()
 
     except KeyboardInterrupt:
 
@@ -737,6 +891,7 @@ def main(args=None):
 
     finally:
 
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 
