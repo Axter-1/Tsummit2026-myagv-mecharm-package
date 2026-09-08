@@ -51,7 +51,10 @@ def generate_launch_description():
         # WiFi solo viaja el JPEG (246.8 -> 6.1 Mbit/s medidos) y
         # publicar ambas seria gastar CPU de la Nano para nada.
         DeclareLaunchArgument("camera_publish_raw", default_value="true"),
-        DeclareLaunchArgument("camera_publish_compressed", default_value="true"),
+        # En local el detector consume la imagen raw; comprimir ademas cada
+        # frame con cv2.imencode solo añade carga CPU. El modo distribuido
+        # lo activa explicitamente desde run_robot_routine.sh.
+        DeclareLaunchArgument("camera_publish_compressed", default_value="false"),
         DeclareLaunchArgument("marker_length", default_value="0.08"),
         # Montaje de la camara respecto a base_link, en metros y radianes.
         # SIN MEDIR: son estimaciones. Un error aqui desplaza el marcador
@@ -119,8 +122,13 @@ def generate_launch_description():
             "image_topic": "/camera/image_raw",
             "camera_info_topic": "/camera/camera_info",
             "marker_length": LaunchConfiguration("marker_length"),
+            "use_compressed": False,
             "equalize_hist": True,
             "publish_tf": True,
+            "process_hz": 8.0,
+            "opencv_threads": 1,
+            "annotated_hz": 3.0,
+            "detect_scale": 0.6,
         }],
         condition=IfCondition(LaunchConfiguration("start_aruco_detector")),
     )

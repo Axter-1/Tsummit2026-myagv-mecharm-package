@@ -63,6 +63,13 @@ own_ip() {
     fi
 }
 
+ip_for_peer() {
+    local peer="$1"
+    ip -4 route get "${peer}" 2>/dev/null \
+        | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}' \
+        | head -1
+}
+
 has_local_ip() {
     ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 \
         | grep -qx "$1"
@@ -75,7 +82,11 @@ if [ "${DISTRIBUTED}" = "1" ]; then
     # arrancan y el error es cripticO ("rcl node's rmw handle is
     # invalid"), sin mencionar la red por ningun lado.
     if [ -z "${ROBOT_IP}" ]; then
-        ROBOT_IP="$(own_ip)"
+        if [ -n "${LAPTOP_IP}" ]; then
+            ROBOT_IP="$(ip_for_peer "${LAPTOP_IP}")"
+        else
+            ROBOT_IP="$(own_ip)"
+        fi
         [ -n "${ROBOT_IP}" ] \
             && printf 'ROBOT_IP detectada: %s\n' "${ROBOT_IP}"
     fi
@@ -160,6 +171,36 @@ run_bg() {
 
 is_running() {
     "${DOCKER[@]}" exec "${CONTAINER}" pgrep -f "$1" >/dev/null 2>&1
+}
+
+node_visible() {
+    local node_name="$1"
+    "${DOCKER[@]}" exec -e "CYCLONEDDS_URI=${DDS_URI}" \
+        "${CONTAINER}" bash -lc \
+        "${source_env}; ros2 node list --no-daemon 2>/dev/null | grep -qx '${node_name}'"
+}
+
+node_running() {
+    local process_pattern="$1" node_name="$2"
+    is_running "${process_pattern}" && node_visible "${node_name}"
+}
+
+restart_stale() {
+    local process_pattern="$1" node_name="$2"
+    if is_running "${process_pattern}" && ! node_visible "${node_name}"; then
+        printf 'Proceso de %s invisible en el DDS actual: reiniciando.\n' \
+            "${node_name}"
+        "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
+            "pkill -KILL -f '${process_pattern}' || true"
+        sleep 1
+    fi
+}
+
+action_visible() {
+    local action_name="$1"
+    "${DOCKER[@]}" exec -e "CYCLONEDDS_URI=${DDS_URI}" \
+        "${CONTAINER}" bash -lc \
+        "${source_env}; ros2 action list 2>/dev/null | grep -qx '${action_name}'"
 }
 
 cpu_budget() {
@@ -270,10 +311,10 @@ stop() {
 }
 
 status() {
-    "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
-        "${source_env}; printf '%s\\n' '--- nodes ---'; ros2 node list; \
+    "${DOCKER[@]}" exec -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" bash -lc \
+        "${source_env}; printf '%s\\n' '--- nodes DDS actual ---'; ros2 node list --no-daemon; \
          printf '%s\\n' '--- actions ---'; ros2 action list; \
-         printf '%s\\n' '--- velocity publishers ---'; ros2 topic info /cmd_vel -v || true"
+          printf '%s\\n' '--- velocity publishers ---'; ros2 topic info /cmd_vel -v || true"
 }
 
 mux() {
@@ -287,9 +328,23 @@ mux() {
     # esta arrancado y nunca lo lanza -> /cmd_vel no existe nunca.
     # 'ros2 run twist_mux twist_mux' es la invocacion real y no aparece
     # en ningun argumento de otro launch.
-    if is_running '[r]os2 run twist_mux twist_mux'; then
-        printf 'twist_mux ya iniciado.\n'
-        return
+    restart_stale '[r]os2 run twist_mux twist_mux' '/twist_mux'
+    if node_running '[r]os2 run twist_mux twist_mux' '/twist_mux'; then
+        # Un mux lanzado con otra CYCLONEDDS_URI puede seguir vivo pero ser
+        # invisible para esta invocacion. En ese caso el teleop publica al
+        # vacio: comprueba que el nodo pertenece al grafo DDS actual antes
+        # de reutilizar el proceso.
+        if "${DOCKER[@]}" exec -e "CYCLONEDDS_URI=${DDS_URI}" \
+            "${CONTAINER}" bash -lc \
+            "${source_env}; ros2 node list 2>/dev/null | grep -qx '/twist_mux'";
+        then
+            printf 'twist_mux ya iniciado.\n'
+            return
+        fi
+        printf 'twist_mux antiguo o invisible en el DDS actual: reiniciando.\n'
+        "${DOCKER[@]}" exec "${CONTAINER}" bash -lc \
+            "pkill -KILL -f '[t]wist_mux' || true"
+        sleep 1
     fi
     run_bg twist_mux \
         "ros2 run twist_mux twist_mux --ros-args --params-file '${TWIST_MUX_PARAMS}' -r cmd_vel_out:=/cmd_vel"
@@ -299,7 +354,8 @@ model() {
     # robot_state_publisher con el URDF del myAGV (raiz base_footprint,
     # encaja con la TF odom->base_footprint). Aporta /robot_description
     # y base_footprint->base_link, para ver el modelo en RViz/Foxglove.
-    if is_running '[r]obot_state_publisher'; then
+    restart_stale '[r]obot_state_publisher' '/robot_state_publisher'
+    if node_running '[r]obot_state_publisher' '/robot_state_publisher'; then
         return
     fi
     run_bg model \
@@ -308,7 +364,8 @@ model() {
 }
 
 base() {
-    if is_running '[m]yagv_odometry_node'; then
+    restart_stale '[m]yagv_odometry_node' '/myagv_odometry_node'
+    if node_running '[m]yagv_odometry_node' '/myagv_odometry_node'; then
         printf 'Base ya iniciada.\n'
     else
         run_bg base 'START_BRINGUP=0 bash /workspace/docker/run_all_robot_nodes.sh'
@@ -318,8 +375,12 @@ base() {
 }
 
 teleop() {
-    mux
-    if is_running '[b]luetooth_gamepad_teleop'; then
+    # El mando publica a /cmd_vel_joy, pero la base es quien consume la
+    # salida final /cmd_vel. Hacer teleop autosuficiente evita que el mando
+    # funcione en ROS y el robot permanezca inmovil por falta de suscriptor.
+    base
+    restart_stale '[b]luetooth_gamepad_teleop' '/bluetooth_gamepad_teleop'
+    if node_running '[b]luetooth_gamepad_teleop' '/bluetooth_gamepad_teleop'; then
         printf 'Teleop ya iniciado.\n'
         return
     fi
@@ -331,8 +392,13 @@ aruco() {
     # nunca, asi que vigilar 'aruco_detector_node' daria siempre falso
     # y cada llamada lanzaria otra camara encima de la anterior.
     local guard='[a]ruco_detector_node'
-    [ "${DISTRIBUTED}" = "1" ] && guard='[c]si_camera_node'
-    if is_running "${guard}"; then
+    local guard_node='/aruco_detector_node'
+    if [ "${DISTRIBUTED}" = "1" ]; then
+        guard='[c]si_camera_node'
+        guard_node='/csi_camera_node'
+    fi
+    restart_stale "${guard}" "${guard_node}"
+    if node_running "${guard}" "${guard_node}"; then
         printf 'Pila ArUco ya iniciada.\n'
         return
     fi
@@ -350,7 +416,7 @@ aruco() {
         # La camara deja de publicar la imagen cruda: por WiFi solo va
         # el JPEG, y publicar ambas seria gastar CPU para nada.
         extra="start_aruco_detector:=false start_aruco_approach:=false \
-               camera_publish_raw:=false"
+               camera_publish_raw:=false camera_publish_compressed:=true"
         printf 'MODO DISTRIBUIDO: detector y aproximacion NO se lanzan aqui.\n'
         printf '  Arrancalos en el portatil con:\n'
         printf '    ROBOT_IP=%s LAPTOP_IP=%s ./scripts/tsummit_offboard.sh run\n' \
@@ -376,7 +442,8 @@ aruco() {
 
 nav2() {
     mux
-    if is_running '[c]ontroller_server'; then
+    restart_stale '[c]ontroller_server' '/controller_server'
+    if node_running '[c]ontroller_server' '/controller_server'; then
         printf 'Nav2 ya iniciado.\n'
         return
     fi
@@ -397,7 +464,8 @@ slam() {
     # -> no hay scans corruptos.
     cpu_budget
     local other_cpus="${SLAM_CPUS}"
-    if ! is_running '[s]can_sanitizer_node'; then
+    restart_stale '[s]can_sanitizer_node' '/scan_sanitizer_node'
+    if ! node_running '[s]can_sanitizer_node' '/scan_sanitizer_node'; then
         local san="taskset -c ${other_cpus} ros2 run home_service_navigation scan_sanitizer_node"
         if [ "${SLAM_REPORT_BLIND}" = "1" ]; then
             san="${san} --ros-args -p report_blind_sectors:=true"
@@ -405,7 +473,8 @@ slam() {
         run_bg scan_sanitizer "${san}"
         sleep 2
     fi
-    if is_running '[a]sync_slam_toolbox_node'; then
+    restart_stale '[a]sync_slam_toolbox_node' '/slam_toolbox'
+    if node_running '[a]sync_slam_toolbox_node' '/slam_toolbox'; then
         printf 'SLAM ya iniciado.\n'
         return
     fi
@@ -414,7 +483,7 @@ slam() {
         "taskset -c ${other_cpus} nice -n 10 ros2 run slam_toolbox async_slam_toolbox_node --ros-args --params-file '${SLAM_PARAMS}'"
     printf 'Perfil: %s (mapeo en nucleo(s) %s)\n' \
         "$(basename "${SLAM_PARAMS}")" "${SLAM_CPUS}"
-    if is_running '[r]qt'; then
+    if node_running '[r]qt' '/rqt_gui'; then
         printf 'AVISO: RQt no esta confinado como RViz y compite con el mapeo.\n'
         printf '       Cierralo mientras mapeas (run_robot_routine.sh stop no lo salva).\n'
     fi
@@ -445,7 +514,7 @@ mapping() {
 
 save_map() {
     local name="${1:?uso: save-map <nombre> (se guarda en /workspace/maps)}"
-    if ! is_running '[a]sync_slam_toolbox_node'; then
+    if ! node_running '[a]sync_slam_toolbox_node' '/slam_toolbox'; then
         printf 'ERROR: no hay SLAM en marcha; nadie publica /map.\n' >&2
         exit 1
     fi
@@ -518,7 +587,8 @@ run_gui() {
 
 foxglove() {
     ensure_pkg 'ros2 pkg prefix foxglove_bridge' ros-humble-foxglove-bridge
-    if is_running '[f]oxglove_bridge'; then
+    restart_stale '[f]oxglove_bridge' '/foxglove_bridge'
+    if node_running '[f]oxglove_bridge' '/foxglove_bridge'; then
         printf 'foxglove_bridge ya iniciado (puerto %s).\n' "${FOXGLOVE_PORT}"
     else
         run_bg foxglove \
@@ -552,11 +622,21 @@ rviz() {
     fi
     local cmd='rviz2'
     [ -n "${cfg}" ] && cmd="rviz2 -d '${cfg}'"
+    restart_stale '[r]viz2' '/rviz2'
+    if node_running '[r]viz2' '/rviz2'; then
+        printf 'RViz ya iniciado.\n'
+        return
+    fi
     run_gui rviz "${cmd}"
 }
 
 rqt() {
     ensure_pkg 'command -v rqt' ${RQT_PKGS}
+    restart_stale '[r]qt' '/rqt_gui'
+    if node_running '[r]qt' '/rqt_gui'; then
+        printf 'RQt ya iniciado.\n'
+        return
+    fi
     run_gui rqt 'rqt'
 }
 
@@ -584,7 +664,7 @@ check() {
          ros2 pkg prefix home_service_behaviors >/dev/null; \
          ros2 pkg prefix home_service_bringup >/dev/null; \
          echo '=== acciones ==='; ros2 action list; \
-         echo '=== nodos ==='; ros2 node list --no-daemon; \
+         echo '=== nodos DDS actual ==='; ros2 node list --no-daemon; \
          echo '=== TF imprescindibles ==='; \
          python3 - <<'PY'
 import rclpy, time
@@ -636,6 +716,8 @@ aruco_goal() {
     # 30 s no daban ni para una vuelta de busqueda paso-y-mira: cada
     # paso son ~1.15 s y hacen falta bastantes para barrer 360 grados.
     local timeout_s="${3:-${APPROACH_TIMEOUT:-180.0}}"
+    action_visible '/aruco_lidar_approach' \
+        || { printf 'ERROR: /aruco_lidar_approach no es visible en el DDS actual.\n' >&2; exit 1; }
     "${DOCKER[@]}" exec -i -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" bash -lc \
         "${source_env}; ros2 action send_goal /aruco_lidar_approach \
          home_service_interfaces/action/ArucoApproach \
@@ -647,6 +729,8 @@ nav2_goal() {
     local x="${1:?uso: nav2-goal <x> <y> [yaw_deg]}"
     local y="${2:?uso: nav2-goal <x> <y> [yaw_deg]}"
     local yaw="${3:-0.0}"
+    action_visible '/navigate_to_pose' \
+        || { printf 'ERROR: /navigate_to_pose no es visible en el DDS actual.\n' >&2; exit 1; }
     "${DOCKER[@]}" exec -i -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" bash -lc "${source_env}; python3 - <<PY
 import math
 import rclpy
@@ -738,7 +822,7 @@ case "${1:-help}" in
             '  base                 base, LiDAR, modelo (robot_state_publisher) y twist_mux' \
             '  mux                  solo twist_mux: /cmd_vel_joy|aruco|nav -> /cmd_vel' \
             '  model                solo robot_state_publisher (/robot_description + TF del URDF)' \
-            '  teleop               mando Bluetooth -> /cmd_vel_joy (arranca twist_mux)' \
+            '  teleop               base + mando Bluetooth -> /cmd_vel_joy' \
             '  aruco                camara, detector y aproximacion (sin brazo)' \
             '  nav2                 AMCL + Nav2 con el mapa configurado' \
             '  slam                 mapeo SLAM en vivo (scan_sanitizer + slam_toolbox), sin Nav2' \
