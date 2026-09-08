@@ -2744,6 +2744,30 @@ class ArucoLidarApproachServer(Node):
                 final_distance < self.pf('lidar_nearest_below')
             )
 
+            # Cuando la camara pierde el marcador, el carrot de la ruta
+            # puede quedar exactamente en la pose actual aunque el LiDAR
+            # siga midiendo distancia para avanzar. En ese caso
+            # holonomic_command recibe una velocidad valida, pero una
+            # direccion de longitud cero y publica ruedas a cero. Durante
+            # el endgame la normal LiDAR ya es la referencia de avance:
+            # proyectamos un carrot virtual delante del robot para que la
+            # velocidad LiDAR siga teniendo una direccion util.
+            if (
+                endgame_speed and
+                (
+                    detection is None or
+                    remaining <= self.pf('distance_tolerance')
+                )
+            ):
+                carrot_distance = max(
+                    self.pf('lookahead_distance'),
+                    self.pf('distance_tolerance'),
+                )
+                carrot_xy = (
+                    rx + carrot_distance * math.cos(target_yaw),
+                    ry + carrot_distance * math.sin(target_yaw),
+                )
+
             # final_distance viene del ciclo anterior y ya es la medida
             # unificada (eco cercano en endgame, mediana lejos). El eco
             # de seguridad de ESTE ciclo solo puede hacerla mas
