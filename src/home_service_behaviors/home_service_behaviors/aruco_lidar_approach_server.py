@@ -2753,6 +2753,14 @@ class ArucoLidarApproachServer(Node):
                 final_distance < self.pf('lidar_nearest_below')
             )
 
+            # En el endgame el planificador no debe cerrar ni cortar el
+            # mando con la tolerancia general: la llegada la decide abajo
+            # el LiDAR con final_distance_tolerance.
+            if endgame_speed:
+                limits['distance_tolerance'] = self.pf(
+                    'final_distance_tolerance'
+                )
+
             # Cuando la camara pierde el marcador, el carrot de la ruta
             # puede quedar exactamente en la pose actual aunque el LiDAR
             # siga midiendo distancia para avanzar. En ese caso
@@ -2826,7 +2834,7 @@ class ArucoLidarApproachServer(Node):
                 else:
                     remaining_ctrl = min(remaining, bt)
 
-            vx, vy, wz, yaw_error, reached, yaw_settled = (
+            vx, vy, wz, yaw_error, _planner_reached, yaw_settled = (
                 planner.holonomic_command(
                     rx, ry, ryaw,
                     carrot_xy,
