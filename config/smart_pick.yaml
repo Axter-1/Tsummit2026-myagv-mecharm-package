@@ -1,0 +1,50 @@
+# =====================================================================
+#  Ajustes del agarre inteligente (scripts/smart_pick.py)
+#  TODO ESTO CORRE EN EL PORTATIL. La Jetson no lo lee.
+# =====================================================================
+
+smart_pick:
+
+  # -------------------------------------------------------------------
+  # CORRECCION DE POSE POR VISION  (solo con --refine)
+  # -------------------------------------------------------------------
+  # La pose enseñada supone que la pieza esta EXACTAMENTE donde estaba
+  # al enseñarla. En pista la base para con +-34 mm de dispersion, asi
+  # que la pieza aparece desplazada. Esto mide ese desplazamiento en la
+  # imagen y lo suma a la X/Y del preagarre y del contacto.
+  #
+  # La escala mm/pixel se deduce sola del tamaño conocido de la pieza:
+  # no hacen falta los intrinsecos de la camara.
+  #
+  # LO QUE SI HAY QUE CALIBRAR es el MAPEO DE EJES: que direccion de la
+  # imagen corresponde a +X y +Y del brazo. Depende de como este montada
+  # la camara y NO se puede adivinar sin probarlo.
+  #
+  # COMO CALIBRARLO (5 minutos, una sola vez):
+  #   1. Coloca la pieza donde la enseñaste. Anota su centro en pixeles:
+  #        python3 scripts/smart_pick.py auto 100 --dry-run
+  #      (lo imprime en "geometria local").
+  #      Pon ese centro en centro_objetivo_x / centro_objetivo_y.
+  #   2. Desplaza la pieza 30 mm hacia la DERECHA vista por la camara.
+  #      Vuelve a mirar el centro: habra crecido en X de imagen.
+  #   3. Pregunta: para volver a centrarla bajo la pinza, el brazo tiene
+  #      que moverse en +Y o en -Y? Ese signo va en signo_y, y el otro
+  #      queda en 0. Repite empujando la pieza en la otra direccion.
+  #   4. Deja intercambia_ejes en true si el eje horizontal de la imagen
+  #      mueve la X del brazo (y no la Y).
+  #
+  # Con signo_x y signo_y a 0.0 la correccion es NULA: es el valor
+  # seguro por defecto, el script avisa y no toca la pose.
+  # -------------------------------------------------------------------
+
+  # Donde debe aparecer el centro de la pieza cuando la pose enseñada es
+  # correcta. Vacio = centro del encuadre.
+  # centro_objetivo_x: 480.0
+  # centro_objetivo_y: 270.0
+
+  # Mapeo imagen -> brazo. 0.0 = desactivado (por defecto).
+  signo_x: 0.0
+  signo_y: 0.0
+
+  # true si el eje horizontal de la imagen mueve la X del brazo.
+  intercambia_ejes: false
