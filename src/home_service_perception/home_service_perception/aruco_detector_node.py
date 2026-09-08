@@ -560,11 +560,11 @@ class ArucoDetector(Node):
             )
             return
 
-        # Limita el ritmo de PROCESO (no el de la camara): detectar
-        # ArUcos es lo que satura la Nano. A max_process_hz basta y
-        # sobra para la aproximacion (control lento) y deja CPU para
-        # todo lo demas. 0 = sin limite.
-        if self.max_process_hz > 0.0:
+        # Limita el ritmo de PROCESO. Con process_hz>0 el ritmo ya lo
+        # marca el timer y este gate sobra (ademas su return temprano se
+        # saltaba las estadisticas). Solo actua en modo antiguo
+        # (process_hz<=0, procesar en el callback).
+        if self.process_hz <= 0.0 and self.max_process_hz > 0.0:
             now = self.get_clock().now().nanoseconds * 1e-9
             if (now - self._last_process_t) < (1.0 / self.max_process_hz):
                 return
