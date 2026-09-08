@@ -51,16 +51,19 @@ def generate_launch_description():
         'heading_realign_threshold': 0.25,
 
         'kp_lateral': 0.08,
-        'max_lateral_speed': 0.04,
+        # El minimo real de avance es ~0.07 m/s. Un techo lineal de 0.06
+        # dejaba todo el rango util dentro de la zona muerta.
+        'max_lateral_speed': 0.08,
         'lateral_tolerance': 0.04,
         'lateral_realign_threshold': 0.15,
 
         'kp_linear': 0.5,
-        'max_linear_speed': 0.06,
-        'distance_tolerance': 0.03,
+        'max_linear_speed': 0.12,
+        'distance_tolerance': 0.045,
 
-        'camera_x_minus_lidar_x': 0.16,
-        'lidar_sector_half_angle_deg': 4.0,
+        # Separacion medida entre camera_link y laser_frame.
+        'camera_x_minus_lidar_x': 0.095,
+        'lidar_sector_half_angle_deg': 6.0,
 
         # 0.6: la deteccion en la Nano ronda 4-9 Hz y con picos de carga
         # se salta algun frame; 0.35 abortaba con TARGET_LOST en falso.

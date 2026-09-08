@@ -152,6 +152,26 @@ def test_perfil_respeta_la_zona_muerta_fuera_de_tolerancia():
     assert v >= 0.05
 
 
+def test_frenado_no_corta_el_avance_por_la_tolerancia_visual():
+    """El margen de parada no debe alternar cero y minimo de rueda.
+
+    `brake_target` devuelve una distancia equivalente que puede ser menor
+    que la tolerancia de llegada aunque la distancia fisica aun requiera
+    avance. Con la implementacion anterior este caso publicaba cero y el
+    siguiente eco volvia a activar el minimo.
+    """
+    v = profile_speed(
+        0.020,
+        0.12,
+        0.25,
+        v_min=0.07,
+        tolerance=0.045,
+        stop_margin=0.010,
+    )
+
+    assert v >= 0.07
+
+
 # ---------------------------------------------------------------------
 # Estimador
 # ---------------------------------------------------------------------

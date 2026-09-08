@@ -546,7 +546,19 @@ def profile_speed(
     el launch, y el dia que se toquen esto deja de ser inofensivo --
     la misma leccion que la elipse de la zona muerta.
     """
-    if remaining <= tolerance:
+    # `remaining` puede ser la distancia equivalente devuelta por
+    # `brake_target`, no la distancia geometrica al objetivo. En ese caso
+    # usar `tolerance` aqui manda cero antes de tiempo: el siguiente eco
+    # puede volver a poner el valor por encima de la tolerancia y el mando
+    # alterna entre cero y el minimo de las ruedas. `stop_margin` ya
+    # representa la distancia que el robot necesita para detenerse; solo
+    # usar la tolerancia cuando no se proporciona ese margen (compatibilidad
+    # con llamadas directas al planificador).
+    stop_threshold = (
+        stop_margin if stop_margin > 0.0 else tolerance
+    )
+
+    if remaining <= stop_threshold:
         return 0.0
 
     v = min(v_max, math.sqrt(max(0.0, 2.0 * a_max * remaining)))

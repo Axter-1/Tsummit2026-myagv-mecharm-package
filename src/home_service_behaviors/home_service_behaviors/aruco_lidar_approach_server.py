@@ -2822,7 +2822,16 @@ class ArucoLidarApproachServer(Node):
                 self.pf('final_heading_settle_sec')
             )
 
-            centred = abs(lateral) <= self.pf('lateral_tolerance')
+            # Mientras hay imagen, el centro del ArUco es la medida mas
+            # directa del desfase lateral real. La pose filtrada puede
+            # quedar desplazada por el error de TF o por la escala del
+            # marcador. En tramo ciego no hay esa medida, asi que se
+            # conserva el criterio odometrico.
+            centred = (
+                camera_centered
+                if detection is not None
+                else abs(lateral) <= self.pf('lateral_tolerance')
+            )
 
             if (
                 front_clearance is not None and
@@ -2833,8 +2842,11 @@ class ArucoLidarApproachServer(Node):
                 # La perpendicularidad la juzga la normal LiDAR. El centro
                 # de imagen es diagnostico: la camara tiene un offset
                 # angular propio y no debe invalidar una pose geometrica.
-                (final_lidar_heading is not None or
-                 (blind and detection is None))
+                # El tramo ciego permite seguir avanzando con odometria,
+                # pero no permite aceptar la llegada sin una normal fresca:
+                # de lo contrario una normal LiDAR caducada podia dejar
+                # terminar el goal con una orientacion no perpendicular.
+                final_lidar_heading is not None
             ):
                 reached = True
 
