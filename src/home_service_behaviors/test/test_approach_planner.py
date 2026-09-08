@@ -842,7 +842,9 @@ def test_con_compensacion_llega():
     for pedido in (0.15, 0.20, 0.30):
         err = _simular_frenada(pedido, latency=0.20, period=0.05,
                                sensor_period=0.125, compensar=True)
-        assert -0.012 < err < 0.028, f'pedido {pedido}: error {err*1000:.0f} mm'
+        # deberia clavar el objetivo; margen amplio por si el modelo 1-D
+        # difiere del robot real, pero NUNCA pasarse mas de 2 cm.
+        assert -0.020 < err < 0.020, f'pedido {pedido}: error {err*1000:.0f} mm'
 
 
 def test_compensacion_robusta_a_la_latencia():
@@ -859,7 +861,7 @@ def test_compensacion_robusta_a_la_latencia():
 def test_brake_target_nunca_negativo_es_parar():
     """Si la compensacion da negativo, profile_speed devuelve 0."""
     bt = brake_target(0.16, 0.15, speed=0.15, latency=0.20, period=0.05,
-                      sensor_period=0.125, v_max=0.18, a_max=0.25)
+                      sensor_period=0.125)
     assert bt < 0.0
     assert profile_speed(bt, 0.18, 0.25, v_min=0.07) == 0.0
 

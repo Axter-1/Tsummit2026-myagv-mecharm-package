@@ -490,25 +490,25 @@ def brake_target(control_distance, stop_distance, speed, latency, period,
     Sumado, el robot sigue avanzando bastante DESPUES de decidir.
     Medido en pista: pidiendo 0.15 m se plantaba a ~0.11, 4 cm de mas.
 
-    Como velocidad de coast se toma la MAYOR entre la mandada este
-    ciclo y la que pide la rampa a la distancia actual: esa segunda es
-    la que el robot lleva de verdad por culpa del retardo, y usar solo
-    la primera dejaba un residuo de ~1 cm.
+    Como velocidad de coast se toma la MANDADA este ciclo, escalada
+    1.4x: por el retardo, el robot AHORA se mueve a lo que se mando hace
+    latency+period, mas alto que lo de este ciclo, y 1.4 aproxima esa
+    pendiente sin depender de a_max.
+
+    CLAVE: si el robot esta parado (speed ~ 0) la compensacion es 0.
+    Usar la velocidad de la RAMPA aqui -- que asume que el robot YA se
+    mueve a esa velocidad -- metia al control en un punto muerto: cerca
+    del objetivo mandaba cero, y al ciclo siguiente seguia restando el
+    coast de la rampa y nunca volvia a arrancar. Se planto a 5 cm.
 
     Restarlo hace que el control mande cero ese trozo ANTES y el robot
-    deriva al sitio correcto en vez de pasarse. Autocorrector: si sobra
-    compensacion se queda corto y el suelo de velocidad lo empuja el
-    ultimo centimetro; si falta, el error es pequeño.
+    deriva al sitio en vez de pasarse. Autocorrector: si sobra, se queda
+    un pelo corto y el suelo de velocidad lo empuja; si falta, poco.
+
+    v_max / a_max se aceptan por compatibilidad; ya no se usan.
     """
     d = control_distance - stop_distance
-
-    v_coast = abs(speed)
-    if a_max > 0.0 and d > 0.0:
-        v_ramp = math.sqrt(2.0 * a_max * d)
-        if v_max > 0.0:
-            v_ramp = min(v_ramp, v_max)
-        v_coast = max(v_coast, v_ramp)
-
+    v_coast = abs(speed) * 1.4
     return d - v_coast * (latency + period + sensor_period)
 
 
