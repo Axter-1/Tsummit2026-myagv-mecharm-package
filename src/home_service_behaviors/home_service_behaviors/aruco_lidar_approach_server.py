@@ -351,6 +351,15 @@ class ArucoLidarApproachServer(Node):
             0.045
         )
 
+        # La tolerancia amplia de control absorbe la latencia de la base,
+        # pero no debe decidir la llegada: con 45 mm el robot podia aceptar
+        # 0.239 m al pedir 0.200 m. El criterio final es mas estricto y el
+        # LiDAR debe seguir mandando hasta entrar en esta banda.
+        self.declare_parameter(
+            'final_distance_tolerance',
+            0.020
+        )
+
         # Sesgo empirico de frenada final. Compensa el avance que queda por
         # latencia y velocidad minima sin alterar la distancia fisica
         # reportada ni la calibracion lidar->bumper.
@@ -2954,7 +2963,7 @@ class ArucoLidarApproachServer(Node):
             if (
                 front_clearance is not None and
                 abs(front_clearance - stop_distance) <=
-                self.pf('distance_tolerance') and
+                self.pf('final_distance_tolerance') and
                 aligned and
                 centred and
                 # La perpendicularidad la juzga la normal LiDAR. El centro
