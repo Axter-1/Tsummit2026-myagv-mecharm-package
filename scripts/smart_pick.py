@@ -37,9 +37,40 @@ import time
 import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from smart_vision import (  # noqa: E402
-    PIEZAS, ReconocedorLocal, VerificadorGemini, decide_pieza, decodifica,
-)
+try:
+    from smart_vision import (  # noqa: E402
+        PIEZAS, ReconocedorLocal, VerificadorGemini, decide_pieza, decodifica,
+    )
+except ImportError as _exc:
+    # El cv2 del HOST de la Jetson esta roto (le falta libvtk; python3-opencv
+    # ni siquiera esta instalado como paquete, viene a medias de JetPack).
+    # Este script no tiene por que correr ahi: es la pila del portatil. Sin
+    # este aviso, el traceback habla de una .so de VTK y no dice lo unico
+    # que importa, que es que estas en la maquina equivocada.
+    print(
+        f"ERROR: no se pudo importar la vision ({_exc}).\n"
+        "\n"
+        "Si esto es el HOST de la Jetson (er@nano), es lo esperado: su cv2\n"
+        "esta roto y ademas este script NO va aqui, va en el PORTATIL.\n"
+        "\n"
+        "  En el portatil (su sitio):\n"
+        "    eval \"$(ROBOT_IP=<ip> LAPTOP_IP=<ip> ./scripts/tsummit_offboard.sh env)\"\n"
+        "    source install/setup.bash\n"
+        "    export GEMINI_API_KEY=...\n"
+        "    python3 scripts/smart_pick.py auto 100\n"
+        "\n"
+        "  Para probarlo en la Jetson, dentro del contenedor (ahi cv2 va):\n"
+        "    docker exec -it myagv-robot bash -lc '\\\n"
+        "      source /opt/ros/humble/setup.bash; \\\n"
+        "      source /workspace/install/setup.bash; \\\n"
+        "      export ROS_DOMAIN_ID=30 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; \\\n"
+        "      cd /workspace && python3 scripts/smart_pick.py auto 100'\n"
+        "\n"
+        "  (sin ROS_DOMAIN_ID=30 el nodo arranca en el dominio 0 y no ve\n"
+        "   ni la camara ni el brazo, sin dar ningun error claro)\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 RAIZ = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CALIBRACIONES = os.path.join(
