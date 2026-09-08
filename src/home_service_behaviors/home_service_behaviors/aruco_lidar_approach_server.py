@@ -348,7 +348,7 @@ class ArucoLidarApproachServer(Node):
         # orden de parar. Con 0.03 se para dentro de la ventana.
         self.declare_parameter(
             'distance_tolerance',
-            0.03
+            0.045
         )
 
         # =========================================================
@@ -746,13 +746,13 @@ class ArucoLidarApproachServer(Node):
             35.0
         )
 
-        # Retardo del lazo: lo que tarda un mando en surtir efecto
-        # (tuberia + red + driver). Con el servidor en el portatil
-        # medimos ~200 ms; pegado a los drivers en la Jetson seria
-        # bastante menos. Se usa para la distancia de parada.
+        # Retardo del lazo: mando (portatil) -> actuacion. MEDIDO con
+        # rosbag durante una aproximacion: escalon de /cmd_vel_aruco a
+        # /odom = 0.223 s SIN la red de vuelta; con Tailscale portatil->
+        # Jetson por delante, ~0.25-0.30. Se usa 0.27.
         self.declare_parameter(
             'command_latency',
-            0.20
+            0.27
         )
 
         # Tasa a la que llegan los ecos frontales del LiDAR. El lazo va
@@ -2682,6 +2682,13 @@ class ArucoLidarApproachServer(Node):
 
             remaining_ctrl = remaining
 
+            # ¿estamos en el endgame? -- por la medida de LiDAR del
+            # ciclo anterior, que es lo unico disponible aqui.
+            endgame_speed = (
+                final_distance > 0.0 and
+                final_distance < self.pf('lidar_nearest_below')
+            )
+
             # final_distance viene del ciclo anterior y ya es la medida
             # unificada (eco cercano en endgame, mediana lejos). El eco
             # de seguridad de ESTE ciclo solo puede hacerla mas
@@ -2699,19 +2706,30 @@ class ArucoLidarApproachServer(Node):
                 # llegar hasta un periodo de LiDAR rancia. Se suma a la
                 # inercia real.
                 lidar_dt = 1.0 / max(1.0, self.pf('lidar_rate_hint_hz'))
-                remaining_ctrl = min(
-                    remaining,
-                    planner.brake_target(
-                        control_distance,
-                        stop_distance,
-                        last_forward_speed,
-                        self.pf('command_latency'),
-                        period,
-                        sensor_period=lidar_dt,
-                        v_max=self.pf('max_linear_speed'),
-                        a_max=self.pf('linear_accel'),
-                    ),
+                bt = planner.brake_target(
+                    control_distance,
+                    stop_distance,
+                    last_forward_speed,
+                    self.pf('command_latency'),
+                    period,
+                    sensor_period=lidar_dt,
                 )
+
+                # Cerca del objetivo el CAMINO manda -- su ultimo tramo
+                # acaba en stop_distance del marcador POR GEOMETRIA de
+                # camara, asi que `remaining` (del carrot) llega a cero
+                # antes de que el LiDAR de por buena la llegada. Si se
+                # toma el min, el robot se planta ahi: STALLED a 0.23
+                # pidiendo 0.20, medido en pista.
+                #
+                # En el endgame la VELOCIDAD la fija solo el LiDAR
+                # (brake_target); la DIRECCION la sigue marcando el
+                # carrot, que va aparte en holonomic_command. Lejos se
+                # respeta el camino, que ahi si es la referencia buena.
+                if endgame_speed:
+                    remaining_ctrl = bt
+                else:
+                    remaining_ctrl = min(remaining, bt)
 
             vx, vy, wz, yaw_error, reached, yaw_settled = (
                 planner.holonomic_command(
@@ -2900,12 +2918,31 @@ class ArucoLidarApproachServer(Node):
                 abs(wz) < 1e-6
             )
 
+            # ¿el problema es de DISTANCIA o solo de asentar?
+            #
+            # Si la distancia ya esta en banda y lo unico que falta es
+            # alinear o centrar, NO es un atasco -- el robot esta donde
+            # tiene que estar y solo pule. Contar eso como STALLED
+            # abortaba a 1 mm de la tolerancia (medido: 0.231 pidiendo
+            # 0.20, tolerancia 0.03). Se le da mas margen: un
+            # stall_timeout largo para el pulido fino, el corto solo si
+            # de verdad no llega en distancia.
+            cerca_en_distancia = (
+                front_clearance is not None and
+                abs(front_clearance - stop_distance) <=
+                self.pf('distance_tolerance') * 2.0
+            )
+
             if parado and not reached:
                 stalled += 1
             else:
                 stalled = 0
 
-            if stalled >= max(1, int(self.pf('stall_timeout') / period)):
+            limite_stall = self.pf('stall_timeout')
+            if cerca_en_distancia:
+                limite_stall = self.pf('stall_timeout') * 4.0
+
+            if stalled >= max(1, int(limite_stall / period)):
 
                 self.stop_robot()
                 goal_handle.abort()

@@ -473,44 +473,45 @@ def tolerance_is_reachable(tolerance, floor_speed, latency, period):
 
 def brake_target(control_distance, stop_distance, speed, latency, period,
                  sensor_period=0.0, v_max=0.0, a_max=0.0):
-    """Distancia que hay que meterle a la rampa de frenado, ya con la
-    inercia del sistema descontada.
+    """Distancia efectiva para la rampa de frenado, con la inercia del
+    lazo descontada de forma que NO oscile.
 
-    La rampa v=sqrt(2*a*d) apunta a v=0 EXACTAMENTE en d=0, como si el
-    robot frenara en el instante en que se decide. No es asi:
+    La rampa v=sqrt(2*a*d) frena como si el mando surtiera efecto al
+    instante. No: entre latencia, ciclo y el refresco del LiDAR el robot
+    avanza ~v*T mas despues de decidir (T = latency + period +
+    sensor_period). Medido en bag: ~0.35 s de coast desde 0.19 m/s.
 
-      * el mando tarda `latency` en llegar (tuberia serie + red),
-      * el ciclo en curso dura `period` mas,
-      * la distancia con la que se decide viene de un sensor que se
-        refresca cada `sensor_period` (LiDAR ~8 Hz, lazo a 20),
-      * y por ese mismo retardo el robot AHORA se mueve a la velocidad
-        que se mando hace `latency+period`, mas alta que la de este
-        ciclo.
+    En vez de restar `speed_anterior * T` -- que realimentaba y hacia
+    que el 52% de los mandos salieran CERO exacto, partiendo por dos la
+    velocidad efectiva -- se resuelve la ecuacion de punto fijo:
 
-    Sumado, el robot sigue avanzando bastante DESPUES de decidir.
-    Medido en pista: pidiendo 0.15 m se plantaba a ~0.11, 4 cm de mas.
+        v = sqrt(2*a*(d - v*T))    ->    v = -a*T + sqrt(a^2 T^2 + 2 a d)
 
-    Como velocidad de coast se toma la MANDADA este ciclo, escalada
-    1.4x: por el retardo, el robot AHORA se mueve a lo que se mando hace
-    latency+period, mas alto que lo de este ciclo, y 1.4 aproxima esa
-    pendiente sin depender de a_max.
+    que es la velocidad que, mandada AHORA, deja al robot frenando por
+    la rampa correcta cuando el mando llega. Es funcion monotona y suave
+    de d: baja segun el robot se acerca, sin escalones, sin ceros
+    intercalados. Tiende a 0 en d=0 por construccion.
 
-    CLAVE: si el robot esta parado (speed ~ 0) la compensacion es 0.
-    Usar la velocidad de la RAMPA aqui -- que asume que el robot YA se
-    mueve a esa velocidad -- metia al control en un punto muerto: cerca
-    del objetivo mandaba cero, y al ciclo siguiente seguia restando el
-    coast de la rampa y nunca volvia a arrancar. Se planto a 5 cm.
-
-    Restarlo hace que el control mande cero ese trozo ANTES y el robot
-    deriva al sitio en vez de pasarse. Autocorrector: si sobra, se queda
-    un pelo corto y el suelo de velocidad lo empuja; si falta, poco.
-
-    v_max / a_max se aceptan por compatibilidad; ya no se usan.
+    Se devuelve la distancia equivalente v^2/(2a) para que
+    `profile_speed` reproduzca esa v. Sin a_max se cae al modelo simple
+    (compatibilidad).
     """
     d = control_distance - stop_distance
-    v_coast = abs(speed) * 1.4
-    return d - v_coast * (latency + period + sensor_period)
+    if d <= 0.0:
+        return d
 
+    t_total = latency + period + sensor_period
+
+    if a_max > 0.0:
+        v_comp = -a_max * t_total + math.sqrt(
+            (a_max * t_total) ** 2 + 2.0 * a_max * d
+        )
+        v_comp = max(0.0, v_comp)
+        if v_max > 0.0:
+            v_comp = min(v_comp, v_max)
+        return (v_comp * v_comp) / (2.0 * a_max)
+
+    return d - abs(speed) * t_total
 
 def profile_speed(
     remaining, v_max, a_max,
