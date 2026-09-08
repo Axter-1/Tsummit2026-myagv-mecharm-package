@@ -227,16 +227,21 @@ arm() {
 calibrate_grasp() {
     confirm_motion
     ensure_container
-    local object_name="${1:?uso: calibrate-grasp <engranaje|poste|rueda>}"
+    local object_name="${1:?uso: calibrate-grasp <engranaje|poste|rueda|estrella> <altura_mm>}"
+    local table_mm="${2:?uso: calibrate-grasp <pieza> <altura_mm> (100 o 200)}"
     case "${object_name}" in
-        engranaje|poste|rueda) ;;
-        *) die "pieza desconocida: '${object_name}' (usa engranaje|poste|rueda)" ;;
+        engranaje|poste|rueda|estrella) ;;
+        *) die "pieza desconocida: '${object_name}' (usa engranaje|poste|rueda|estrella)" ;;
     esac
+    case "${table_mm}" in
+        ''|*[!0-9]*) die "altura invalida: '${table_mm}' (mm, entero)" ;;
+    esac
+    shift 2 || true
     if is_running '[m]echarm_driver_node'; then
         die "deten el driver primero: ./scripts/tsummit.sh stop. La calibracion abre /dev/ttyACM0 directamente."
     fi
-    say "Calibracion manual de ${object_name}"
-    in_container "python3 /workspace/scripts/calibrate_grasp.py '${object_name}'"
+    say "Calibracion manual de ${object_name} sobre plataforma de ${table_mm} mm"
+    in_container "python3 /workspace/scripts/calibrate_grasp.py '${object_name}' '${table_mm}' $*"
 }
 
 perception() {
@@ -619,8 +624,12 @@ T-SUMMIT Challenge — consola unica
 
   SUBSISTEMAS
     arm                     driver del MechArm 270
-    calibrate-grasp <pieza>  ensena intermedio, preagarre y contacto; los guarda
-                             y termina en home (exige ALLOW_MOTION=1 y driver parado)
+    calibrate-grasp <pieza> <altura_mm>
+                             ensena intermedio, preagarre y contacto para esa
+                             pieza (engranaje|poste|rueda|estrella) sobre una
+                             plataforma de <altura_mm> (100 o 200); los guarda
+                             anidados en grasp_calibrations.yaml y termina en
+                             home (exige ALLOW_MOTION=1 y driver parado)
     perception              camara CSI + detector ArUco
     rviz / teleop           visualizacion y mando
     viz [rviz|foxglove|none]  abre la visualizacion elegida (o ninguna)
