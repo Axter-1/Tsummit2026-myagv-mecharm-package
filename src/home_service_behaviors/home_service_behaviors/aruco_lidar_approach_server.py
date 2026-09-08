@@ -764,6 +764,15 @@ class ArucoLidarApproachServer(Node):
             8.0
         )
 
+        # Por debajo de esta distancia al marcador (geometria), la
+        # distancia la manda el eco MAS CERCANO del sector frontal en
+        # vez de la mediana: cerca y de frente, lo mas cercano es el
+        # plano del marcador y no lo enturbia el fondo.
+        self.declare_parameter(
+            'lidar_nearest_below',
+            0.60
+        )
+
         # Parada de seguridad por LiDAR frontal.
         self.declare_parameter(
             'min_front_clearance',
@@ -2673,8 +2682,15 @@ class ArucoLidarApproachServer(Node):
 
             remaining_ctrl = remaining
 
+            # final_distance viene del ciclo anterior y ya es la medida
+            # unificada (eco cercano en endgame, mediana lejos). El eco
+            # de seguridad de ESTE ciclo solo puede hacerla mas
+            # restrictiva, nunca menos.
             control_distance = final_distance
-            if safety_clearance is not None:
+            if (
+                safety_clearance is not None and
+                (control_distance <= 0.0 or safety_clearance < control_distance)
+            ):
                 control_distance = safety_clearance
 
             if control_distance > 0.0:
@@ -2728,9 +2744,33 @@ class ArucoLidarApproachServer(Node):
             )
             expected_plane = along - laser_x
 
-            front = self.get_front_lidar_range(expected_plane)
-            front_clearance = None
+            # UNA SOLA MEDIDA para frenar Y para declarar llegada.
+            #
+            # Antes se frenaba con el eco mas cercano del sector
+            # (safety_clearance) pero se declaraba llegada con la MEDIANA
+            # (front). Si el sector coge algo de fondo -- marcador sobre
+            # un poste fino, superficie oblicua -- la mediana lee mas
+            # lejos que el minimo: el robot frena bien pero nunca cierra
+            # y salta STALLED. O al reves, y llega antes de tiempo.
+            #
+            # Cerca del objetivo manda el eco MAS CERCANO del sector: si
+            # nos acercamos de frente y el area esta despejada, lo mas
+            # cercano ES el plano del marcador; nada puede tirar de esa
+            # cifra hacia delante salvo un obstaculo real, y para uno de
+            # esos ya queremos parar. Lejos se usa la mediana, mas
+            # estable frente al ruido puntual.
+            endgame = along < self.pf('lidar_nearest_below')
 
+            front_median = self.get_front_lidar_range(expected_plane)
+            front = None
+            if endgame and safety_front is not None:
+                front = safety_front
+            elif front_median is not None:
+                front = front_median
+            elif safety_front is not None:
+                front = safety_front
+
+            front_clearance = None
             if front is not None:
                 front_clearance = front - self.pf('lidar_to_front_bumper_m')
                 final_distance = front_clearance
