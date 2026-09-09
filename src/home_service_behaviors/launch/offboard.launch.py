@@ -137,9 +137,14 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'final_braking_bias',
-            default_value='0.055',
-            description='Compensa el avance que queda por latencia y suelo '
-                        'de velocidad; no modifica la distancia reportada.',
+            default_value='0.0',
+            description='El perfil apunta a stop_distance menos esto. '
+                        '0.0 desde que el footprint esta bien medido: el '
+                        '0.055 anterior compensaba que la parada segura '
+                        'saltase antes de tiempo, y ahora solo produce '
+                        'sobrepaso. DEBE ser menor que '
+                        'final_distance_tolerance o el perfil manda cero '
+                        'fuera de la banda de llegada (STALLED).',
         ),
         # El detector y el servidor de aproximacion corren en esta maquina.
         DeclareLaunchArgument(

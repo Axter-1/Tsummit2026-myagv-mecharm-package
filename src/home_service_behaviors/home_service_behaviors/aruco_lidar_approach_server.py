@@ -375,12 +375,37 @@ class ArucoLidarApproachServer(Node):
             0.020
         )
 
-        # Sesgo empirico de frenada final. Compensa el avance que queda por
-        # latencia y velocidad minima sin alterar la distancia fisica
-        # reportada ni la calibracion lidar->bumper.
+        # Sesgo empirico de frenada final: el perfil apunta a
+        # stop_distance - final_braking_bias en vez de a stop_distance.
+        #
+        # 0.0 PORQUE EL 0.055 COMPENSABA EL FOOTPRINT MAL MEDIDO
+        # ------------------------------------------------------
+        # Con el morro 4.3 cm adelantado, la parada segura saltaba antes
+        # de tiempo y el robot se quedaba corto (0.231 pidiendo 0.200).
+        # El sesgo se metio para empujarlo mas cerca. Corregido el
+        # footprint ya no se queda corto, y el sesgo pasa a ser puro
+        # sobrepaso.
+        #
+        # Medido en la corrida del 09-09 (pedido 0.240 LiDAR):
+        #   el perfil manda cero al llegar a 0.185  (= 0.240 - 0.055)
+        #   rueda por inercia                0.009
+        #   acaba en                         0.176
+        #   banda de llegada       [0.220, 0.260]
+        # o sea 35 mm FUERA de la banda por construccion: el robot no
+        # podia llegar hiciera lo que hiciera, y salio por STALLED con
+        # el mando a cero.
+        #
+        # La inercia real son esos 9 mm, y brake_target ya la compensa
+        # con speed*t_total. Con el sesgo a 0.0 se manda cero en 0.240 y
+        # se acaba en ~0.231: dentro de la banda, y del lado de MAS
+        # lejos de la pared, que es el lado seguro.
+        #
+        # INVARIANTE: tiene que ser menor que final_distance_tolerance.
+        # Si no, el punto al que apunta el perfil cae fuera de la banda
+        # de llegada y no se puede llegar. check_tolerances lo verifica.
         self.declare_parameter(
             'final_braking_bias',
-            0.055
+            0.0
         )
 
         # =========================================================
@@ -2527,6 +2552,28 @@ class ArucoLidarApproachServer(Node):
                     f'Subelo por encima de {parada:.3f} o baja el suelo, '
                     'o el control oscilara sin asentarse nunca.'
                 )
+
+        # -------------------------------------------------
+        # El perfil de frenado tiene que apuntar DENTRO de la banda
+        #
+        # El perfil manda cero al llegar a stop_distance - bias. Si ese
+        # punto queda fuera de [stop +- final_distance_tolerance], la
+        # llegada no se puede declarar por mucho que el control funcione:
+        # el mando cae a cero fuera de banda y el goal sale por STALLED.
+        # Es lo que paso con bias=0.055 contra una tolerancia de 0.020.
+        # -------------------------------------------------
+        if self.pf('final_braking_bias') > self.pf('final_distance_tolerance'):
+
+            self.get_logger().error(
+                f'final_braking_bias={self.pf("final_braking_bias"):.3f} es '
+                'MAYOR que final_distance_tolerance='
+                f'{self.pf("final_distance_tolerance"):.3f}: el perfil de '
+                'frenado manda cero a '
+                f'{self.pf("final_braking_bias"):.3f} m por dentro del '
+                'objetivo, o sea FUERA de la banda de llegada. El robot '
+                'se parara sin poder declarar llegada y saldra por '
+                'STALLED. Bajalo por debajo de la tolerancia.'
+            )
 
         # -------------------------------------------------
         # La alineacion no puede entregar fuera de la banda de llegada
