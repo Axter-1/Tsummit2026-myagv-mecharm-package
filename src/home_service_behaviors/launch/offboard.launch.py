@@ -293,6 +293,14 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('max_realign_cycles', default_value='2'),
         DeclareLaunchArgument('align_log_period', default_value='0.5'),
+        DeclareLaunchArgument(
+            'kp_lateral_odom', default_value='0.9',
+            description='Ganancia del recentrado lateral en el tramo '
+                        'ciego, contra el desvio odometrico respecto al '
+                        'eje del pasillo (metros). Sin esto nada corrige '
+                        'el lateral cuando el ArUco ya no cabe en el '
+                        'encuadre.',
+        ),
     ]
 
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -528,6 +536,9 @@ def generate_launch_description():
             ),
             'align_log_period': ParameterValue(
                 LaunchConfiguration('align_log_period'), value_type=float
+            ),
+            'kp_lateral_odom': ParameterValue(
+                LaunchConfiguration('kp_lateral_odom'), value_type=float
             ),
         }],
         condition=IfCondition(LaunchConfiguration('start_aruco_approach')),

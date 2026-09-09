@@ -1252,6 +1252,66 @@ def alignment_command(
     )
 
 
+def corridor_carrot(rx, ry, mx, my, nx, ny, lookahead, min_along=0.0):
+    """Carrot sobre el EJE del pasillo, no delante del morro.
+
+    En el tramo ciego el carrot se proyectaba `lookahead` metros por
+    delante del robot, en la direccion de su propio rumbo. Eso avanza,
+    pero CONSERVA el desvio lateral para siempre: si el robot entra al
+    tramo final 6 cm fuera del eje, sale 6 cm fuera del eje. Y la
+    llegada exige lateral_tolerance (4 cm), asi que no se declaraba
+    nunca y el robot seguia empujando hasta agotar el despeje del
+    chasis. Medido en pista: lateral_odom=+0.061 con tolerancia 0.040,
+    LiDAR a 0.160 con 0.240 pedidos.
+
+    Poniendo el carrot sobre el eje, el mismo vector que hace avanzar
+    devuelve al robot al centro, sin un lazo aparte y sin romper la
+    regla de no mandar tres ejes: vx y vy siguen saliendo juntos de
+    holonomic_command.
+    """
+    along, _lateral = corridor_coords(rx, ry, mx, my, nx, ny)
+
+    target_along = max(min_along, along - lookahead)
+
+    return mx + nx * target_along, my + ny * target_along
+
+
+def recentre_on_axis(
+    rx, ry, ryaw, mx, my, nx, ny,
+    kp, max_speed, min_speed,
+):
+    """Solo desplazamiento lateral, para volver al eje del pasillo.
+
+    Hace falta ademas del carrot porque en el endgame la VELOCIDAD la
+    fija el perfil de frenado del LiDAR, no el camino: cuando la
+    distancia ya esta en banda ese perfil manda cero, y con cero no hay
+    vector que corregir aunque el carrot apunte al eje. Aqui la
+    correccion lateral tiene autoridad propia, igual que la version por
+    camara (final_camera_lateral_kp) pero contra la posicion fijada en
+    odom, que es la unica referencia que queda sin imagen.
+
+    El error se construye proyectando el robot sobre el eje y girando el
+    vector al cuerpo, en vez de repartir signos a mano: asi el mando es
+    correcto sea cual sea el cuadrante de la normal.
+
+    Devuelve (vy, lateral). vx se deja a cero fuera.
+    """
+    along, lateral = corridor_coords(rx, ry, mx, my, nx, ny)
+
+    target_x = mx + nx * along
+    target_y = my + ny * along
+
+    dx, dy = target_x - rx, target_y - ry
+
+    cos_y, sin_y = math.cos(-ryaw), math.sin(-ryaw)
+
+    ey = dx * sin_y + dy * cos_y
+
+    vy = clamp(kp * ey, -max_speed, max_speed)
+
+    return apply_deadband(vy, min_speed), lateral
+
+
 def reacquire_heading(rx, ry, mx, my):
     """Yaw en odom que vuelve a poner el marcador recordado en el eje optico.
 

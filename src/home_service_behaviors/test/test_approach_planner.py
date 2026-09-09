@@ -37,6 +37,8 @@ from home_service_behaviors.approach_planner import (
     alignment_command,
     perpendicular_errors,
     reacquire_heading,
+    corridor_carrot,
+    recentre_on_axis,
 )
 
 
@@ -1225,3 +1227,126 @@ def test_la_pose_fiable_lleva_marco_timestamp_y_calidad():
     # ultima lectura ruidosa que la acompañe.
     assert foto.is_usable(0.6, 0.5, 2.0)
     assert not foto.is_usable(3.0, 0.5, 2.0)
+
+
+# ---------------------------------------------------------------------
+# Tramo ciego: recentrado sobre el eje del pasillo
+# ---------------------------------------------------------------------
+
+def test_el_carrot_ciego_viejo_conservaba_el_desvio_lateral():
+    """El fallo, escrito como prueba.
+
+    Proyectar el carrot `lookahead` metros delante del MORRO avanza pero
+    no centra: el desvio lateral de entrada sale intacto por el otro
+    lado. Y como la llegada exige lateral_tolerance, no se declaraba
+    nunca. Medido en pista: lateral_odom=+0.061 con tolerancia 0.040,
+    LiDAR 0.160 con 0.240 pedidos, SAFE_STOP.
+    """
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    # Robot encarado al plano (yaw = pi) pero 6.1 cm fuera del eje.
+    rx, ry, ryaw = 0.30, 0.061, math.pi
+
+    carrot_viejo = (
+        rx + 0.25 * math.cos(ryaw),
+        ry + 0.25 * math.sin(ryaw),
+    )
+
+    _along_viejo, lateral_viejo = corridor_coords(
+        carrot_viejo[0], carrot_viejo[1], mx, my, nx, ny
+    )
+
+    # El carrot viejo esta tan descentrado como el robot: no corrige.
+    assert abs(lateral_viejo - 0.061) < 1e-9
+
+
+def test_el_carrot_del_pasillo_va_sobre_el_eje():
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    rx, ry = 0.30, 0.061
+
+    carrot = corridor_carrot(rx, ry, mx, my, nx, ny, 0.25, min_along=0.09)
+
+    along, lateral = corridor_coords(carrot[0], carrot[1], mx, my, nx, ny)
+
+    # Sobre el eje por construccion...
+    assert abs(lateral) < 1e-9
+
+    # ...y no mas cerca del marcador que la parada pedida.
+    assert abs(along - 0.09) < 1e-9
+
+
+def test_el_carrot_del_pasillo_avanza_cuando_hay_sitio():
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    carrot = corridor_carrot(0.80, 0.05, mx, my, nx, ny, 0.25, min_along=0.09)
+
+    along, lateral = corridor_coords(carrot[0], carrot[1], mx, my, nx, ny)
+
+    assert abs(along - 0.55) < 1e-9
+    assert abs(lateral) < 1e-9
+
+
+def test_recentrado_sin_imagen_corrige_hacia_el_eje():
+    """El signo importa y no se puede razonar a ojo: se comprueba.
+
+    Se simula el lazo y se exige que el desvio BAJE. Un signo invertido
+    lo haria crecer, que es el fallo que este test existe para pillar.
+    """
+    for signo in (+1.0, -1.0):
+
+        for normal_yaw in (0.0, math.pi / 2, math.pi, -2.4):
+
+            nx, ny = math.cos(normal_yaw), math.sin(normal_yaw)
+            mx, my = 1.3, -0.7
+
+            # Robot sobre el eje, encarado al plano, y desplazado
+            # lateralmente 6 cm en el sentido que toque.
+            ryaw = math.atan2(-ny, -nx)
+            tx, ty = -ny, nx                       # tangente del plano
+            rx = mx + nx * 0.30 + signo * 0.06 * tx
+            ry = my + ny * 0.30 + signo * 0.06 * ty
+
+            _along, lateral0 = corridor_coords(rx, ry, mx, my, nx, ny)
+            assert abs(abs(lateral0) - 0.06) < 1e-9
+
+            for _ in range(200):
+
+                vy, lateral = recentre_on_axis(
+                    rx, ry, ryaw, mx, my, nx, ny,
+                    kp=0.9, max_speed=0.035, min_speed=0.035,
+                )
+
+                if abs(lateral) <= 0.02:
+                    break
+
+                rx, ry, ryaw = predict_pose(rx, ry, ryaw, 0.0, vy, 0.0, 0.05)
+
+            _along, lateral_final = corridor_coords(rx, ry, mx, my, nx, ny)
+
+            assert abs(lateral_final) < abs(lateral0), (
+                signo, normal_yaw, lateral0, lateral_final
+            )
+            assert abs(lateral_final) <= 0.02, (signo, normal_yaw,
+                                                lateral_final)
+
+
+def test_recentrado_no_toca_la_distancia_al_plano():
+    """Solo desplaza. Avanzar aqui estropearia la distancia ya lograda."""
+    nx, ny = 1.0, 0.0
+    mx, my = 0.0, 0.0
+
+    rx, ry, ryaw = 0.30, 0.06, math.pi
+
+    along0, _lateral = corridor_coords(rx, ry, mx, my, nx, ny)
+
+    for _ in range(60):
+        vy, lateral = recentre_on_axis(
+            rx, ry, ryaw, mx, my, nx, ny,
+            kp=0.9, max_speed=0.035, min_speed=0.035,
+        )
+        rx, ry, ryaw = predict_pose(rx, ry, ryaw, 0.0, vy, 0.0, 0.05)
+
+    along1, _lateral = corridor_coords(rx, ry, mx, my, nx, ny)
+
+    assert abs(along1 - along0) < 1e-9

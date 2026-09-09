@@ -65,11 +65,22 @@ mission:
 
   name: reto1_pasos
 
-  # Mapa al que se atan las posiciones. Vacio = el <mapa>.poses.yaml
-  # mas reciente de maps/. Ponlo explicito para la pista: cargar en
-  # silencio las posiciones de otro mapa manda al robot a coordenadas
-  # que no existen.
-  map: ""
+  # Mapa al que se atan las posiciones. Explicito a proposito: con esto
+  # vacio se cogeria el <mapa>.poses.yaml mas reciente de maps/, y
+  # cargar en silencio las posiciones de otro mapa manda al robot a
+  # coordenadas que no existen.
+  #
+  # OJO AL NOMBRE: las posiciones de ejemplo del reto 1 se guardaron
+  # contra 'maze-map', que es como se llamaba el mapa vivo en ese
+  # momento. El nombre es el del MAPA, no el del reto. Cuando se mapee
+  # la pista buena, cambia esto al nombre nuevo y vuelve a guardar las
+  # ocho posiciones: las coordenadas no se pueden reutilizar entre
+  # mapas.
+  #
+  # Guardado hoy en maps/maze-map.poses.yaml:  start
+  # Faltan:  carga_0, posicion_2, entrega_2, posicion_1, carga_1,
+  #          entrega_3, finish
+  map: "maze-map"
 
   repeat: 1
 

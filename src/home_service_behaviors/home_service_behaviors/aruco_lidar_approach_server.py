@@ -526,6 +526,12 @@ class ArucoLidarApproachServer(Node):
         # en la imagen. Cuando el LiDAR ya esta en la distancia de parada,
         # no se debe seguir avanzando solo porque la geometria TF discrepe;
         # se corrige de lado hasta devolver el marcador al centro.
+        # Ganancia del recentrado lateral SIN imagen, contra el desvio
+        # odometrico respecto al eje del pasillo. En metros reales, no
+        # en el center_x normalizado que usa final_camera_lateral_kp:
+        # por eso es un orden de magnitud mayor.
+        self.declare_parameter('kp_lateral_odom', 0.9)
+
         self.declare_parameter(
             'final_camera_lateral_kp',
             0.12
@@ -2583,6 +2589,68 @@ class ArucoLidarApproachServer(Node):
                 f'Bajalo a {maximo:.3f} o menos.'
             )
 
+    def frontal_exit_distance(self):
+        """Cuanto avanza el haz FRONTAL desde el sensor hasta salir del chasis.
+
+        Es la constante que separa los dos marcos en los que se puede
+        hablar de "distancia a la pared":
+
+            LiDAR -> pared     lo que mide el sensor y lo que pide
+                               stop_distance hoy.
+            morro -> pared     lo que de verdad importa para chocar y
+                               para el alcance del brazo. Es el
+                               `despeje del chasis`.
+
+            morro_pared = lidar_pared - frontal_exit_distance()
+
+        Con la geometria medida hoy son 0.080 m. Mezclar los dos marcos
+        en un mismo mensaje es lo que hacia ilegible el diagnostico:
+        "despeje chasis=0.080, pedido=0.240" compara peras con manzanas.
+        """
+        laser_to_chassis = self.get_laser_to_chassis()
+
+        if laser_to_chassis is None:
+            return None
+
+        offset_x, offset_y, _laser_yaw = laser_to_chassis
+
+        return planner.ray_polygon_exit_distance(
+            (offset_x, offset_y), (1.0, 0.0), self.chassis_footprint
+        )
+
+    def chassis_from_lidar(self, lidar_distance):
+        """Convierte un rango LiDAR-pared a morro-pared. None si no se puede."""
+        if lidar_distance is None or lidar_distance < 0.0:
+            return None
+
+        exit_distance = self.frontal_exit_distance()
+
+        if exit_distance is None:
+            return None
+
+        return lidar_distance - exit_distance
+
+    def distance_text(self, lidar_distance):
+        """'0.240 m LiDAR-pared (= 0.160 m morro-pared)'.
+
+        Siempre los DOS marcos. stop_distance se pide en el del LiDAR
+        por historia -- y cambiarlo arrastra arm_x_offset_mm,
+        target_coords_stop_m y las calibraciones de agarre, o sea que no
+        es un renombrado --, pero quien lee un log piensa en el morro.
+        """
+        if lidar_distance is None or lidar_distance < 0.0:
+            return 'desconocida'
+
+        chassis = self.chassis_from_lidar(lidar_distance)
+
+        if chassis is None:
+            return f'{lidar_distance:.3f} m LiDAR-pared (morro: sin TF)'
+
+        return (
+            f'{lidar_distance:.3f} m LiDAR-pared '
+            f'(= {chassis:.3f} m morro-pared)'
+        )
+
     def check_stop_distance_reachable(self, stop_distance):
         """Avisa si la parada pedida choca con el suelo de despeje.
 
@@ -2608,20 +2676,9 @@ class ArucoLidarApproachServer(Node):
              puede llegar de pasada, mientras cruza la banda. Es fragil
              por construccion y no se ve en ningun sitio.
         """
-        laser_to_chassis = self.get_laser_to_chassis()
-
-        if laser_to_chassis is None:
-            # Sin TF todavia no se puede juzgar. No es un fallo: el
-            # bucle ya aborta con TF_ERROR si sigue faltando.
-            return
-
-        offset_x, offset_y, laser_yaw = laser_to_chassis
-
-        # Haz frontal del robot: +x del chasis, con el yaw del montaje
-        # ya aplicado por get_laser_to_chassis.
-        exit_distance = planner.ray_polygon_exit_distance(
-            (offset_x, offset_y), (1.0, 0.0), self.chassis_footprint
-        )
+        # Sin TF todavia no se puede juzgar. No es un fallo: el bucle ya
+        # aborta con TF_ERROR si sigue faltando.
+        exit_distance = self.frontal_exit_distance()
 
         if exit_distance is None:
             return
@@ -2635,12 +2692,18 @@ class ArucoLidarApproachServer(Node):
 
         min_range = exit_distance + operational
 
+        self.get_logger().info(
+            f'Parada pedida: {self.distance_text(stop_distance)}. '
+            f'El morro sale a {exit_distance:.3f} m del sensor.'
+        )
+
         if stop_distance < min_range:
             self.get_logger().error(
                 f'stop_distance={stop_distance:.3f} m es INALCANZABLE: '
                 f'el morro sale a {exit_distance:.3f} m del sensor y la '
                 f'parada segura exige {operational:.3f} m de despeje, '
-                f'asi que el rango frontal minimo es {min_range:.3f} m. '
+                f'asi que el rango frontal minimo es {min_range:.3f} m '
+                f'(= {operational:.3f} m morro-pared). '
                 'Este goal terminara en SAFE_STOP haga lo que haga el '
                 'control. Sube stop_distance, o revisa '
                 'chassis_footprint y min_front_clearance.'
@@ -4056,8 +4119,16 @@ class ArucoLidarApproachServer(Node):
             # holonomic_command recibe una velocidad valida, pero una
             # direccion de longitud cero y publica ruedas a cero. Durante
             # el endgame la normal LiDAR ya es la referencia de avance:
-            # proyectamos un carrot virtual delante del robot para que la
-            # velocidad LiDAR siga teniendo una direccion util.
+            # se proyecta un carrot virtual para que la velocidad del
+            # LiDAR siga teniendo una direccion util.
+            #
+            # Ese carrot va sobre el EJE DEL PASILLO, no delante del
+            # morro. Proyectado delante del morro el tramo ciego
+            # conservaba el desvio lateral de entrada hasta el final, y
+            # como la llegada exige lateral_tolerance, no se declaraba
+            # nunca: el robot seguia empujando hasta agotar el despeje.
+            # Medido: lateral_odom=+0.061 (tol 0.040), LiDAR 0.160 con
+            # 0.240 pedidos, SAFE_STOP.
             if (
                 endgame_speed and
                 (
@@ -4069,9 +4140,10 @@ class ArucoLidarApproachServer(Node):
                     self.pf('lookahead_distance'),
                     self.pf('distance_tolerance'),
                 )
-                carrot_xy = (
-                    rx + carrot_distance * math.cos(target_yaw),
-                    ry + carrot_distance * math.sin(target_yaw),
+                carrot_xy = planner.corridor_carrot(
+                    rx, ry, mx, my, nx, ny,
+                    carrot_distance,
+                    min_along=path_stop_distance,
                 )
 
             # final_distance viene del ciclo anterior y ya es la medida
@@ -4177,6 +4249,44 @@ class ArucoLidarApproachServer(Node):
                 )
 
                 vx = 0.0
+
+            # -------------------------------------------------
+            # ...y la misma correccion SIN IMAGEN.
+            #
+            # El bloque de arriba necesita ver el marcador. En el tramo
+            # ciego -- que empieza donde el ArUco ya no cabe en el
+            # encuadre, o sea siempre al final -- no hay center_error, y
+            # sin este bloque no queda NADA que corrija el lateral: el
+            # perfil de frenado manda cero en cuanto la distancia entra
+            # en banda, y con cero no hay vector que girar por mucho que
+            # el carrot apunte al eje.
+            #
+            # La referencia es la posicion fijada en odom, que es
+            # justamente la que sigue siendo valida sin camara.
+            # -------------------------------------------------
+            elif (
+                endgame_speed and
+                safety_chassis_clearance is not None and
+                abs(wz) < 1e-9 and
+                abs(lateral) > self.pf('lateral_tolerance')
+            ):
+                vy_axis, _lateral_axis = planner.recentre_on_axis(
+                    rx, ry, ryaw, mx, my, nx, ny,
+                    self.pf('kp_lateral_odom'),
+                    limits['max_lateral'],
+                    min(self.pf('min_lateral_speed'), limits['max_lateral']),
+                )
+
+                if abs(vy_axis) > 1e-9:
+                    vy = vy_axis
+                    vx = 0.0
+
+                    self.get_logger().info(
+                        f'Recentrado sin imagen: lateral={lateral:+.3f} m '
+                        f'(tol {self.pf("lateral_tolerance"):.3f}), '
+                        f'vy={vy:+.3f}',
+                        throttle_duration_sec=1.0,
+                    )
 
             # -------------------------------------------------
             # El LiDAR manda en la distancia
@@ -4394,7 +4504,7 @@ class ArucoLidarApproachServer(Node):
                     f'(operativo {operational_clearance:.3f} m, '
                     f'minimo fisico {clearance:.3f} m), '
                     f'LiDAR-pared={front:.3f} m, '
-                    f'pedido={stop_distance:.3f} m, '
+                    f'pedido={self.distance_text(stop_distance)}, '
                     f'aligned={aligned} '
                     f'(yaw={math.degrees(yaw_error):+.1f} deg), '
                     f'centred={centred} [{centred_detail}]'
@@ -4435,7 +4545,8 @@ class ArucoLidarApproachServer(Node):
                     'despeje_chasis=desconocido, '
                 )
                 result.message = (
-                    f'Llegada: lidar_pared={final_distance:.3f} m, '
+                    f'Llegada: {self.distance_text(final_distance)}, '
+                    f'pedido={self.distance_text(stop_distance)}, '
                     f'{chassis_text}'
                     f'rango={result_range:.3f} m, '
                     f'geometria={along:.3f} m, '
@@ -4508,9 +4619,9 @@ class ArucoLidarApproachServer(Node):
                 result.message = (
                     'Sin mando y sin llegada: el control se agoto pero '
                     'la llegada no se acepta. '
-                    f'LiDAR={final_distance:.3f} m, '
+                    f'medido={self.distance_text(final_distance)}, '
                     f'geometria={along:.3f} m, '
-                    f'pedido={stop_distance:.3f} m '
+                    f'pedido={self.distance_text(stop_distance)} '
                     f'(tolerancia {self.pf("distance_tolerance"):.3f}). '
                     f'aligned={aligned}, centred={centred}, '
                     f'normal_lidar={final_lidar_heading is not None}, '
