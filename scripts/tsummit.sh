@@ -417,10 +417,22 @@ approach_stack() {
 require_prepared_approach() {
     require_container_running
     require_distributed_aruco
+
+    # El marcador es una cache de `approach_stack`, no la prueba de que los
+    # nodos sigan vivos. `tsummit_offboard.sh prepare` puede haber levantado
+    # correctamente el servidor desde el portatil sin crear este archivo en
+    # el contenedor. En ese caso consulta el grafo ROS actual y permite usar
+    # `approach` directamente si todas las entradas estan disponibles.
     if ! prepared_state_matches "${PREPARE_APPROACH_READY_FILE}" approach any 0; then
-        printf 'ERROR: La infraestructura requerida no esta preparada.\n' >&2
-        printf 'Ejecuta primero:\n  ROBOT_IP=<jetson> LAPTOP_IP=<laptop> ./scripts/tsummit_offboard.sh prepare\n  DISTRIBUTED=1 LAPTOP_IP=<laptop> ./scripts/tsummit.sh prepare grasp rueda --table-height 100\n' >&2
-        exit 1
+        printf 'Aviso: no hay un marcador de approach valido; comprobando la pila en vivo...\n'
+        if ! in_container 'python3 /workspace/scripts/check_aruco_approach_action.py --timeout 3' \
+            || ! in_container 'python3 /workspace/scripts/check_approach_inputs.py --timeout 3'; then
+            printf 'ERROR: La infraestructura requerida no esta preparada.\n' >&2
+            printf 'Ejecuta primero:\n  ROBOT_IP=<jetson> LAPTOP_IP=<laptop> ./scripts/tsummit_offboard.sh prepare\n' >&2
+            printf 'Si los nodos ya estan levantados, comprueba que publican /scan_filtered, /aruco/detections y /odom.\n' >&2
+            exit 1
+        fi
+        write_prepared_state "${PREPARE_APPROACH_READY_FILE}" approach any 0
     fi
     in_container 'python3 /workspace/scripts/check_aruco_approach_action.py --timeout 1' \
         || die "La infraestructura requerida no esta disponible. Repite la preparacion del portatil y de la Jetson."

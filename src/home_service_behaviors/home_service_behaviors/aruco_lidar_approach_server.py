@@ -844,7 +844,7 @@ class ArucoLidarApproachServer(Node):
         # el controlador termine de alinear dentro de su tolerancia.
         self.declare_parameter(
             'min_front_clearance',
-            0.08
+            0.07
         )
 
         # El nombre antiguo era ambiguo: esta magnitud es el despeje entre

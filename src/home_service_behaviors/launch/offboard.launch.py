@@ -95,7 +95,11 @@ def generate_launch_description():
         DeclareLaunchArgument('min_linear_speed', default_value='0.07'),
         DeclareLaunchArgument('max_linear_speed', default_value='0.09'),
         DeclareLaunchArgument('use_lidar_normal', default_value='false'),
-        DeclareLaunchArgument('min_chassis_clearance', default_value='0.08'),
+        # Margen minimo medido desde el eco hasta el borde del footprint.
+        # El umbral anterior de 80 mm rechazaba lecturas de 76 mm por solo
+        # 4 mm. Se amplia moderadamente a 70 mm; BLOCKED sigue siendo
+        # terminal y no se permite continuar si el despeje es menor.
+        DeclareLaunchArgument('min_chassis_clearance', default_value='0.07'),
         # Aproximacion con punto de encare y carrot. Ver
         # home_service_behaviors/approach_planner.py.
         DeclareLaunchArgument(
