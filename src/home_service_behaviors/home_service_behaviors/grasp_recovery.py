@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Reglas puras para recuperar una aproximacion antes del agarre."""
 
+import math
+
 
 def is_recoverable_approach_status(status):
-    """Solo STALLED puede estar fisicamente en una parada util.
+    """SAFE_STOP y STALLED requieren verificacion fisica adicional.
 
     BLOCKED representa un despeje de chasis insuficiente y nunca se
     convierte en una autorizacion de movimiento del brazo.
     """
-    return status == 'STALLED'
+    return status in ('SAFE_STOP', 'STALLED')
 
 
 def stop_distance_is_valid(measured, target, tolerance):
@@ -28,4 +30,13 @@ def scan_agrees_with_result(scan_distance, result_distance, tolerance):
         and result_distance is not None
         and
         abs(scan_distance - result_distance) <= tolerance
+    )
+
+
+def chassis_clearance_is_valid(measured, minimum):
+    """Requiere un despeje numerico y no menor que el minimo calibrado."""
+    return (
+        measured is not None
+        and math.isfinite(measured)
+        and measured >= minimum
     )

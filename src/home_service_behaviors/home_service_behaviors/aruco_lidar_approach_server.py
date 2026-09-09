@@ -847,6 +847,21 @@ class ArucoLidarApproachServer(Node):
             0.07
         )
 
+        # Umbral operativo adelantado para compensar el retardo entre el
+        # scan, el controlador y el frenado de la base. No reduce el minimo
+        # fisico: hace que la parada normal se solicite antes de alcanzarlo.
+        self.declare_parameter(
+            'chassis_clearance_stop_margin',
+            0.015
+        )
+
+        # Por debajo de este despeje ya no se considera una parada normal:
+        # hay que informar BLOCKED y no permitir ninguna continuacion.
+        self.declare_parameter(
+            'emergency_chassis_clearance',
+            0.040
+        )
+
         # El nombre antiguo era ambiguo: esta magnitud es el despeje entre
         # el eco y el borde del chasis, no la distancia del LiDAR a la pared.
         # Se conserva como alias para configuraciones existentes.
@@ -2342,6 +2357,7 @@ class ArucoLidarApproachServer(Node):
             result.status = "INTERNAL_ERROR"
             final_distance = context.get("final_distance", -1.0)
             result.final_distance = float(final_distance)
+            result.final_chassis_clearance = -1.0
             age = context.get("last_detection_age")
             age_text = "desconocido" if age is None else f"{age:.3f} s"
             result.message = (
@@ -2512,6 +2528,7 @@ class ArucoLidarApproachServer(Node):
                 result.status = 'CANCELED'
                 result.message = 'Goal canceled'
                 result.final_distance = final_distance
+                result.final_chassis_clearance = -1.0
 
                 return result
 
@@ -2533,6 +2550,7 @@ class ArucoLidarApproachServer(Node):
                     f'en estado {state}'
                 )
                 result.final_distance = final_distance
+                result.final_chassis_clearance = -1.0
 
                 return result
 
@@ -2940,6 +2958,7 @@ class ArucoLidarApproachServer(Node):
                     f'{self.get_parameter("chassis_frame").value} <- laser_frame.'
                 )
                 result.final_distance = safety_front
+                result.final_chassis_clearance = -1.0
                 self.get_logger().error(result.message)
                 return result
 
@@ -3399,26 +3418,42 @@ class ArucoLidarApproachServer(Node):
                 else self.pf('min_front_clearance')
             )
 
+            operational_clearance = (
+                clearance +
+                self.pf('chassis_clearance_stop_margin')
+            )
             if (
                 front_chassis_clearance is not None and
-                front_chassis_clearance < clearance
+                front_chassis_clearance < operational_clearance
             ):
 
                 self.stop_robot()
-                goal_handle.abort()
 
                 result = ArucoApproach.Result()
 
                 result.success = False
-                result.status = 'BLOCKED'
+                emergency = self.pf('emergency_chassis_clearance')
+                hard_block = front_chassis_clearance < emergency
+                result.status = 'BLOCKED' if hard_block else 'SAFE_STOP'
                 result.message = (
-                    f'Obstaculo: despeje chasis={front_chassis_clearance:.3f} m '
-                    f'(minimo {clearance:.3f} m), '
-                    f'LiDAR-pared={front:.3f} m'
+                    f'{"Obstaculo" if hard_block else "Parada segura"}: '
+                    f'despeje chasis={front_chassis_clearance:.3f} m '
+                    f'(operativo {operational_clearance:.3f} m, '
+                    f'minimo fisico {clearance:.3f} m), '
+                    f'LiDAR-pared={front:.3f} m, '
+                    f'aligned={aligned}, centred={centred}'
                 )
                 result.final_distance = front if front is not None else -1.0
+                result.final_chassis_clearance = front_chassis_clearance
 
-                self.get_logger().error(result.message)
+                if hard_block:
+                    goal_handle.abort()
+                    self.get_logger().error(result.message)
+                else:
+                    # SAFE_STOP finaliza el goal sin declararlo abortado.
+                    # El orquestador aun verifica la pose antes del brazo.
+                    goal_handle.succeed()
+                    self.get_logger().warn(result.message)
 
                 return result
 
@@ -3454,6 +3489,7 @@ class ArucoLidarApproachServer(Node):
                     f'velocidad_estable={velocity_settled}, {elapsed:.1f} s'
                 )
                 result.final_distance = final_distance
+                result.final_chassis_clearance = front_chassis_clearance
 
                 self.get_logger().info(result.message)
 
@@ -3537,6 +3573,7 @@ class ArucoLidarApproachServer(Node):
                     'sector frontal no este midiendo el fondo.'
                 )
                 result.final_distance = float(final_distance)
+                result.final_chassis_clearance = front_chassis_clearance
 
                 self.get_logger().error(result.message)
 

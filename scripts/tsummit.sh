@@ -481,7 +481,9 @@ grasp_stack() {
     if [ -z "${stop_distance}" ]; then
         case "${piece}" in
             # Ensenada con la rueda a 0.09 m de la lectura LiDAR final.
-            rueda) stop_distance="0.09" ;;
+            # Con el LiDAR ~0.123 m por detras del borde del chasis, 0.09 m
+            # invadia la pared. 0.20 m deja ~0.077 m de despeje teorico.
+            rueda) stop_distance="0.20" ;;
             *)     stop_distance="0.20" ;;
         esac
     fi
@@ -605,7 +607,9 @@ prepare() {
     local stop_distance="${GRASP_STOP_DISTANCE}"
     if [ -z "${stop_distance}" ]; then
         case "${piece}" in
-            rueda) stop_distance="0.09" ;;
+            # La rueda comparte el offset fisico del chasis: 0.20 m de
+            # LiDAR-pared conserva aproximadamente 7 cm de despeje.
+            rueda) stop_distance="0.20" ;;
             *) stop_distance="0.20" ;;
         esac
     fi

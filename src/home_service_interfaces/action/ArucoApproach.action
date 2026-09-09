@@ -20,6 +20,7 @@ bool success
 # TARGET_NOT_FOUND
 # TARGET_LOST
 # BLOCKED / TF_ERROR
+# SAFE_STOP
 # TIMEOUT
 # CANCELED
 # INTERNAL_ERROR (exception inesperada; revisar traceback del servidor)
@@ -28,6 +29,10 @@ string status
 string message
 
 float64 final_distance
+
+# Despeje entre el mismo eco LiDAR y el borde del footprint del chasis.
+# < 0.0 = no disponible.
+float64 final_chassis_clearance
 
 ---
 # ============================================================

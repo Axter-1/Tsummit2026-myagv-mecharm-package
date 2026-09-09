@@ -418,6 +418,7 @@ class ObjectGraspServer(Node):
         self.declare_parameter("verification_scan_timeout_sec", 0.8)
         self.declare_parameter("verification_stop_tolerance_m", 0.025)
         self.declare_parameter("verification_scan_agreement_m", 0.030)
+        self.declare_parameter("verification_min_chassis_clearance_m", 0.070)
         self.declare_parameter("max_approach_attempts", 2)
         # La recuperacion solo retrocede si el sector trasero produce ecos
         # validos. Con el enmascarado actual [-50,+50] ese sector es ciego y
@@ -777,6 +778,22 @@ class ObjectGraspServer(Node):
                 f"LiDAR final={measured:.3f} m fuera de la parada calibrada "
                 f"{self.stop_distance:.3f}+/-{tolerance:.3f} m"
             )
+        try:
+            chassis_clearance = float(
+                getattr(approach_res, "final_chassis_clearance", -1.0)
+            )
+        except (TypeError, ValueError):
+            chassis_clearance = -1.0
+        minimum_clearance = float(
+            self.get_parameter("verification_min_chassis_clearance_m").value
+        )
+        if not grasp_recovery.chassis_clearance_is_valid(
+            chassis_clearance, minimum_clearance
+        ):
+            return False, (
+                f"despeje chasis={chassis_clearance:.3f} m por debajo del "
+                f"minimo verificado={minimum_clearance:.3f} m"
+            )
         front = self._scan_range(float(
             self.get_parameter("verification_front_angle_deg").value
         ))
@@ -793,7 +810,7 @@ class ObjectGraspServer(Node):
         message = str(getattr(approach_res, "message", ""))
         if "aligned=True" not in message:
             return False, (
-                "la aproximacion abortada no confirmo orientacion alineada"
+                "la aproximacion detenida no confirmo orientacion alineada"
             )
         return True, (
             f"verificado independientemente: scan frontal={front:.3f} m, "

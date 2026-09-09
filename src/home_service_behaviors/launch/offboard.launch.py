@@ -100,6 +100,12 @@ def generate_launch_description():
         # 4 mm. Se amplia moderadamente a 70 mm; BLOCKED sigue siendo
         # terminal y no se permite continuar si el despeje es menor.
         DeclareLaunchArgument('min_chassis_clearance', default_value='0.07'),
+        DeclareLaunchArgument(
+            'chassis_clearance_stop_margin', default_value='0.015'
+        ),
+        DeclareLaunchArgument(
+            'emergency_chassis_clearance', default_value='0.040'
+        ),
         # Aproximacion con punto de encare y carrot. Ver
         # home_service_behaviors/approach_planner.py.
         DeclareLaunchArgument(
@@ -282,6 +288,14 @@ def generate_launch_description():
             ),
             'min_chassis_clearance': ParameterValue(
                 LaunchConfiguration('min_chassis_clearance'),
+                value_type=float,
+            ),
+            'chassis_clearance_stop_margin': ParameterValue(
+                LaunchConfiguration('chassis_clearance_stop_margin'),
+                value_type=float,
+            ),
+            'emergency_chassis_clearance': ParameterValue(
+                LaunchConfiguration('emergency_chassis_clearance'),
                 value_type=float,
             ),
             'final_slow_distance': ParameterValue(
