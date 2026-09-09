@@ -299,6 +299,17 @@ def generate_launch_description():
         DeclareLaunchArgument('max_realign_cycles', default_value='2'),
         DeclareLaunchArgument('align_log_period', default_value='0.5'),
         DeclareLaunchArgument(
+            'backoff_release_fraction', default_value='0.5',
+            description='Histeresis del retroceso de recuperacion: se '
+                        'suelta habiendo vuelto esta fraccion de la '
+                        'tolerancia DENTRO de la banda, no en el borde.',
+        ),
+        DeclareLaunchArgument(
+            'max_backoff_travel', default_value='0.06',
+            description='Tope de recorrido del retroceso antes de '
+                        'rendirse con diagnostico.',
+        ),
+        DeclareLaunchArgument(
             'kp_lateral_odom', default_value='0.9',
             description='Ganancia del recentrado lateral en el tramo '
                         'ciego, contra el desvio odometrico respecto al '
@@ -544,6 +555,12 @@ def generate_launch_description():
             ),
             'kp_lateral_odom': ParameterValue(
                 LaunchConfiguration('kp_lateral_odom'), value_type=float
+            ),
+            'backoff_release_fraction': ParameterValue(
+                LaunchConfiguration('backoff_release_fraction'), value_type=float
+            ),
+            'max_backoff_travel': ParameterValue(
+                LaunchConfiguration('max_backoff_travel'), value_type=float
             ),
         }],
         condition=IfCondition(LaunchConfiguration('start_aruco_approach')),

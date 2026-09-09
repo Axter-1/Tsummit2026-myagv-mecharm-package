@@ -39,6 +39,7 @@ from home_service_behaviors.approach_planner import (
     reacquire_heading,
     corridor_carrot,
     recentre_on_axis,
+    endgame_backoff,
 )
 
 
@@ -1350,3 +1351,79 @@ def test_recentrado_no_toca_la_distancia_al_plano():
     along1, _lateral = corridor_coords(rx, ry, mx, my, nx, ny)
 
     assert abs(along1 - along0) < 1e-9
+
+
+# ---------------------------------------------------------------------
+# Retroceso de recuperacion
+# ---------------------------------------------------------------------
+
+def test_las_dos_corridas_reales_quedaban_fuera_de_banda():
+    """Los datos de pista, como prueba de regresion.
+
+    Pidiendo 0.240 con tolerancia 0.020 -> banda [0.220, 0.260]. Las dos
+    corridas del 09-09 acabaron fuera y con el mando a cero.
+    """
+    for acabo in (0.176, 0.214):
+        retroceder, activo = endgame_backoff(acabo, 0.240, 0.020)
+        assert retroceder, acabo
+        assert activo
+
+
+def test_dentro_de_banda_no_se_retrocede():
+    for dentro in (0.220, 0.231, 0.240, 0.255, 0.260):
+        retroceder, activo = endgame_backoff(dentro, 0.240, 0.020)
+        assert not retroceder, dentro
+        assert not activo
+
+
+def test_quedarse_corto_no_dispara_el_retroceso():
+    """Lejos todavia: de eso se encarga el perfil de frenado."""
+    retroceder, _activo = endgame_backoff(0.320, 0.240, 0.020)
+    assert not retroceder
+
+
+def test_la_histeresis_evita_el_castaneo_en_el_borde():
+    """Volver justo al borde NO libera: haria falta otro paso enseguida.
+
+    El suelo de velocidad de la base mueve ~22 mm de golpe, asi que
+    soltar en el borde exacto deja al robot oscilando alrededor de el.
+    """
+    # Entra por debajo de 0.220.
+    retroceder, activo = endgame_backoff(0.214, 0.240, 0.020)
+    assert retroceder and activo
+
+    # Justo en el borde: sigue retrocediendo, no suelta.
+    retroceder, activo = endgame_backoff(0.220, 0.240, 0.020, active=activo)
+    assert retroceder and activo
+
+    # Con margen (0.240 - 0.020*0.5 = 0.230): suelta.
+    retroceder, activo = endgame_backoff(0.230, 0.240, 0.020, active=activo)
+    assert not retroceder and not activo
+
+
+def test_el_retroceso_recupera_la_banda_en_pocos_pasos():
+    """Simulacion con el suelo real de la base y su latencia.
+
+    A 0.07 m/s y 0.32 s entre decidir y ver el efecto, cada paso son
+    ~22 mm. Se exige acabar DENTRO de banda y sin pasarse por arriba.
+    """
+    stop, tol = 0.240, 0.020
+    paso = 0.07 * 0.32
+
+    for front0 in (0.176, 0.214, 0.219):
+
+        front = front0
+        activo = False
+
+        for _ in range(20):
+
+            retroceder, activo = endgame_backoff(
+                front, stop, tol, active=activo
+            )
+
+            if not retroceder:
+                break
+
+            front += paso
+
+        assert abs(front - stop) <= tol, (front0, front)

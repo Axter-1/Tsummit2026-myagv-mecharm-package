@@ -557,6 +557,21 @@ class ArucoLidarApproachServer(Node):
         # por eso es un orden de magnitud mayor.
         self.declare_parameter('kp_lateral_odom', 0.9)
 
+        # Retroceso de recuperacion cuando el robot se pasa de la banda
+        # de llegada. Ver planner.endgame_backoff.
+        #
+        # release_fraction: se sale del retroceso habiendo vuelto a
+        # meterse esta fraccion de la tolerancia DENTRO de la banda, no
+        # justo en el borde. Es la histeresis que impide el castaneo
+        # contra el suelo de velocidad de la base.
+        self.declare_parameter('backoff_release_fraction', 0.5)
+
+        # Tope de recorrido del retroceso. Si con esto no se ha vuelto a
+        # la banda, algo mas esta mal (la medida del LiDAR salta, o el
+        # objetivo es inalcanzable) y es mejor abortar con diagnostico
+        # que alejarse indefinidamente del marcador.
+        self.declare_parameter('max_backoff_travel', 0.06)
+
         self.declare_parameter(
             'final_camera_lateral_kp',
             0.12
@@ -3001,6 +3016,11 @@ class ArucoLidarApproachServer(Node):
         loss_reason = None
         transition_reason = None
 
+        # Retroceso de recuperacion: activo, y donde empezo (en rango
+        # LiDAR, que es lo que se compara con la banda).
+        backoff_active = False
+        backoff_start_front = None
+
         # Ciclos seguidos sin mando y sin llegada declarada. Ver el
         # bloque "Ni avanza ni llega" mas abajo.
         stalled = 0
@@ -4446,6 +4466,78 @@ class ArucoLidarApproachServer(Node):
                 final_distance=final_distance,
                 lidar_failure=self._lidar_fail,
             )
+
+            # -------------------------------------------------
+            # RETROCESO DE RECUPERACION
+            #
+            # La banda de llegada tiene dos lados, pero el perfil de
+            # frenado solo sabe acercarse: pasado el objetivo,
+            # brake_target da negativo, profile_speed manda cero y el
+            # robot queda fuera de banda sin manera de volver. Salia por
+            # STALLED con cmd=(0,0,0).
+            #
+            # Va DESPUES de la correccion lateral y solo toca vx: volver
+            # a la banda y centrarse a la vez son dos ejes de
+            # traslacion, que la placa si acepta. El giro no, por eso la
+            # guarda de wz.
+            # -------------------------------------------------
+            if front is not None and endgame_speed:
+
+                retroceder, backoff_active = planner.endgame_backoff(
+                    front,
+                    stop_distance,
+                    self.pf('final_distance_tolerance'),
+                    active=backoff_active,
+                    release_fraction=self.pf('backoff_release_fraction'),
+                )
+
+                if not backoff_active:
+                    backoff_start_front = None
+
+                elif backoff_start_front is None:
+                    backoff_start_front = front
+                    self.get_logger().warn(
+                        f'Pasado de largo: LiDAR={front:.3f} m con '
+                        f'{stop_distance:.3f} pedidos '
+                        f'(banda +-{self.pf("final_distance_tolerance"):.3f}). '
+                        'Retrocediendo para volver a la banda.'
+                    )
+
+                recorrido_atras = (
+                    front - backoff_start_front
+                    if backoff_start_front is not None else 0.0
+                )
+
+                if (
+                    retroceder and
+                    recorrido_atras > self.pf('max_backoff_travel')
+                ):
+                    # Se ha retrocedido el tope sin volver a la banda.
+                    # Insistir seria alejarse del marcador a ciegas.
+                    retroceder = False
+                    self.get_logger().error(
+                        f'Retroceso agotado: {recorrido_atras:.3f} m sin '
+                        'volver a la banda de llegada. Revisa si el '
+                        'sector frontal esta midiendo algo que se mueve.'
+                    )
+
+                if (
+                    retroceder and
+                    abs(wz) < 1e-9 and
+                    front_chassis_clearance is not None
+                ):
+                    vx = -min(
+                        self.pf('min_linear_speed'),
+                        limits['max_linear'],
+                    )
+
+                    self.get_logger().info(
+                        f'Retroceso: LiDAR={front:.3f} -> banda '
+                        f'[{stop_distance - self.pf("final_distance_tolerance"):.3f}, '
+                        f'{stop_distance + self.pf("final_distance_tolerance"):.3f}], '
+                        f'vx={vx:+.3f}',
+                        throttle_duration_sec=0.5,
+                    )
 
             # La odometria/camara guia el movimiento, pero no puede
             # declarar llegada: hace falta LiDAR fresco y ArUco centrado.

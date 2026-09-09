@@ -1312,6 +1312,55 @@ def recentre_on_axis(
     return apply_deadband(vy, min_speed), lateral
 
 
+def endgame_backoff(
+    front, stop_distance, tolerance,
+    active=False, release_fraction=0.5,
+):
+    """¿Hay que RETROCEDER porque nos hemos pasado? Y hasta cuando.
+
+    LA BANDA DE LLEGADA TIENE DOS LADOS; EL CONTROL SOLO SABE UNO
+    -------------------------------------------------------------
+    La llegada se declara con |front - stop_distance| <= tolerance, o
+    sea una banda simetrica. Pero el perfil de frenado solo sabe
+    ACERCARSE: en cuanto brake_target da negativo, profile_speed manda
+    cero. Si el robot se pasa de largo -- y se pasa, porque la inercia
+    residual no es constante -- queda con el mando a cero, fuera de
+    banda y sin manera de volver. Sale por STALLED.
+
+    Medido en dos corridas pidiendo 0.240, banda [0.220, 0.260]:
+
+        sesgo 0.055  ->  objetivo 0.185, acabo en 0.176   (9 mm de mas)
+        sesgo 0.000  ->  objetivo 0.240, acabo en 0.214   (26 mm de mas)
+
+    El sobrepaso pasado el objetivo NO es repetible, asi que no se
+    arregla con otro sesgo empirico: hace falta que el control pueda
+    corregir en los dos sentidos.
+
+    Retroceder es ademas el sentido SEGURO: aleja el morro de la pared.
+
+    HISTERESIS
+    Se entra al salirse de la banda y se sale habiendo vuelto con
+    margen (release_fraction de la tolerancia), no justo en el borde.
+    Sin eso, el suelo de velocidad de la base -- que a 0.07 m/s y con
+    0.32 s de latencia mueve ~22 mm de golpe -- haria castanear el
+    retroceso contra el borde de la banda.
+
+    Devuelve (retroceder, active).
+    """
+    enter_at = stop_distance - tolerance
+    release_at = stop_distance - tolerance * release_fraction
+
+    if active:
+        if front >= release_at:
+            return False, False
+        return True, True
+
+    if front < enter_at:
+        return True, True
+
+    return False, False
+
+
 def reacquire_heading(rx, ry, mx, my):
     """Yaw en odom que vuelve a poner el marcador recordado en el eje optico.
 
