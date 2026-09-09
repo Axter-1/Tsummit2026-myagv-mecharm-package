@@ -3051,6 +3051,7 @@ class ArucoLidarApproachServer(Node):
             # -------------------------------------------------
 
             remaining_ctrl = remaining
+            brake_equivalent = None
 
             # ¿estamos en el endgame? -- por la medida de LiDAR del
             # ciclo anterior, que es lo unico disponible aqui.
@@ -3125,6 +3126,7 @@ class ArucoLidarApproachServer(Node):
                     a_max=limits['accel'],
                     v_max=limits['max_linear'],
                 )
+                brake_equivalent = bt
 
                 # `bt` no es la distancia fisica al marcador: es la
                 # distancia equivalente de la velocidad compensada. Si se
@@ -3497,7 +3499,15 @@ class ArucoLidarApproachServer(Node):
                     f'aligned={aligned}, centred={centred}, '
                     f'normal_lidar={final_lidar_heading is not None}, '
                     f'yaw_error={math.degrees(yaw_error):+.1f} deg, '
-                    f'camara={center_error:+.3f}. '
+                    f'camara={center_error:+.3f}; '
+                    f'endgame={endgame_speed}, '
+                    f'control_distance={control_distance:.3f} m, '
+                    f'brake_equivalent='
+                    f'{brake_equivalent if brake_equivalent is not None else float("nan"):.4f} m, '
+                    f'remaining={remaining:.3f} m, '
+                    f'profile_remaining={remaining_ctrl:.4f} m, '
+                    f'carrot_error={math.hypot(carrot_xy[0] - rx, carrot_xy[1] - ry):.4f} m, '
+                    f'cmd=({vx:.3f}, {vy:.3f}, {wz:.3f}). '
                     'Si las dos distancias discrepan, revisa '
                     'marker_length, lidar_to_front_bumper_m y que el '
                     'sector frontal no este midiendo el fondo.'
