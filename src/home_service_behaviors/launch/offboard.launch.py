@@ -58,15 +58,15 @@ def generate_launch_description():
         # habia que hacer en el robot.
         DeclareLaunchArgument('max_process_hz', default_value='0.0'),
         DeclareLaunchArgument('detect_scale', default_value='1.0'),
-        # Ritmo FIJO de deteccion. El portatil da de sobra; 15 Hz es mas
-        # que suficiente para la aproximacion y deja el bus de imagen
-        # tranquilo. Sube a 20 si quieres, o 0 para procesar cada
-        # fotograma que llegue (mas Hz pero a rafagas).
-        DeclareLaunchArgument('process_hz', default_value='15.0'),
+        # Ritmo fijo algo por encima de la camara a 15 fps: reduce cuanto
+        # espera el detector para tomar el JPEG mas reciente sin procesar a
+        # rafagas ni aumentar el trafico desde la Jetson.
+        DeclareLaunchArgument('process_hz', default_value='18.0'),
         # 0 = OpenCV usa todos los nucleos para detectMarkers/imdecode.
         DeclareLaunchArgument('opencv_threads', default_value='0'),
-        # La imagen anotada, limitada aunque Foxglove este mirando.
-        DeclareLaunchArgument('annotated_hz', default_value='5.0'),
+        # La imagen anotada acompana mejor las correcciones sin competir
+        # materialmente con la deteccion en el portatil.
+        DeclareLaunchArgument('annotated_hz', default_value='8.0'),
         DeclareLaunchArgument('start_aruco_detector', default_value='true'),
         DeclareLaunchArgument('start_aruco_approach', default_value='true'),
         DeclareLaunchArgument('start_object_grasp', default_value='false'),
@@ -74,8 +74,8 @@ def generate_launch_description():
         DeclareLaunchArgument('grasp_enable_approach', default_value='true'),
         DeclareLaunchArgument('table_height_mm', default_value='100'),
         DeclareLaunchArgument(
-            'search_angular_speed', default_value='0.27',
-            description='Velocidad moderada del paso de busqueda (rad/s).',
+            'search_angular_speed', default_value='0.37',
+            description='Suelo angular medido de la base; giro estable de busqueda.',
         ),
         # foxglove_bridge AQUI, no en la Jetson: en la Nano se comia CPU
         # serializando cada topic a CBOR, y mirar /aruco/image_annotated
@@ -88,12 +88,12 @@ def generate_launch_description():
         # mueve el robot. Calibrar (2 min, ver HANDOFF_OFFBOARD.md); por
         # debajo de esto el mando se publica y las ruedas no giran.
         DeclareLaunchArgument('min_lateral_speed', default_value='0.035'),
-        # El lateral es el eje mas brusco del mecanum. Limitarlo a dos veces
-        # su suelo medido evita correcciones largas que saquen el ArUco del
-        # encuadre; se conserva como argumento para la calibracion en pista.
-        DeclareLaunchArgument('max_lateral_speed', default_value='0.07'),
+        # El lateral es el eje mas brusco del mecanum. El techo queda cerca
+        # del avance para evitar que una correccion saque el ArUco del cuadro.
+        DeclareLaunchArgument('max_lateral_speed', default_value='0.055'),
         DeclareLaunchArgument('min_linear_speed', default_value='0.07'),
-        DeclareLaunchArgument('max_linear_speed', default_value='0.09'),
+        DeclareLaunchArgument('max_linear_speed', default_value='0.08'),
+        DeclareLaunchArgument('max_heading_speed', default_value='0.45'),
         DeclareLaunchArgument('use_lidar_normal', default_value='false'),
         # Margen minimo medido desde el eco hasta el borde del footprint.
         # El umbral anterior de 80 mm rechazaba lecturas de 76 mm por solo
@@ -252,6 +252,10 @@ def generate_launch_description():
             ),
             'max_linear_speed': ParameterValue(
                 LaunchConfiguration('max_linear_speed'),
+                value_type=float,
+            ),
+            'max_heading_speed': ParameterValue(
+                LaunchConfiguration('max_heading_speed'),
                 value_type=float,
             ),
             'use_lidar_normal': ParameterValue(
