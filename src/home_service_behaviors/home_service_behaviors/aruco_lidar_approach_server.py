@@ -3,6 +3,7 @@
 import math
 import time
 import threading
+import traceback
 
 import numpy as np
 
@@ -888,6 +889,11 @@ class ArucoLidarApproachServer(Node):
         # negra: no distinguia "el scan no llega" de "llega pero el
         # sector que miro esta vacio", que piden arreglos opuestos.
         self._lidar_fail = None
+
+        # Contexto del goal actual. Se usa exclusivamente para que una
+        # excepcion inesperada no termine en el resultado ROS generico y
+        # vacio que publica ActionServer cuando el callback revienta.
+        self._active_goal_context = {}
 
         self.latest_odom = None
 
@@ -2271,6 +2277,68 @@ class ArucoLidarApproachServer(Node):
         self,
         goal_handle
     ):
+        """Captura errores inesperados y devuelve un resultado diagnostico."""
+        request = goal_handle.request
+        context = {
+            "action": "/aruco_lidar_approach",
+            "target_id": int(getattr(request, "target_id", 0)),
+            "stop_distance": float(getattr(request, "stop_distance", 0.0)),
+            "state": "STARTING",
+            "final_distance": -1.0,
+            "last_detection_age": None,
+            "lidar_failure": self._lidar_fail,
+        }
+        self._active_goal_context = context
+        try:
+            return self._execute_callback(goal_handle)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self.stop_robot()
+            except Exception as stop_exc:  # noqa: BLE001
+                context["stop_error"] = (
+                    f"{type(stop_exc).__name__}: {stop_exc!r}"
+                )
+
+            try:
+                goal_handle.abort()
+            except Exception as abort_exc:  # noqa: BLE001
+                context["abort_error"] = (
+                    f"{type(abort_exc).__name__}: {abort_exc!r}"
+                )
+
+            exception_detail = f"{type(exc).__name__}: {exc!r}"
+            traceback_text = traceback.format_exc()
+            self.get_logger().error(
+                "Excepcion no controlada en execute_callback de "
+                f"{context['action']}: {exception_detail}\n"
+                f"Contexto: {context}\n{traceback_text}"
+            )
+
+            result = ArucoApproach.Result()
+            result.success = False
+            result.status = "INTERNAL_ERROR"
+            final_distance = context.get("final_distance", -1.0)
+            result.final_distance = float(final_distance)
+            age = context.get("last_detection_age")
+            age_text = "desconocido" if age is None else f"{age:.3f} s"
+            result.message = (
+                f"stage=APPROACH; exception_type={type(exc).__name__}; "
+                f"exception={exc!r}; state={context.get('state')}; "
+                f"target_id={context.get('target_id')}; "
+                f"requested_stop={context.get('stop_distance'):.3f} m; "
+                f"last_lidar_distance={result.final_distance:.3f} m; "
+                f"last_detection_age={age_text}; "
+                f"lidar_failure={context.get('lidar_failure') or '<none>'}; "
+                "traceback=log del nodo aruco_lidar_approach_server"
+            )
+            return result
+        finally:
+            self._active_goal_context = {}
+
+    def _execute_callback(
+        self,
+        goal_handle
+    ):
         """Aproximacion con punto de encare y carrot, en el marco odom.
 
         Sustituye a la maquina de estados secuencial anterior
@@ -2296,6 +2364,11 @@ class ArucoLidarApproachServer(Node):
 
         target_id = int(
             goal_handle.request.target_id
+        )
+
+        self._active_goal_context.update(
+            target_id=target_id,
+            stop_distance=float(goal_handle.request.stop_distance),
         )
 
         stop_distance = float(
@@ -2390,6 +2463,15 @@ class ArucoLidarApproachServer(Node):
             elapsed = (
                 now_ns - start_ns
             ) / 1e9
+            self._active_goal_context.update(
+                state=state,
+                final_distance=final_distance,
+                lidar_failure=self._lidar_fail,
+                last_detection_age=(
+                    (now_ns - last_detection_ns) / 1e9
+                    if last_detection_ns is not None else None
+                ),
+            )
 
             # =====================================================
             # Cancelacion
@@ -2452,7 +2534,6 @@ class ArucoLidarApproachServer(Node):
                         mx, my, nx, ny,
                         stamp_ns=now_ns,
                     )
-                    self.publish_target_goal_tf(target_id, estimate)
 
                     last_detection_ns = now_ns
                     stale_warned = False
@@ -3167,6 +3248,11 @@ class ArucoLidarApproachServer(Node):
                 final_distance = front
             else:
                 final_distance = along
+            self._active_goal_context.update(
+                state=state,
+                final_distance=final_distance,
+                lidar_failure=self._lidar_fail,
+            )
 
             # La odometria/camara guia el movimiento, pero no puede
             # declarar llegada: hace falta LiDAR fresco y ArUco centrado.
