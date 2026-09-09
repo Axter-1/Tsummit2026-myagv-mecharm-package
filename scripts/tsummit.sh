@@ -493,7 +493,8 @@ grasp_stack() {
     # Tras `prepare grasp` no repitas sleeps ni comprobaciones DDS costosas.
     # Los pgrep son deliberadamente baratos; si un proceso desaparecio se
     # cae al camino normal, que vuelve a levantar y verificar la pila.
-    if grasp_stack_ready "${enable_arm}" "${enable_approach}" "${table_mm}"; then
+    if grasp_stack_ready "${enable_arm}" "${enable_approach}" "${table_mm}" \
+        "${stop_distance}"; then
         printf 'Pila de grasp ya preparada (tabla=%s mm); reutilizando nodos.\n' \
             "${table_mm}"
         return
@@ -555,10 +556,19 @@ grasp_server_table_matches() {
         | grep -Eq 'Integer value: ${table_mm}$'"
 }
 
+grasp_server_stop_matches() {
+    local stop_distance="$1"
+    in_container "ros2 param get /object_grasp_server approach_stop_distance \
+        2>/dev/null | awk -v expected='${stop_distance}' \
+        '\$NF == expected || (\$NF + 0) == (expected + 0)'"
+}
+
 grasp_stack_ready() {
     local enable_arm="$1" enable_approach="$2" table_mm="$3"
+    local stop_distance="$4"
     is_running '[o]bject_grasp_server' \
         && grasp_server_table_matches "${table_mm}" \
+        && grasp_server_stop_matches "${stop_distance}" \
         || return 1
 
     if [ "${enable_arm}" = "true" ]; then
@@ -613,7 +623,7 @@ prepare() {
             *) stop_distance="0.20" ;;
         esac
     fi
-    if grasp_stack_ready true true "${table_mm}"; then
+    if grasp_stack_ready true true "${table_mm}" "${stop_distance}"; then
         printf 'object_grasp_server ya preparado para tabla=%s mm.\n' "${table_mm}"
     else
         if is_running '[o]bject_grasp_server'; then
