@@ -272,6 +272,16 @@ save_map() {
     routine save-map "$@"
 }
 
+save_pose() {
+    ensure_container
+    routine save-pose "$@"
+}
+
+list_poses() {
+    ensure_container
+    routine list-poses
+}
+
 # =====================================================================
 #  Subsistemas
 # =====================================================================
@@ -978,6 +988,8 @@ case "${1:-help}" in
     doctor|check-integrity) doctor ;;
     mapping|mapear) mapping ;;
     save-map)     shift; save_map "$@" ;;
+    save-pose|guardar-pose) shift; save_pose "$@" ;;
+    list-poses|poses)       list_poses ;;
 
     arm|brazo)    arm ;;
     calibrate-grasp|calibrar-agarre) shift; calibrate_grasp "$@" ;;
@@ -1017,6 +1029,8 @@ T-SUMMIT Challenge — consola unica
   MAPEO
     mapping                 base -> slam -> rviz -> teleop (todo en orden)
     save-map <nombre>       guarda /workspace/maps/<nombre>.{yaml,pgm}
+    save-pose <nombre>      guarda la pose ACTUAL en <mapa>.poses.yaml (junto al mapa)
+    list-poses              lista las posiciones guardadas del mapa mas reciente
 
   APROXIMACION A UN ARUCO
     prepare grasp [pieza] [--table-height mm]

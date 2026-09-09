@@ -144,9 +144,12 @@ def generate_launch_description():
         # El detector y el servidor de aproximacion corren en esta maquina.
         DeclareLaunchArgument(
             'lidar_to_front_bumper_m',
-            default_value='0.09',
-            description='Alias legado para geometria del pasillo; la '
-                        'seguridad usa TF laser->base_link y footprint.',
+            default_value='0.081',
+            description='Bumper -> centro de giro del LiDAR. Medido dos '
+                        'veces (cinta+scan, y cinta al borde + radio del '
+                        'X2). Alias legado para la geometria del '
+                        'pasillo; la seguridad usa TF laser->base_link y '
+                        'footprint.',
         ),
         DeclareLaunchArgument(
             'blind_endgame_distance',
@@ -186,6 +189,105 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('command_latency', default_value='0.27'),
         DeclareLaunchArgument('lidar_rate_hint_hz', default_value='8.0'),
+
+        # ---- ALIGN_PERPENDICULAR ----
+        # Etapa previa a la aproximacion: encararse al PLANO del
+        # marcador y ponerse sobre su eje normal antes de avanzar.
+        # align_enabled:=false devuelve el comportamiento anterior
+        # (SEARCHING -> APPROACH directo), que es la comparacion a
+        # hacer en pista.
+        DeclareLaunchArgument(
+            'align_enabled', default_value='true',
+            description='Activa la etapa ALIGN_PERPENDICULAR previa a '
+                        'APPROACH. false = comportamiento anterior.',
+        ),
+        DeclareLaunchArgument(
+            'align_yaw_tolerance', default_value='0.13',
+            description='Tolerancia de PERPENDICULARIDAD en rad. No es '
+                        'el centrado en imagen. Suelo alcanzable: '
+                        'min_heading_speed * (command_latency + '
+                        'periodo) = 0.37 * 0.32 = 0.118 rad.',
+        ),
+        DeclareLaunchArgument('align_yaw_hysteresis', default_value='1.6'),
+        DeclareLaunchArgument(
+            'align_lateral_tolerance', default_value='0.05',
+            description='Tolerancia de centrado sobre el eje normal, m.',
+        ),
+        DeclareLaunchArgument(
+            'align_lateral_hysteresis', default_value='1.6'
+        ),
+        DeclareLaunchArgument(
+            'align_regulate_distance', default_value='true',
+            description='La etapa coloca tambien en el punto de encare. '
+                        'false = solo perpendicularidad y centrado; la '
+                        'separacion la deja entera a APPROACH.',
+        ),
+        DeclareLaunchArgument(
+            'align_standoff_tolerance', default_value='0.10'
+        ),
+        DeclareLaunchArgument('align_kp_angular', default_value='1.2'),
+        DeclareLaunchArgument('align_kp_linear', default_value='0.6'),
+        DeclareLaunchArgument('align_kp_lateral', default_value='0.9'),
+        DeclareLaunchArgument(
+            'align_max_angular_speed', default_value='0.45'
+        ),
+        DeclareLaunchArgument(
+            'align_max_linear_speed', default_value='0.09'
+        ),
+        DeclareLaunchArgument(
+            'align_max_lateral_speed', default_value='0.10'
+        ),
+        DeclareLaunchArgument('align_settle_sec', default_value='0.35'),
+        DeclareLaunchArgument('align_timeout_sec', default_value='25.0'),
+        DeclareLaunchArgument(
+            'align_handoff_grace_sec', default_value='1.5',
+            description='Ventana tras la alineacion en la que APPROACH '
+                        'no puede rehacer el rumbo por centrado de '
+                        'camara.',
+        ),
+        DeclareLaunchArgument(
+            'align_min_distance', default_value='0.30',
+            description='Por debajo de esta separacion no se alinea: el '
+                        'marcador ya no cabe en el encuadre y el '
+                        'endgame de APPROACH tiene criterios mas finos.',
+        ),
+        DeclareLaunchArgument(
+            'align_max_pose_age', default_value='2.0',
+            description='Edad maxima de la ultima pose fiable para '
+                        'seguir corrigiendo sin ver el marcador.',
+        ),
+        DeclareLaunchArgument(
+            'align_max_blind_travel', default_value='0.15',
+            description='Metros que se admite recorrer sin vision '
+                        'durante la alineacion. En metros y no en '
+                        'segundos: la deriva crece con la distancia.',
+        ),
+        DeclareLaunchArgument(
+            'align_min_quality', default_value='0.5',
+            description='Calidad minima (0-1) de la estimacion para '
+                        'fiarse de ella a ciegas. Reciente no es lo '
+                        'mismo que fiable.',
+        ),
+        DeclareLaunchArgument(
+            'align_recovery_angular_speed', default_value='0.40'
+        ),
+        DeclareLaunchArgument(
+            'align_recovery_timeout_sec', default_value='6.0'
+        ),
+        DeclareLaunchArgument('align_max_attempts', default_value='3'),
+        DeclareLaunchArgument(
+            'realign_yaw_threshold', default_value='0.35',
+            description='Error de perpendicularidad que devuelve a '
+                        'ALIGN_PERPENDICULAR desde APPROACH. Debe '
+                        'quedar por encima de align_yaw_tolerance * '
+                        'align_yaw_hysteresis o las etapas hacen '
+                        'pinpon.',
+        ),
+        DeclareLaunchArgument(
+            'realign_persist_sec', default_value='0.6'
+        ),
+        DeclareLaunchArgument('max_realign_cycles', default_value='2'),
+        DeclareLaunchArgument('align_log_period', default_value='0.5'),
     ]
 
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -338,6 +440,89 @@ def generate_launch_description():
             'max_blind_travel': ParameterValue(
                 LaunchConfiguration('max_blind_travel'),
                 value_type=float,
+            ),
+            # ---- ALIGN_PERPENDICULAR ----
+            'align_enabled': ParameterValue(
+                LaunchConfiguration('align_enabled'), value_type=bool
+            ),
+            'align_regulate_distance': ParameterValue(
+                LaunchConfiguration('align_regulate_distance'),
+                value_type=bool,
+            ),
+            'align_max_attempts': ParameterValue(
+                LaunchConfiguration('align_max_attempts'), value_type=int
+            ),
+            'max_realign_cycles': ParameterValue(
+                LaunchConfiguration('max_realign_cycles'), value_type=int
+            ),
+            'align_yaw_tolerance': ParameterValue(
+                LaunchConfiguration('align_yaw_tolerance'), value_type=float
+            ),
+            'align_yaw_hysteresis': ParameterValue(
+                LaunchConfiguration('align_yaw_hysteresis'), value_type=float
+            ),
+            'align_lateral_tolerance': ParameterValue(
+                LaunchConfiguration('align_lateral_tolerance'), value_type=float
+            ),
+            'align_lateral_hysteresis': ParameterValue(
+                LaunchConfiguration('align_lateral_hysteresis'), value_type=float
+            ),
+            'align_standoff_tolerance': ParameterValue(
+                LaunchConfiguration('align_standoff_tolerance'), value_type=float
+            ),
+            'align_kp_angular': ParameterValue(
+                LaunchConfiguration('align_kp_angular'), value_type=float
+            ),
+            'align_kp_linear': ParameterValue(
+                LaunchConfiguration('align_kp_linear'), value_type=float
+            ),
+            'align_kp_lateral': ParameterValue(
+                LaunchConfiguration('align_kp_lateral'), value_type=float
+            ),
+            'align_max_angular_speed': ParameterValue(
+                LaunchConfiguration('align_max_angular_speed'), value_type=float
+            ),
+            'align_max_linear_speed': ParameterValue(
+                LaunchConfiguration('align_max_linear_speed'), value_type=float
+            ),
+            'align_max_lateral_speed': ParameterValue(
+                LaunchConfiguration('align_max_lateral_speed'), value_type=float
+            ),
+            'align_settle_sec': ParameterValue(
+                LaunchConfiguration('align_settle_sec'), value_type=float
+            ),
+            'align_timeout_sec': ParameterValue(
+                LaunchConfiguration('align_timeout_sec'), value_type=float
+            ),
+            'align_handoff_grace_sec': ParameterValue(
+                LaunchConfiguration('align_handoff_grace_sec'), value_type=float
+            ),
+            'align_min_distance': ParameterValue(
+                LaunchConfiguration('align_min_distance'), value_type=float
+            ),
+            'align_max_pose_age': ParameterValue(
+                LaunchConfiguration('align_max_pose_age'), value_type=float
+            ),
+            'align_max_blind_travel': ParameterValue(
+                LaunchConfiguration('align_max_blind_travel'), value_type=float
+            ),
+            'align_min_quality': ParameterValue(
+                LaunchConfiguration('align_min_quality'), value_type=float
+            ),
+            'align_recovery_angular_speed': ParameterValue(
+                LaunchConfiguration('align_recovery_angular_speed'), value_type=float
+            ),
+            'align_recovery_timeout_sec': ParameterValue(
+                LaunchConfiguration('align_recovery_timeout_sec'), value_type=float
+            ),
+            'realign_yaw_threshold': ParameterValue(
+                LaunchConfiguration('realign_yaw_threshold'), value_type=float
+            ),
+            'realign_persist_sec': ParameterValue(
+                LaunchConfiguration('realign_persist_sec'), value_type=float
+            ),
+            'align_log_period': ParameterValue(
+                LaunchConfiguration('align_log_period'), value_type=float
             ),
         }],
         condition=IfCondition(LaunchConfiguration('start_aruco_approach')),

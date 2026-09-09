@@ -519,6 +519,11 @@ mapping() {
     printf 'Conduce DESPACIO y cierra BUCLES: volver a pasar por un sitio ya\n'
     printf 'visitado es lo unico que elimina las paredes dobles.\n'
     printf 'Al terminar: ./scripts/run_robot_routine.sh save-map <nombre>\n'
+    printf '\nPOSICIONES DE LA RUTINA\n'
+    printf 'Sin cerrar el mapeo, lleva el robot a cada punto y guardalo:\n'
+    printf '  ./scripts/run_robot_routine.sh save-pose start\n'
+    printf 'Van a /workspace/maps/<mapa>.poses.yaml, junto al mapa, y la\n'
+    printf 'mision las pide por nombre.\n'
 }
 
 save_map() {
@@ -533,6 +538,20 @@ save_map() {
              --ros-args -p save_map_timeout:=10.0"
     printf 'Mapa guardado: /workspace/maps/%s.{yaml,pgm}\n' "${name}"
     printf 'Uso con Nav2:  MAP=/workspace/maps/%s.yaml ./scripts/run_robot_routine.sh nav2\n' "${name}"
+}
+
+save_pose() {
+    # Guarda la pose ACTUAL del robot junto al mapa, con nombre. Exige
+    # SLAM o AMCL en marcha: sin uno de los dos nadie publica
+    # map -> odom y no hay pose respecto al mapa que guardar.
+    if ! node_running '[a]sync_slam_toolbox_node' '/slam_toolbox' \
+       && ! node_running '[a]mcl' '/amcl'; then
+        printf 'ERROR: no hay SLAM ni AMCL en marcha; nadie publica map -> odom.\n' >&2
+        printf '       Arranca el mapeo:  ./scripts/run_robot_routine.sh mapping\n' >&2
+        exit 1
+    fi
+    "${DOCKER[@]}" exec -e "CYCLONEDDS_URI=${DDS_URI}" "${CONTAINER}" bash -lc \
+        "${source_env}; python3 /workspace/scripts/save_pose.py $*"
 }
 
 all() {
@@ -814,6 +833,8 @@ case "${1:-help}" in
     slam) slam ;;
     mapping|mapear) mapping ;;
     save-map) shift; save_map "$@" ;;
+    save-pose|guardar-pose) shift; save_pose "$@" ;;
+    list-poses|poses) save_pose --list ;;
     foxglove|viz) foxglove ;;
     rviz) rviz ;;
     rqt) rqt ;;
@@ -837,6 +858,8 @@ case "${1:-help}" in
             '  slam                 mapeo SLAM en vivo (scan_sanitizer + slam_toolbox), sin Nav2' \
             '  mapping | mapear     TODO el mapeo en orden: base -> slam -> rviz -> teleop' \
             '  save-map <nombre>    guarda el mapa de SLAM en /workspace/maps/<nombre>.{yaml,pgm}' \
+            '  save-pose <nombre>   guarda la pose ACTUAL en /workspace/maps/<mapa>.poses.yaml' \
+            '  list-poses           lista las posiciones guardadas del mapa mas reciente' \
             '  foxglove | viz       puente Foxglove (ws://<jetson>:8765); se ve desde un portatil' \
             '  rviz                 RViz2 en la pantalla de la Jetson (RVIZ_CONFIG=<ruta.rviz>)' \
             '  rqt                  RQt en la pantalla de la Jetson (instala ~100 MB la 1a vez)' \

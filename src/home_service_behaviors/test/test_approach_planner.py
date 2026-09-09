@@ -34,7 +34,28 @@ from home_service_behaviors.approach_planner import (
     robust_nearest,
     brake_target,
     ray_polygon_exit_distance,
+    alignment_command,
+    perpendicular_errors,
+    reacquire_heading,
 )
+
+
+ALIGN_LIMITS = {
+    'kp_angular': 1.2,
+    'kp_linear': 0.6,
+    'kp_lateral': 0.9,
+    'max_angular': 0.45,
+    'max_linear': 0.09,
+    'max_lateral': 0.10,
+    'min_angular': 0.37,
+    'min_linear': 0.07,
+    'min_lateral': 0.035,
+    'yaw_tolerance': 0.13,
+    'yaw_hysteresis': 1.6,
+    'lateral_tolerance': 0.05,
+    'lateral_hysteresis': 1.6,
+    'standoff_tolerance': 0.10,
+}
 
 
 LIMITS = {
@@ -957,3 +978,250 @@ def test_brake_target_sin_velocidad_es_la_resta_de_siempre():
     # Parado y sin rampa de referencia -> la resta de siempre.
     assert brake_target(0.40, 0.15, speed=0.0, latency=0.20,
                         period=0.05, sensor_period=0.125) == 0.25
+
+
+# ---------------------------------------------------------------------
+# ALIGN_PERPENDICULAR
+# ---------------------------------------------------------------------
+
+def test_perpendicularidad_y_centrado_son_errores_distintos():
+    """El caso que motiva la etapa: centrado en imagen != perpendicular.
+
+    Marcador en el origen con la normal saliente hacia +x. El robot esta
+    en (1, 1) MIRANDO al marcador, o sea con el ArUco perfectamente
+    centrado en el encuadre (center_x_normalized = 0). Y aun asi esta a
+    45 grados del plano y a 1 m fuera de su eje.
+    """
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    rx, ry = 1.0, 1.0
+    ryaw = math.atan2(my - ry, mx - rx)
+
+    yaw_error, lateral, along = perpendicular_errors(
+        rx, ry, ryaw, mx, my, nx, ny
+    )
+
+    # Mirando al marcador, pero no al plano: 45 grados de error de
+    # perpendicularidad con el ArUco clavado en el centro del encuadre.
+    assert abs(abs(math.degrees(yaw_error)) - 45.0) < 1e-6
+
+    # Y desplazado un metro del eje normal.
+    assert abs(lateral - 1.0) < 1e-9
+    assert abs(along - 1.0) < 1e-9
+
+
+def test_alineacion_gira_primero_y_no_traslada():
+    """Fuera de banda angular: giro puro. Es la restriccion de la placa."""
+    cmd = alignment_command(
+        1.0, 1.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.45, ALIGN_LIMITS,
+    )
+
+    assert cmd.phase == 'YAW'
+    assert abs(cmd.wz) > 1e-6
+    assert cmd.vx == 0.0 and cmd.vy == 0.0
+
+
+def test_alineacion_traslada_con_los_dos_ejes_a_la_vez():
+    """Rumbo en banda: vx e vy salen JUNTOS, en diagonal.
+
+    Esto es lo que separa la etapa de la vieja maquina secuencial:
+    corregir un eje de traslacion cada vez es lo que se perseguia la
+    cola en una base mecanum.
+    """
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    # Encarado al plano (yaw = pi) pero fuera del eje y lejos del encare.
+    cmd = alignment_command(
+        1.00, 0.30, math.pi,
+        mx, my, nx, ny,
+        0.45, ALIGN_LIMITS,
+    )
+
+    assert cmd.phase == 'TRANSLATE'
+    assert cmd.wz == 0.0
+    assert abs(cmd.vx) > 1e-6 and abs(cmd.vy) > 1e-6
+
+
+def test_alineacion_nunca_manda_los_tres_ejes():
+    """La placa se queda a CERO con los tres ejes no nulos.
+
+    Barrido: ninguna combinacion de pose puede sacar tres componentes.
+    """
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    for rx in (0.2, 0.5, 1.0, 1.6):
+        for ry in (-0.6, -0.05, 0.0, 0.3, 0.9):
+            for ryaw in (0.0, 1.0, math.pi, -2.0, 3.0):
+                for settled in (False, True):
+                    cmd = alignment_command(
+                        rx, ry, ryaw, mx, my, nx, ny,
+                        0.45, ALIGN_LIMITS,
+                        yaw_settled=settled,
+                    )
+
+                    activos = sum(
+                        1 for v in (cmd.vx, cmd.vy, cmd.wz)
+                        if abs(v) > 1e-9
+                    )
+
+                    assert activos <= 2, (rx, ry, ryaw, cmd.as_tuple())
+
+
+def test_alineacion_declara_asentado_en_la_pose_de_encare():
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    cmd = alignment_command(
+        0.45, 0.0, math.pi,
+        mx, my, nx, ny,
+        0.45, ALIGN_LIMITS,
+    )
+
+    assert cmd.settled
+    assert cmd.as_tuple() == (0.0, 0.0, 0.0)
+    assert cmd.phase == 'SETTLED'
+
+
+def test_la_histeresis_angular_no_dispara_la_vuelta_a_alinear():
+    """Salir de ALIGN no puede reentrar en ALIGN.
+
+    El umbral de vuelta (realign_yaw_threshold) tiene que quedar por
+    encima del de salida de la histeresis, o las dos etapas se hacen
+    pinpon. Se comprueba la relacion numerica de los valores por
+    defecto del servidor.
+    """
+    align_yaw_tolerance = 0.13
+    align_yaw_hysteresis = 1.6
+    realign_yaw_threshold = 0.35
+
+    salida = align_yaw_tolerance * align_yaw_hysteresis
+
+    assert realign_yaw_threshold > salida, (salida, realign_yaw_threshold)
+
+
+def test_alineacion_sin_regular_distancia_solo_corrige_lateral():
+    """Con regulate_distance=False la separacion se deja a APPROACH."""
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    # Muy lejos del encare (1.5 m contra 0.45) pero centrado en el eje.
+    cmd = alignment_command(
+        1.50, 0.0, math.pi,
+        mx, my, nx, ny,
+        0.45, ALIGN_LIMITS,
+        regulate_distance=False,
+    )
+
+    assert cmd.settled
+    assert cmd.as_tuple() == (0.0, 0.0, 0.0)
+
+
+def test_alineacion_reduce_el_error_lateral_ciclo_a_ciclo():
+    """Simulacion del lazo con la zona muerta real de la base."""
+    mx, my, nx, ny = 0.0, 0.0, 1.0, 0.0
+
+    rx, ry, ryaw = 0.9, 0.35, 0.6
+    period = 0.05
+
+    yaw_settled = False
+    translation_settled = False
+
+    for _ in range(600):
+
+        cmd = alignment_command(
+            rx, ry, ryaw, mx, my, nx, ny,
+            0.45, ALIGN_LIMITS,
+            yaw_settled=yaw_settled,
+            translation_settled=translation_settled,
+        )
+
+        yaw_settled = cmd.yaw_settled
+        translation_settled = cmd.translation_settled
+
+        if cmd.settled:
+            break
+
+        rx, ry, ryaw = predict_pose(
+            rx, ry, ryaw, cmd.vx, cmd.vy, cmd.wz, period
+        )
+
+    yaw_error, lateral, along = perpendicular_errors(
+        rx, ry, ryaw, mx, my, nx, ny
+    )
+
+    assert abs(yaw_error) <= ALIGN_LIMITS['yaw_tolerance'], yaw_error
+    assert abs(lateral) <= ALIGN_LIMITS['lateral_tolerance'], lateral
+    assert abs(along - 0.45) <= ALIGN_LIMITS['standoff_tolerance'], along
+
+
+def test_rumbo_de_recuperacion_apunta_al_marcador_no_a_la_normal():
+    """Para RECUPERAR la vision hay que apuntar, no ponerse perpendicular."""
+    yaw = reacquire_heading(0.0, 0.0, 1.0, 1.0)
+
+    assert abs(normalize_angle(yaw - math.radians(45.0))) < 1e-9
+
+    assert reacquire_heading(1.0, 1.0, 1.0, 1.0) is None
+
+
+# ---------------------------------------------------------------------
+# Ultima pose fiable
+# ---------------------------------------------------------------------
+
+def test_la_calidad_sube_con_las_muestras():
+    est = TargetEstimate()
+
+    assert est.quality == 0.0
+
+    for i in range(20):
+        est.update(1.0, 0.0, -1.0, 0.0, stamp_ns=i * 10 ** 8)
+
+    assert est.quality == 1.0
+
+
+def test_la_calidad_se_hunde_con_una_racha_de_rechazos():
+    """Una pose RECIENTE puede no ser FIABLE, y hay que distinguirlo.
+
+    Es el caso que rompe guardar "el ultimo tvec": el marcador se pone
+    de perfil, la pose se degrada unos ciclos -- que el estimador
+    rechaza -- y solo despues desaparece. Sin calidad, la referencia
+    guardada seria justo la lectura aberrante.
+    """
+    est = TargetEstimate(max_position_jump=0.05)
+
+    for i in range(20):
+        est.update(1.0, 0.0, -1.0, 0.0, stamp_ns=i * 10 ** 8)
+
+    assert est.quality == 1.0
+
+    # Muestras absurdas: se rechazan, pero la edad sigue siendo minima.
+    for i in range(8):
+        est.update(3.0, 3.0, -1.0, 0.0, stamp_ns=(20 + i) * 10 ** 8)
+
+    assert est.quality < 0.5, est.quality
+
+    foto = est.snapshot(26 * 10 ** 8)
+
+    # La POSE guardada sigue siendo la buena: se rechazaron las malas.
+    assert abs(foto.x - 1.0) < 1e-6
+    assert foto.frame == 'odom'
+    assert not foto.is_usable(foto.age_sec, 0.5, 2.0)
+
+
+def test_la_pose_fiable_lleva_marco_timestamp_y_calidad():
+    est = TargetEstimate()
+
+    for i in range(10):
+        est.update(2.0, 1.0, -1.0, 0.0, stamp_ns=i * 10 ** 8)
+
+    foto = est.snapshot(now_ns=15 * 10 ** 8)
+
+    assert foto.frame == 'odom'
+    assert foto.stamp_ns == 9 * 10 ** 8
+    assert abs(foto.age_sec - 0.6) < 1e-9
+    assert foto.samples == 10
+    assert foto.quality == 1.0
+
+    # Fresca y con calidad: usable. Vieja: no, por reciente que sea la
+    # ultima lectura ruidosa que la acompañe.
+    assert foto.is_usable(0.6, 0.5, 2.0)
+    assert not foto.is_usable(3.0, 0.5, 2.0)

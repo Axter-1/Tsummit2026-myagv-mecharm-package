@@ -82,6 +82,57 @@ def outward_normal(nx, ny):
 # Estimador del marcador en odom
 # ---------------------------------------------------------------------
 
+class ReliablePose:
+    """Foto inmutable de la ultima pose fiable del marcador en odom.
+
+    No es "el ultimo tvec": es la salida del estimador con su marco, su
+    timestamp, cuantas muestras la sostienen y cuantas se rechazaron.
+    Con eso se puede decidir si sigue sirviendo tras perder la vision,
+    que es justo lo que no se podia decidir guardando el ultimo
+    fotograma a secas.
+    """
+
+    __slots__ = (
+        'x', 'y', 'nx', 'ny', 'frame', 'stamp_ns',
+        'samples', 'rejected', 'quality', 'age_sec',
+    )
+
+    def __init__(
+        self, x, y, nx, ny, frame, stamp_ns,
+        samples, rejected, quality, age_sec=None,
+    ):
+        self.x = x
+        self.y = y
+        self.nx = nx
+        self.ny = ny
+        self.frame = frame
+        self.stamp_ns = stamp_ns
+        self.samples = samples
+        self.rejected = rejected
+        self.quality = quality
+        self.age_sec = age_sec
+
+    @property
+    def pose(self):
+        return self.x, self.y, self.nx, self.ny
+
+    def is_usable(self, age_sec, min_quality, max_age_sec):
+        """Vale para navegar a ciegas? Edad Y calidad, no una sola."""
+        return (
+            self.quality >= min_quality and
+            age_sec <= max_age_sec
+        )
+
+    def __repr__(self):
+        return (
+            f'ReliablePose(frame={self.frame}, '
+            f'xy=({self.x:.3f}, {self.y:.3f}), '
+            f'normal=({self.nx:+.3f}, {self.ny:+.3f}), '
+            f'samples={self.samples}, rejected={self.rejected}, '
+            f'quality={self.quality:.2f})'
+        )
+
+
 class TargetEstimate:
     """Pose del marcador en odom, fusionada a lo largo del tiempo.
 
@@ -245,6 +296,69 @@ class TargetEstimate:
             return float('inf')
 
         return (now_ns - self.last_update_ns) / 1e9
+
+    @property
+    def quality(self):
+        """Confianza de la estimacion, en [0, 1]. Sin unidades fisicas.
+
+        Combina dos cosas que ya se estaban midiendo y no se miraban:
+
+          madurez   cuantas muestras se han fusionado, saturando en
+                    gate_after. Por debajo de ese numero el filtro ni
+                    siquiera aplica el rechazo de atipicos, asi que la
+                    estimacion es tan provisional como la ultima lectura.
+          racha     cuantas muestras seguidas se estan RECHAZANDO. Una
+                    racha larga significa que la estimacion y lo que se
+                    ve han dejado de coincidir; el valor guardado puede
+                    seguir siendo suave y estar equivocado.
+
+        Sirve para decidir si la ultima pose conocida se puede usar a
+        ciegas, que es distinto de que sea reciente: una pose de hace
+        200 ms tomada en mitad de una racha de rechazos no vale, y una
+        de hace 2 s con 40 muestras coherentes si.
+        """
+        if not self.ready:
+            return 0.0
+
+        gate = max(1, self.gate_after)
+        maturity = clamp(self.samples / float(gate), 0.0, 1.0)
+
+        relock = max(1, self.relock_after)
+        streak = clamp(
+            1.0 - self.consecutive_rejected / float(relock),
+            0.0, 1.0,
+        )
+
+        return maturity * streak
+
+    def snapshot(self, now_ns=None):
+        """Ultima pose CONFIABLE del marcador, con su contexto.
+
+        Devuelve None si todavia no hay estimacion. El marco es siempre
+        `odom`, y eso es lo que hace que la pose siga siendo valida
+        cuando el robot se mueve sin ver el marcador: no se guarda un
+        tvec de camara -- que caduca en cuanto la base se desplaza --
+        sino un punto fijo del mundo, y es la odometria la que actualiza
+        la relacion robot-marcador ciclo a ciclo.
+        """
+        if not self.ready:
+            return None
+
+        return ReliablePose(
+            x=self.x,
+            y=self.y,
+            nx=self.nx,
+            ny=self.ny,
+            frame='odom',
+            stamp_ns=self.last_update_ns,
+            samples=self.samples,
+            rejected=self.rejected,
+            quality=self.quality,
+            age_sec=(
+                self.age_sec(now_ns)
+                if now_ns is not None else None
+            ),
+        )
 
 
 # ---------------------------------------------------------------------
@@ -896,6 +1010,260 @@ def holonomic_command(
         vy = 0.0
 
     return vx, vy, wz, yaw_error, reached, yaw_settled
+
+
+# ---------------------------------------------------------------------
+# Alineacion perpendicular previa (ALIGN_PERPENDICULAR)
+# ---------------------------------------------------------------------
+
+class AlignmentCommand:
+    """Resultado de un ciclo de alineacion perpendicular.
+
+    Campos:
+      vx, vy, wz          mando en el marco del ROBOT.
+      phase               'YAW' | 'TRANSLATE' | 'SETTLED'.
+      yaw_error           error de PERPENDICULARIDAD, en rad. Cero
+                          cuando el eje x del robot es antiparalelo a la
+                          normal saliente, o sea cuando el robot mira de
+                          frente al PLANO del marcador.
+      lateral             separacion con signo respecto al eje normal,
+                          en metros. Es el error de CENTRADO geometrico.
+      along               separacion perpendicular al plano, en metros.
+      yaw_settled         histeresis del lazo angular.
+      translation_settled histeresis del lazo traslacional.
+    """
+
+    __slots__ = (
+        'vx', 'vy', 'wz', 'phase', 'yaw_error', 'lateral', 'along',
+        'yaw_settled', 'translation_settled',
+    )
+
+    def __init__(
+        self, vx, vy, wz, phase, yaw_error, lateral, along,
+        yaw_settled, translation_settled,
+    ):
+        self.vx = vx
+        self.vy = vy
+        self.wz = wz
+        self.phase = phase
+        self.yaw_error = yaw_error
+        self.lateral = lateral
+        self.along = along
+        self.yaw_settled = yaw_settled
+        self.translation_settled = translation_settled
+
+    @property
+    def settled(self):
+        return self.yaw_settled and self.translation_settled
+
+    def as_tuple(self):
+        return self.vx, self.vy, self.wz
+
+
+def perpendicular_errors(rx, ry, ryaw, mx, my, nx, ny):
+    """(yaw_error, lateral, along) del robot respecto al PLANO del marcador.
+
+    Los tres son independientes del centrado en imagen, y a proposito.
+    `center_x_normalized` mide donde cae el marcador en el encuadre: es
+    cero cuando el robot APUNTA al marcador, lo mire desde donde lo
+    mire. Estar perpendicular es otra cosa -- que el eje optico sea
+    paralelo a la normal de la superficie -- y estar centrado sobre el
+    eje normal es una tercera. Un robot a 30 grados del eje puede tener
+    el ArUco perfectamente centrado en la imagen.
+
+      yaw_error  perpendicularidad: normal_yaw - ryaw.
+      lateral    centrado sobre el eje normal, con signo.
+      along      distancia perpendicular al plano.
+    """
+    normal_yaw = math.atan2(-ny, -nx)
+
+    along, lateral = corridor_coords(rx, ry, mx, my, nx, ny)
+
+    return normalize_angle(normal_yaw - ryaw), lateral, along
+
+
+def alignment_command(
+    rx, ry, ryaw,
+    mx, my, nx, ny,
+    standoff,
+    limits,
+    yaw_settled=False,
+    translation_settled=False,
+    regulate_distance=True,
+):
+    """Ley de control de la etapa ALIGN_PERPENDICULAR.
+
+    Lleva al robot a la pose de encare: mirando de frente al plano del
+    marcador y sobre su eje normal, a `standoff` de la superficie.
+
+    DOS LAZOS DESACOPLADOS, MULTIPLEXADOS POR CICLO
+    -----------------------------------------------
+    El error angular (perpendicularidad) y el traslacional (centrado
+    sobre el eje + separacion) se calculan por separado, cada uno con su
+    tolerancia y su histeresis. Lo que NO se puede es mandarlos a la vez:
+    la placa del myAGV se queda a CERO ABSOLUTO cuando los tres ejes son
+    no nulos (ver la tabla de medidas en holonomic_command). Asi que
+    cada ciclo es angular puro o traslacional puro, con la histeresis
+    como puerta. La simultaneidad que si se conserva -- y es la que
+    importa para no perseguirse la cola -- es la de vx con vy: la
+    traslacion sale siempre como VECTOR, en diagonal si hace falta,
+    nunca eje a eje.
+
+    `regulate_distance=False` deja la separacion al controlador de
+    aproximacion y aqui solo se corrige el centrado lateral.
+
+    `limits`: kp_angular, kp_linear, kp_lateral, max_angular,
+    max_linear, max_lateral, min_angular, min_linear, min_lateral,
+    yaw_tolerance, yaw_hysteresis, lateral_tolerance,
+    lateral_hysteresis, standoff_tolerance.
+    """
+    yaw_error, lateral, along = perpendicular_errors(
+        rx, ry, ryaw, mx, my, nx, ny
+    )
+
+    # -------------------------------------------------
+    # Histeresis del lazo angular (disparador Schmitt)
+    #
+    # Mismo motivo que en holonomic_command: el suelo de giro de la base
+    # (0.37 rad/s) es mayor que el escalon que haria falta cerca de
+    # tolerancia, asi que sin dos umbrales el giro castañea.
+    # -------------------------------------------------
+    yaw_tolerance = limits['yaw_tolerance']
+    yaw_release = yaw_tolerance * limits.get('yaw_hysteresis', 1.6)
+
+    if yaw_settled:
+        if abs(yaw_error) > yaw_release:
+            yaw_settled = False
+    elif abs(yaw_error) <= yaw_tolerance:
+        yaw_settled = True
+
+    # -------------------------------------------------
+    # Histeresis del lazo traslacional
+    # -------------------------------------------------
+    lateral_tolerance = limits['lateral_tolerance']
+    lateral_release = (
+        lateral_tolerance * limits.get('lateral_hysteresis', 1.6)
+    )
+
+    standoff_error = (along - standoff) if regulate_distance else 0.0
+    standoff_tolerance = limits.get('standoff_tolerance', 0.10)
+    standoff_release = (
+        standoff_tolerance * limits.get('lateral_hysteresis', 1.6)
+    )
+
+    if translation_settled:
+        if (
+            abs(lateral) > lateral_release or
+            abs(standoff_error) > standoff_release
+        ):
+            translation_settled = False
+    elif (
+        abs(lateral) <= lateral_tolerance and
+        abs(standoff_error) <= standoff_tolerance
+    ):
+        translation_settled = True
+
+    # -------------------------------------------------
+    # El rumbo manda: sin perpendicularidad, desplazarse de lado no
+    # centra nada -- el eje y del cuerpo no es el tangente del plano.
+    # -------------------------------------------------
+    if not yaw_settled:
+
+        wz = clamp(
+            limits['kp_angular'] * yaw_error,
+            -limits['max_angular'],
+            limits['max_angular'],
+        )
+
+        wz = apply_deadband(wz, limits['min_angular'])
+
+        return AlignmentCommand(
+            0.0, 0.0, wz, 'YAW',
+            yaw_error, lateral, along,
+            yaw_settled, translation_settled,
+        )
+
+    if translation_settled:
+
+        return AlignmentCommand(
+            0.0, 0.0, 0.0, 'SETTLED',
+            yaw_error, lateral, along,
+            yaw_settled, translation_settled,
+        )
+
+    # -------------------------------------------------
+    # Traslacion hacia la pose de encare, como VECTOR
+    #
+    # El objetivo se construye en odom sobre el eje normal y luego se
+    # gira al cuerpo. Hacerlo asi -- en vez de repartir signos a mano
+    # entre lateral y along -- es lo que mantiene el mando correcto
+    # aunque el yaw no sea exactamente el normal: el residuo angular
+    # dentro de tolerancia se reparte solo entre vx y vy.
+    # -------------------------------------------------
+    along_target = standoff if regulate_distance else along
+
+    target_x = mx + nx * along_target
+    target_y = my + ny * along_target
+
+    dx, dy = target_x - rx, target_y - ry
+
+    cos_y, sin_y = math.cos(-ryaw), math.sin(-ryaw)
+
+    ex = dx * cos_y - dy * sin_y
+    ey = dx * sin_y + dy * cos_y
+
+    vx = clamp(
+        limits['kp_linear'] * ex,
+        -limits['max_linear'],
+        limits['max_linear'],
+    )
+
+    vy = clamp(
+        limits['kp_lateral'] * ey,
+        -limits['max_lateral'],
+        limits['max_lateral'],
+    )
+
+    # Zona muerta SOBRE EL VECTOR (la elipse de deadband_floor), no eje
+    # a eje: recortar solo una componente torceria la direccion.
+    speed_norm = math.hypot(vx, vy)
+
+    if speed_norm > 1e-9:
+
+        ux, uy = vx / speed_norm, vy / speed_norm
+
+        floor_speed = deadband_floor(
+            ux, uy,
+            limits['min_linear'],
+            limits['min_lateral'],
+        )
+
+        if speed_norm < floor_speed:
+            vx = floor_speed * ux
+            vy = floor_speed * uy
+
+    else:
+        vx = vy = 0.0
+
+    return AlignmentCommand(
+        vx, vy, 0.0, 'TRANSLATE',
+        yaw_error, lateral, along,
+        yaw_settled, translation_settled,
+    )
+
+
+def reacquire_heading(rx, ry, mx, my):
+    """Yaw en odom que vuelve a poner el marcador recordado en el eje optico.
+
+    Es el rumbo al marcador, no la normal: para RECUPERAR la vision hay
+    que apuntar, no ponerse perpendicular. La normal viene despues.
+    """
+    dx, dy = mx - rx, my - ry
+
+    if math.hypot(dx, dy) < 1e-6:
+        return None
+
+    return math.atan2(dy, dx)
 
 
 # ---------------------------------------------------------------------

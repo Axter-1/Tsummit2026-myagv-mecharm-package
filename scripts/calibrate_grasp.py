@@ -562,8 +562,12 @@ def main():
         except RuntimeError:
             safe_pose = None
 
+    # La captura de poses se hace con la pinza abierta. Si se proporciona
+    # un valor ya calibrado se usa tambien durante la enseñanza; 0 conserva
+    # la apertura total segura para una primera calibracion.
+    open_value = args.gripper_open_value if args.gripper_open_value > 0 else 100
     try:
-        arm.set_gripper_value(100, 40, 1)
+        arm.set_gripper_value(open_value, 40, 1)
     except Exception:  # noqa: BLE001
         pass
 

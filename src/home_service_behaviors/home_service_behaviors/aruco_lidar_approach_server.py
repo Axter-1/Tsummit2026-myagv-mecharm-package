@@ -403,9 +403,27 @@ class ArucoLidarApproachServer(Node):
         # Compatibilidad con configuraciones antiguas. La seguridad actual
         # no resta este valor: calcula el borde de salida del rayo contra
         # chassis_footprint usando la TF completa del sensor.
+        #
+        # 0.081 = bumper -> CENTRO DE GIRO del LiDAR, que es el origen de
+        # laser_frame y desde donde el sensor mide sus rangos.
+        #
+        # Confirmado por dos caminos independientes que coinciden en 1 mm:
+        #
+        #   a) Cinta + scan. Bumper a 0.430 m del plano del ArUco 2, eco
+        #      frontal crudo a 0.511 desde el sensor -> 0.081.
+        #   b) Cinta al BORDE del LiDAR: 0.052 del bumper al primer punto
+        #      de la circunferencia. Sumando el radio del YDLIDAR X2
+        #      (~0.0298, carcasa de 59.5 mm) -> 0.082.
+        #
+        # El 0.09 anterior era un valor heredado sin medir.
+        #
+        # Este valor es el que destapo que chassis_footprint estaba mal:
+        # el footprint ponia el morro en x=+0.188, la TF pone laser_frame
+        # en x=0.065, y su diferencia (0.123) contradecia estos 0.081.
+        # Ver el bloque de chassis_footprint.
         self.declare_parameter(
             'lidar_to_front_bumper_m',
-            0.09
+            0.081
         )
 
         # Cuanto mas lejos que el plano esperado se acepta un eco del
@@ -762,6 +780,130 @@ class ArucoLidarApproachServer(Node):
             8.0
         )
 
+        # =========================================================
+        # ALIGN_PERPENDICULAR
+        #
+        # Etapa previa a la aproximacion: ponerse de frente al PLANO del
+        # marcador y sobre su eje normal, antes de avanzar hacia el.
+        #
+        # POR QUE UNA ETAPA APARTE, SI build_path YA LLEGA PERPENDICULAR
+        # ---------------------------------------------------------------
+        # El camino de dos tramos deja la llegada perpendicular POR
+        # CONSTRUCCION, y eso sigue siendo cierto. Lo que no da es
+        # perpendicularidad al EMPEZAR: el primer tramo se recorre
+        # mirando al marcador (desired_heading mezcla rumbo y normal con
+        # `remaining`), asi que el robot ataca el pasillo oblicuo y toda
+        # la correccion de encare se paga al final, ya cerca, donde el
+        # margen de maniobra y el encuadre son minimos.
+        #
+        # Alinear ANTES cuesta unos segundos parados y quita ese pago
+        # tardio. No sustituye al camino: lo alimenta ya encarado.
+        #
+        # NO ES EL VIEJO ALIGN_HEADING -> ALIGNING_LATERAL
+        # ------------------------------------------------
+        # Aquella maquina corregia UN grado de libertad cada vez contra
+        # el error instantaneo de camara, y en mecanum eso se persigue
+        # la cola. Aqui los dos lazos trabajan contra la estimacion
+        # fijada en ODOM, la traslacion sale siempre como vector (vx e
+        # vy juntos, en diagonal si hace falta) y la unica multiplexacion
+        # es giro-o-traslacion, que la impone la placa (ver la tabla de
+        # tres ejes en holonomic_command), no el diseño.
+        # =========================================================
+
+        self.declare_parameter('align_enabled', True)
+
+        # Tolerancia de PERPENDICULARIDAD. No confundir con
+        # center_keep_margin, que mide centrado en imagen: son errores
+        # distintos y se calculan por separado (perpendicular_errors).
+        #
+        # El suelo de giro son 0.37 rad/s y el lazo tarda
+        # command_latency + periodo en reaccionar: 0.37 * 0.32 = 0.118
+        # rad de sobrepasamiento. Por debajo de eso la tolerancia es
+        # inalcanzable y el robot oscila. check_tolerances lo verifica.
+        self.declare_parameter('align_yaw_tolerance', 0.13)
+        self.declare_parameter('align_yaw_hysteresis', 1.6)
+
+        # Tolerancia de CENTRADO sobre el eje normal, en metros.
+        self.declare_parameter('align_lateral_tolerance', 0.05)
+        self.declare_parameter('align_lateral_hysteresis', 1.6)
+
+        # Si la etapa regula tambien la separacion al plano o la deja
+        # entera para la aproximacion. Con True se coloca en el punto de
+        # encare; la banda es ancha a proposito para no pelearse con el
+        # perfil de frenado de APPROACH.
+        self.declare_parameter('align_regulate_distance', True)
+        self.declare_parameter('align_standoff_tolerance', 0.10)
+
+        self.declare_parameter('align_kp_angular', 1.2)
+        self.declare_parameter('align_kp_linear', 0.6)
+        self.declare_parameter('align_kp_lateral', 0.9)
+
+        self.declare_parameter('align_max_angular_speed', 0.45)
+        self.declare_parameter('align_max_linear_speed', 0.09)
+        self.declare_parameter('align_max_lateral_speed', 0.10)
+
+        # Cuanto tiempo seguido tienen que estar los dos errores en
+        # banda para dar la alineacion por buena. Sin esto se declara
+        # alineado en el cruce por cero de una oscilacion.
+        self.declare_parameter('align_settle_sec', 0.35)
+
+        # Presupuesto de la etapa. Agotado, se pasa a APPROACH con lo
+        # que haya: la aproximacion sabe corregir, solo que mas tarde.
+        self.declare_parameter('align_timeout_sec', 25.0)
+
+        # Tras completar la alineacion, ventana en la que APPROACH NO
+        # puede volver a tocar el rumbo por centrado de camara. Sin
+        # ella, el bloque "girar lo menos posible" reevalua yaw_settled
+        # con center_x en el primer ciclo y deshace el encare recien
+        # conseguido con un giro en seco.
+        self.declare_parameter('align_handoff_grace_sec', 1.5)
+
+        # Por debajo de esta distancia al plano no se alinea: el
+        # marcador ya no cabe en el encuadre y el endgame del
+        # aproximador tiene sus propios criterios, mas finos.
+        self.declare_parameter('align_min_distance', 0.30)
+
+        # ---- Tolerancia a perdida de vision durante la alineacion ----
+
+        # Edad maxima de la ultima pose fiable para seguir corrigiendo
+        # sin ver el marcador.
+        self.declare_parameter('align_max_pose_age', 2.0)
+
+        # ...y limite en METROS recorridos sin verlo. En metros porque
+        # la deriva de odometria crece con la distancia, no con la
+        # espera: un robot parado no deriva.
+        self.declare_parameter('align_max_blind_travel', 0.15)
+
+        # Calidad minima de la estimacion (TargetEstimate.quality) para
+        # fiarse de ella a ciegas. Una pose reciente tomada en mitad de
+        # una racha de rechazos no vale aunque sea reciente.
+        self.declare_parameter('align_min_quality', 0.5)
+
+        # Recuperacion: girar para volver a meter el marcador en el
+        # encuadre, apuntando a la posicion RECORDADA en odom. No es una
+        # busqueda a ciegas: se sabe hacia donde mirar.
+        self.declare_parameter('align_recovery_angular_speed', 0.40)
+        self.declare_parameter('align_recovery_timeout_sec', 6.0)
+        self.declare_parameter('align_max_attempts', 3)
+
+        # ---- Vuelta de APPROACH a ALIGN_PERPENDICULAR ----
+
+        # Error de perpendicularidad que obliga a realinear en mitad de
+        # la aproximacion. Muy por encima de align_yaw_tolerance: la
+        # separacion entre los dos umbrales ES la histeresis que evita
+        # el pinponeo entre etapas.
+        self.declare_parameter('realign_yaw_threshold', 0.35)
+
+        # ...y cuanto tiene que persistir. Un pico de un ciclo es ruido
+        # del estimador, no un desvio real.
+        self.declare_parameter('realign_persist_sec', 0.6)
+        self.declare_parameter('max_realign_cycles', 2)
+
+        # Periodo del volcado de diagnostico de la etapa, en segundos.
+        # 0.0 lo apaga. Es un throttle: el lazo va a 20 Hz y sacar una
+        # linea por ciclo tapa cualquier otro mensaje.
+        self.declare_parameter('align_log_period', 0.5)
+
         # Histeresis del giro. La tolerancia fina hace de umbral de
         # ENTRADA en asentado, y esta por el de SALIDA. Sin los dos
         # umbrales el giro castañea: la zona muerta obliga a mandar el
@@ -870,13 +1012,59 @@ class ArucoLidarApproachServer(Node):
             -1.0
         )
 
-        # Poligono medido del myAGV en chassis_frame. Se usa el
-        # mismo footprint que Nav2, pero aqui se intersecta el rayo real del
-        # LiDAR con sus vertices, incluyendo x/y/yaw del montaje del sensor.
+        # Poligono del myAGV en chassis_frame. Aqui se intersecta el rayo
+        # real del LiDAR con sus vertices, incluyendo x/y/yaw del montaje
+        # del sensor.
+        #
+        # MORRO: 0.147, NO 0.188
+        # ======================
+        # El 0.188 heredado de la configuracion de Nav2 ponia el morro
+        # 4.2 cm mas adelante de donde esta. Cadena de medidas que lo
+        # corrige, sin ninguna suposicion sobre donde cae base_footprint
+        # dentro del chasis:
+        #
+        #   TF leida en el robot        base_footprint -> laser_frame
+        #                               x = 0.065  (z = 0.080, yaw = pi)
+        #   Cinta al borde del LiDAR    morro -> primer punto de la
+        #                               circunferencia = 0.052
+        #   Radio del YDLIDAR X2        0.0298 (carcasa de 59.5 mm)
+        #
+        #   morro = 0.065 + 0.052 + 0.0298 = 0.147
+        #
+        # Corrobora el 0.081 de morro->centro del LiDAR que ya salia de
+        # reconciliar cinta y scan (ver lidar_to_front_bumper_m): dos
+        # caminos independientes, 1 mm de diferencia.
+        #
+        # TRASERA: -0.183
+        # Largo total medido con cinta = 0.330 -> 0.147 - 0.330.
+        # O sea que base_footprint NO esta en el centro geometrico del
+        # chasis, sino 1.8 cm por delante. Medir media eslora (0.165) y
+        # asumir simetria daba 0.100 de morro->LiDAR, que contradice las
+        # dos medidas directas.
+        #
+        # POR QUE IMPORTA -- ERA LA CAUSA DE LAS PARADAS CORTAS
+        # =====================================================
+        # chassis_clearance_for_scan() calcula el despeje intersectando
+        # el eco con ESTE poligono. Con el morro 4.2 cm adelantado, el
+        # despeje sale 4.2 cm MENOR que el real y choca contra el suelo
+        # de min_front_clearance (0.07) mucho antes de tiempo: parada
+        # segura, o STALLED, con el robot todavia lejos. Es el sintoma
+        # que se venia observando como "por debajo de 0.07 de despeje la
+        # aproximacion falla siempre".
+        #
+        # ANCHO: 0.130 SIN VERIFICAR. Es el valor de Nav2 y no se ha
+        # medido. No afecta a una aproximacion frontal, pero si al
+        # laberinto.
+        #
+        # DIVERGE DE NAV2 A PROPOSITO: el footprint de nav2_maze.yaml
+        # lleva ~1.5 cm de margen incorporado, que para inflar un
+        # costmap esta bien. Aqui hace falta el poligono REAL, porque el
+        # margen operativo ya lo pone chassis_clearance_stop_margin
+        # (0.015). Sumar los dos era contar el margen dos veces.
         self.declare_parameter(
             'chassis_footprint',
-            [0.188, 0.130, 0.188, -0.130,
-             -0.174, -0.130, -0.174, 0.130]
+            [0.147, 0.130, 0.147, -0.130,
+             -0.183, -0.130, -0.183, 0.130]
         )
 
         # =========================================================
@@ -2159,6 +2347,67 @@ class ArucoLidarApproachServer(Node):
     # Feedback
     # =============================================================
 
+    def log_stage_diagnostics(
+        self,
+        state,
+        phase,
+        detection,
+        reliable,
+        detection_age,
+        blind_travel,
+        yaw_error,
+        lateral_error,
+        along,
+        vx, vy, wz,
+        lidar_distance,
+        loss_reason,
+        transition_reason,
+    ):
+        """Una linea por volcado con todo lo que hace falta para juzgar.
+
+        Sale por throttle (align_log_period), no por ciclo: el lazo va a
+        20 Hz y una linea por ciclo tapa cualquier otro mensaje del
+        nodo, que es como se perdieron los avisos de LiDAR en pista.
+        """
+        period = self.pf('align_log_period')
+
+        if period <= 0.0:
+            return
+
+        pose_txt = (
+            f'({reliable.x:+.3f}, {reliable.y:+.3f}) '
+            f'n=({reliable.nx:+.2f}, {reliable.ny:+.2f}) '
+            f'q={reliable.quality:.2f} n_muestras={reliable.samples}'
+            if reliable is not None else '<sin pose fiable>'
+        )
+
+        actual_txt = (
+            f'centro={detection.center_x_normalized:+.3f} '
+            f'z={detection.distance_z:.3f} m'
+            if detection is not None else '<sin deteccion>'
+        )
+
+        edad_txt = (
+            f'{detection_age:.2f} s'
+            if detection_age != float('inf') else 'nunca'
+        )
+
+        self.get_logger().info(
+            f'[{state}/{phase}] '
+            f'aruco_actual: {actual_txt} | '
+            f'ultima_pose_fiable(odom): {pose_txt} | '
+            f'edad_deteccion={edad_txt} '
+            f'recorrido_ciego={blind_travel:.3f} m | '
+            f'err_angular={math.degrees(yaw_error):+.1f} deg '
+            f'err_lateral={lateral_error:+.3f} m '
+            f'perpendicular={along:.3f} m | '
+            f'cmd=({vx:+.3f}, {vy:+.3f}, {wz:+.3f}) | '
+            f'lidar={lidar_distance:.3f} m | '
+            f'perdida={loss_reason or "-"} | '
+            f'ultima_transicion={transition_reason or "-"}',
+            throttle_duration_sec=period,
+        )
+
     def send_feedback(
         self,
         goal_handle,
@@ -2220,6 +2469,15 @@ class ArucoLidarApproachServer(Node):
              self.pf('min_linear_speed'), 'm', lidar_dt),
             ('lateral_tolerance',
              self.pf('lateral_tolerance'),
+             self.pf('min_lateral_speed'), 'm', 0.0),
+            # La etapa de alineacion tiene sus propias tolerancias y el
+            # mismo problema aritmetico: por debajo del recorrido
+            # residual el lazo no puede asentarse, solo oscilar.
+            ('align_yaw_tolerance',
+             self.pf('align_yaw_tolerance'),
+             self.pf('min_heading_speed'), 'rad', 0.0),
+            ('align_lateral_tolerance',
+             self.pf('align_lateral_tolerance'),
              self.pf('min_lateral_speed'), 'm', 0.0),
         ):
 
@@ -2439,6 +2697,32 @@ class ArucoLidarApproachServer(Node):
 
         state = 'SEARCHING'
 
+        # ---- ALIGN_PERPENDICULAR ----
+        align_enabled = bool(
+            self.get_parameter('align_enabled').value
+        )
+        # Se entra en la etapa en cuanto haya estimacion, no antes: sin
+        # saber donde esta el plano no hay nada con que alinearse.
+        align_stage = align_enabled
+        align_start_ns = None
+        align_yaw_settled = False
+        align_translation_settled = False
+        align_settle_since_ns = None
+        align_attempts = 0
+        align_reference_yaw = None
+        align_handoff_until_ns = None
+        reacquire_start_ns = None
+        realign_since_ns = None
+        realign_cycles = 0
+
+        # Ultima pose del marcador con calidad suficiente para fiarse de
+        # ella a ciegas. Es un ReliablePose en ODOM, no un tvec: por eso
+        # sigue valiendo cuando el robot se mueve sin ver el marcador --
+        # la odometria actualiza la relacion robot-marcador sola.
+        reliable = None
+        loss_reason = None
+        transition_reason = None
+
         # Ciclos seguidos sin mando y sin llegada declarada. Ver el
         # bloque "Ni avanza ni llega" mas abajo.
         stalled = 0
@@ -2579,6 +2863,7 @@ class ArucoLidarApproachServer(Node):
 
                     last_detection_ns = now_ns
                     stale_warned = False
+                    loss_reason = None
 
                     # La pose se pide aqui explicitamente: este bloque
                     # corre tambien en SEARCHING, donde rx/ry todavia no
@@ -2668,6 +2953,39 @@ class ArucoLidarApproachServer(Node):
                                 )
                                 last_lidar_outward_normal = (lnx, lny)
                                 last_lidar_normal_ns = now_ns
+
+            # =====================================================
+            # ULTIMA POSE FIABLE
+            #
+            # Se refresca SOLO mientras la estimacion tiene calidad
+            # suficiente. Guardar la ultima sin mas seria guardar
+            # tambien la lectura aberrante de justo antes de perder el
+            # marcador, que es precisamente la que no hay que recordar:
+            # el modo de fallo tipico es que la pose se degrada unos
+            # ciclos (marcador de perfil, desenfoque de movimiento) y
+            # DESPUES desaparece.
+            #
+            # El marco es odom. Eso es lo que hace que la referencia
+            # siga siendo valida al moverse sin ver el marcador: no se
+            # guarda un tvec de camara -- que caduca en cuanto la base
+            # se desplaza -- sino un punto fijo del mundo, y es la
+            # odometria (via TF odom->base_link) la que actualiza la
+            # relacion robot-marcador ciclo a ciclo, sin tocar la pose
+            # almacenada.
+            # =====================================================
+
+            snapshot = estimate.snapshot(now_ns)
+
+            if (
+                snapshot is not None and
+                snapshot.quality >= self.pf('align_min_quality')
+            ):
+                reliable = snapshot
+
+            detection_age = (
+                (now_ns - last_detection_ns) / 1e9
+                if last_detection_ns is not None else float('inf')
+            )
 
             # =====================================================
             # SEARCHING: sin estimacion no hay a donde ir
@@ -2765,10 +3083,415 @@ class ArucoLidarApproachServer(Node):
                 time.sleep(period)
                 continue
 
-            state = 'PURSUING'
-
             rx, ry, ryaw = robot_pose
             estimate_pose = estimate.pose
+
+            # Metros recorridos desde la ultima deteccion aceptada. La
+            # deriva de odometria crece con la DISTANCIA, no con el
+            # tiempo: un robot parado esperando no deriva nada, asi que
+            # el limite del tramo sin vision se mide en metros.
+            blind_travel = (
+                math.hypot(rx - last_detection_xy[0],
+                           ry - last_detection_xy[1])
+                if last_detection_xy is not None else 0.0
+            )
+
+            # =====================================================
+            # ALIGN_PERPENDICULAR
+            #
+            # Ponerse de frente al PLANO del marcador y sobre su eje
+            # normal ANTES de avanzar hacia el. Ver el bloque de
+            # parametros align_* para el porque de la etapa y en que se
+            # diferencia de la vieja maquina secuencial.
+            # =====================================================
+
+            if align_stage:
+
+                state = 'ALIGN_PERPENDICULAR'
+
+                if align_start_ns is None:
+                    align_start_ns = now_ns
+                    align_settle_since_ns = None
+                    self.get_logger().info(
+                        'ALIGN_PERPENDICULAR: alineando con el plano del '
+                        f'marcador {target_id} '
+                        f'(tol {math.degrees(self.pf("align_yaw_tolerance")):.1f} '
+                        f'deg / {self.pf("align_lateral_tolerance") * 100:.0f} cm)'
+                    )
+
+                align_elapsed = (now_ns - align_start_ns) / 1e9
+
+                # -------------------------------------------------
+                # Que referencia se usa: la pose fiable si existe, y si
+                # no la estimacion viva. Las dos estan en odom, asi que
+                # la eleccion no cambia el marco, solo la confianza.
+                # -------------------------------------------------
+                if reliable is not None:
+                    amx, amy, anx, any_ = reliable.pose
+                    align_quality = reliable.quality
+                    align_pose_age = (
+                        (now_ns - reliable.stamp_ns) / 1e9
+                        if reliable.stamp_ns is not None
+                        else float('inf')
+                    )
+                else:
+                    amx, amy, anx, any_ = estimate_pose
+                    align_quality = estimate.quality
+                    align_pose_age = detection_age
+
+                # -------------------------------------------------
+                # PERDIDA VISUAL: ni abortar de golpe ni seguir con el
+                # ultimo mando. Se juzga la referencia por TRES cosas
+                # -- calidad, edad y metros recorridos a ciegas -- y
+                # solo si las tres aguantan se sigue corrigiendo.
+                # -------------------------------------------------
+                pose_usable = (
+                    reliable is not None and
+                    align_quality >= self.pf('align_min_quality') and
+                    align_pose_age <= self.pf('align_max_pose_age') and
+                    blind_travel <= self.pf('align_max_blind_travel')
+                )
+
+                if detection is None and not pose_usable:
+
+                    if align_quality < self.pf('align_min_quality'):
+                        loss_reason = (
+                            f'calidad {align_quality:.2f} < '
+                            f'{self.pf("align_min_quality"):.2f}'
+                        )
+                    elif align_pose_age > self.pf('align_max_pose_age'):
+                        loss_reason = (
+                            f'pose de hace {align_pose_age:.2f} s '
+                            f'(limite {self.pf("align_max_pose_age"):.2f})'
+                        )
+                    else:
+                        loss_reason = (
+                            f'{blind_travel:.3f} m a ciegas '
+                            f'(limite {self.pf("align_max_blind_travel"):.3f})'
+                        )
+
+                    # -------------------------------------------------
+                    # REACQUIRING: girar para volver a meter el marcador
+                    # en el encuadre. NO es una busqueda a ciegas: se
+                    # apunta a la posicion RECORDADA en odom, que la
+                    # odometria mantiene actualizada aunque no se vea.
+                    # -------------------------------------------------
+                    if reacquire_start_ns is None:
+                        align_attempts += 1
+                        reacquire_start_ns = now_ns
+                        self.stop_robot()
+                        self.get_logger().warn(
+                            f'Marcador perdido en ALIGN_PERPENDICULAR: '
+                            f'{loss_reason}. Intento de recuperacion '
+                            f'{align_attempts}/'
+                            f'{int(self.pf("align_max_attempts"))}.'
+                        )
+
+                    reacquire_elapsed = (
+                        now_ns - reacquire_start_ns
+                    ) / 1e9
+
+                    agotado = (
+                        align_attempts > int(self.pf('align_max_attempts')) or
+                        reacquire_elapsed >
+                        self.pf('align_recovery_timeout_sec')
+                    )
+
+                    if agotado:
+
+                        # La referencia ya no es de fiar. Se tira y se
+                        # vuelve a buscar de cero, que es mas honesto
+                        # que seguir corrigiendo contra una pose que ha
+                        # dejado de describir el mundo.
+                        transition_reason = (
+                            'referencia descartada -> SEARCHING '
+                            f'({loss_reason})'
+                        )
+
+                        self.get_logger().warn(
+                            'Recuperacion agotada tras '
+                            f'{reacquire_elapsed:.1f} s e intento '
+                            f'{align_attempts}: descarto la estimacion y '
+                            'vuelvo a buscar.'
+                        )
+
+                        self.stop_robot()
+
+                        estimate = planner.TargetEstimate(
+                            alpha_position=self.pf(
+                                'estimate_alpha_position'
+                            ),
+                            alpha_normal=self.pf('estimate_alpha_normal'),
+                            max_normal_jump=math.radians(
+                                self.pf('max_normal_jump_deg')
+                            ),
+                            max_position_jump=self.pf('max_position_jump'),
+                        )
+
+                        reliable = None
+                        last_detection_ns = None
+                        last_detection_xy = None
+                        align_start_ns = None
+                        align_yaw_settled = False
+                        align_translation_settled = False
+                        align_settle_since_ns = None
+                        align_attempts = 0
+                        reacquire_start_ns = None
+                        search_phase_start_ns = now_ns
+                        search_moving = True
+                        state = 'SEARCHING'
+
+                        self.send_feedback(
+                            goal_handle, state,
+                            final_distance, center_error, elapsed,
+                        )
+
+                        time.sleep(period)
+                        continue
+
+                    state = 'REACQUIRING'
+
+                    recovery_yaw = planner.reacquire_heading(
+                        rx, ry, amx, amy
+                    )
+
+                    wz = 0.0
+
+                    if recovery_yaw is not None:
+
+                        recovery_error = normalize_angle(
+                            recovery_yaw - ryaw
+                        )
+
+                        wz = clamp(
+                            self.pf('align_kp_angular') * recovery_error,
+                            -self.pf('align_recovery_angular_speed'),
+                            self.pf('align_recovery_angular_speed'),
+                        )
+
+                        wz = planner.apply_deadband(
+                            wz,
+                            self.pf('min_heading_speed'),
+                            tolerance_reached=(
+                                abs(recovery_error) <=
+                                self.pf('align_yaw_tolerance')
+                            ),
+                        )
+
+                    # Giro puro y nada mas: moverse sin ver el marcador
+                    # y sin referencia fresca es justo el movimiento a
+                    # ciegas que hay que evitar. Rotar no cambia la
+                    # posicion, asi que no acumula deriva de traslacion.
+                    self.publish_cmd(wz=wz)
+
+                    self.log_stage_diagnostics(
+                        state, 'RECOVERY', detection, reliable,
+                        detection_age, blind_travel,
+                        0.0, 0.0, -1.0,
+                        0.0, 0.0, wz,
+                        final_distance, loss_reason, transition_reason,
+                    )
+
+                    self.send_feedback(
+                        goal_handle, state,
+                        final_distance, center_error, elapsed,
+                    )
+
+                    time.sleep(period)
+                    continue
+
+                # Vision recuperada (o nunca perdida).
+                if reacquire_start_ns is not None and detection is not None:
+                    self.get_logger().info(
+                        'Marcador recuperado tras '
+                        f'{(now_ns - reacquire_start_ns) / 1e9:.1f} s; '
+                        'sigo alineando.'
+                    )
+                    reacquire_start_ns = None
+                    align_attempts = 0
+                    loss_reason = None
+
+                # -------------------------------------------------
+                # Ley de control de la etapa
+                # -------------------------------------------------
+                align_standoff = max(
+                    self.pf('staging_standoff'),
+                    self.planner_stop_distance(
+                        stop_distance, (anx, any_)
+                    ) + 0.10,
+                )
+
+                align_limits = {
+                    'kp_angular': self.pf('align_kp_angular'),
+                    'kp_linear': self.pf('align_kp_linear'),
+                    'kp_lateral': self.pf('align_kp_lateral'),
+                    'max_angular': self.pf('align_max_angular_speed'),
+                    'max_linear': self.pf('align_max_linear_speed'),
+                    'max_lateral': self.pf('align_max_lateral_speed'),
+                    'min_angular': self.pf('min_heading_speed'),
+                    'min_linear': self.pf('min_linear_speed'),
+                    'min_lateral': self.pf('min_lateral_speed'),
+                    'yaw_tolerance': self.pf('align_yaw_tolerance'),
+                    'yaw_hysteresis': self.pf('align_yaw_hysteresis'),
+                    'lateral_tolerance': self.pf('align_lateral_tolerance'),
+                    'lateral_hysteresis': self.pf(
+                        'align_lateral_hysteresis'
+                    ),
+                    'standoff_tolerance': self.pf(
+                        'align_standoff_tolerance'
+                    ),
+                }
+
+                align_cmd = planner.alignment_command(
+                    rx, ry, ryaw,
+                    amx, amy, anx, any_,
+                    align_standoff,
+                    align_limits,
+                    yaw_settled=align_yaw_settled,
+                    translation_settled=align_translation_settled,
+                    regulate_distance=bool(
+                        self.get_parameter(
+                            'align_regulate_distance'
+                        ).value
+                    ),
+                )
+
+                align_yaw_settled = align_cmd.yaw_settled
+                align_translation_settled = align_cmd.translation_settled
+
+                # -------------------------------------------------
+                # Demasiado cerca para alinear: a partir de aqui el
+                # marcador ya no cabe en el encuadre y el endgame del
+                # aproximador tiene criterios mas finos que los de esta
+                # etapa. Insistir aqui solo quitaria margen.
+                # -------------------------------------------------
+                terminar = None
+
+                if align_cmd.along < self.pf('align_min_distance'):
+                    terminar = (
+                        f'demasiado cerca ({align_cmd.along:.3f} m < '
+                        f'{self.pf("align_min_distance"):.2f}); '
+                        'lo termina APPROACH'
+                    )
+
+                elif align_elapsed > self.pf('align_timeout_sec'):
+                    terminar = (
+                        f'presupuesto agotado ({align_elapsed:.1f} s); '
+                        'sigo con APPROACH, que sabe corregir'
+                    )
+
+                elif align_cmd.settled:
+
+                    if align_settle_since_ns is None:
+                        align_settle_since_ns = now_ns
+
+                    elif (
+                        (now_ns - align_settle_since_ns) / 1e9 >=
+                        self.pf('align_settle_sec')
+                    ):
+                        terminar = (
+                            'alineado y estable '
+                            f'{self.pf("align_settle_sec"):.2f} s'
+                        )
+
+                else:
+                    align_settle_since_ns = None
+
+                # -------------------------------------------------
+                # Seguridad: la etapa se ejecuta lejos del plano, pero
+                # no se traslada a ciegas contra un obstaculo.
+                # -------------------------------------------------
+                align_observation = self.get_front_lidar_observation(
+                    None, nearest=True
+                )
+
+                if (
+                    align_observation is not None and
+                    align_observation[1] is not None and
+                    align_observation[1] < (
+                        (
+                            self.pf('min_chassis_clearance')
+                            if self.pf('min_chassis_clearance') >= 0.0
+                            else self.pf('min_front_clearance')
+                        ) + self.pf('chassis_clearance_stop_margin')
+                    ) and
+                    align_cmd.phase == 'TRANSLATE'
+                ):
+                    # Solo se anula la TRASLACION. Girar sobre si mismo
+                    # no reduce el despeje y es lo unico que puede sacar
+                    # al robot de una pose mala.
+                    self.get_logger().warn(
+                        'Traslacion de alineacion inhibida: despeje '
+                        f'{align_observation[1]:.3f} m',
+                        throttle_duration_sec=1.0,
+                    )
+                    align_cmd.vx = 0.0
+                    align_cmd.vy = 0.0
+
+                if terminar is not None:
+
+                    # -------------------------------------------------
+                    # ENTREGA A APPROACH
+                    #
+                    # Se pasa el rumbo perpendicular como referencia ya
+                    # asentada (yaw_settled=True) y se abre una ventana
+                    # de gracia en la que el bloque de centrado por
+                    # camara no puede reevaluarlo. Sin eso, APPROACH
+                    # recalcula yaw_settled con center_x en el primer
+                    # ciclo y deshace el encare con un giro en seco.
+                    # -------------------------------------------------
+                    align_stage = False
+                    align_reference_yaw = math.atan2(-any_, -anx)
+                    yaw_settled = True
+                    align_handoff_until_ns = now_ns + int(
+                        self.pf('align_handoff_grace_sec') * 1e9
+                    )
+                    align_start_ns = None
+                    align_settle_since_ns = None
+                    reacquire_start_ns = None
+                    transition_reason = (
+                        f'ALIGN_PERPENDICULAR -> APPROACH: {terminar}'
+                    )
+
+                    self.stop_robot()
+
+                    self.get_logger().info(
+                        f'ALIGN_PERPENDICULAR completada ({terminar}): '
+                        f'err_angular='
+                        f'{math.degrees(align_cmd.yaw_error):+.1f} deg, '
+                        f'err_lateral={align_cmd.lateral:+.3f} m, '
+                        f'perpendicular={align_cmd.along:.3f} m, '
+                        f'yaw_ref={math.degrees(align_reference_yaw):+.1f} '
+                        f'deg, {align_elapsed:.1f} s'
+                    )
+
+                    # Cae a PURSUING en este mismo ciclo: no hay motivo
+                    # para gastar un periodo mas parado.
+
+                else:
+
+                    self.publish_cmd(
+                        align_cmd.vx, align_cmd.vy, align_cmd.wz
+                    )
+
+                    self.log_stage_diagnostics(
+                        state, align_cmd.phase, detection, reliable,
+                        detection_age, blind_travel,
+                        align_cmd.yaw_error, align_cmd.lateral,
+                        align_cmd.along,
+                        align_cmd.vx, align_cmd.vy, align_cmd.wz,
+                        final_distance, loss_reason, transition_reason,
+                    )
+
+                    self.send_feedback(
+                        goal_handle, state,
+                        final_distance, center_error, elapsed,
+                    )
+
+                    time.sleep(period)
+                    continue
+
+            state = 'PURSUING'
 
             if (
                 frozen_target is None and
@@ -2836,11 +3559,9 @@ class ArucoLidarApproachServer(Node):
                 final_distance <= self.pf('blind_endgame_distance')
             )
 
-            recorrido_ciego = (
-                math.hypot(rx - last_detection_xy[0],
-                           ry - last_detection_xy[1])
-                if last_detection_xy is not None else 0.0
-            )
+            # Ya calculado arriba (blind_travel), una sola definicion:
+            # tenerlo por duplicado invitaba a que las dos se separaran.
+            recorrido_ciego = blind_travel
 
             if blind and recorrido_ciego > self.pf('max_blind_travel'):
 
@@ -2875,7 +3596,8 @@ class ArucoLidarApproachServer(Node):
                     f'Marcador perdido {stale:.1f} s (limite '
                     f'{self.pf("estimate_abort_age"):.1f} s) y todavia a '
                     f'{final_distance:.3f} m, lejos del tramo final. '
-                    'Abortando en vez de navegar a ciegas.'
+                    'Abortando en vez de navegar a ciegas. '
+                    f'Ultima pose fiable: {reliable!r}'
                 )
                 result.final_distance = final_distance
 
@@ -2917,6 +3639,83 @@ class ArucoLidarApproachServer(Node):
             along, lateral = planner.corridor_coords(
                 rx, ry, mx, my, nx, ny
             )
+
+            # -------------------------------------------------
+            # VUELTA A ALIGN_PERPENDICULAR
+            #
+            # Si en mitad de la aproximacion aparece un error de
+            # perpendicularidad grande, realinear con la etapa dedicada
+            # sale mejor que dejar que el lazo lo arregle mezclando
+            # giros bruscos con desplazamiento lateral.
+            #
+            # Dos guardas contra el pinponeo entre etapas:
+            #   histeresis  realign_yaw_threshold es MUY superior a
+            #               align_yaw_tolerance, asi que salir de la
+            #               alineacion no puede disparar la vuelta.
+            #   persistencia el error tiene que mantenerse
+            #               realign_persist_sec; un pico de un ciclo es
+            #               ruido del estimador, no un desvio real.
+            # Y un tope duro de vueltas, porque un bucle estable de dos
+            # etapas es peor que una aproximacion mediocre.
+            # -------------------------------------------------
+            if (
+                align_enabled and
+                not angular_frozen and
+                realign_cycles < int(self.pf('max_realign_cycles')) and
+                along > max(
+                    self.pf('align_min_distance'),
+                    self.pf('yaw_free_until'),
+                )
+            ):
+
+                perpendicular_error = normalize_angle(
+                    math.atan2(-ny, -nx) - ryaw
+                )
+
+                if (
+                    abs(perpendicular_error) >
+                    self.pf('realign_yaw_threshold')
+                ):
+
+                    if realign_since_ns is None:
+                        realign_since_ns = now_ns
+
+                    elif (
+                        (now_ns - realign_since_ns) / 1e9 >=
+                        self.pf('realign_persist_sec')
+                    ):
+
+                        realign_cycles += 1
+                        align_stage = True
+                        align_start_ns = None
+                        align_yaw_settled = False
+                        align_translation_settled = False
+                        align_settle_since_ns = None
+                        align_handoff_until_ns = None
+                        realign_since_ns = None
+                        transition_reason = (
+                            'APPROACH -> ALIGN_PERPENDICULAR: '
+                            f'perpendicularidad '
+                            f'{math.degrees(perpendicular_error):+.1f} deg '
+                            f'sostenida (umbral '
+                            f'{math.degrees(self.pf("realign_yaw_threshold")):.0f}'
+                            f' deg), vuelta {realign_cycles}/'
+                            f'{int(self.pf("max_realign_cycles"))}'
+                        )
+
+                        self.stop_robot()
+                        self.get_logger().warn(transition_reason)
+
+                        self.send_feedback(
+                            goal_handle, state,
+                            final_distance, center_error, elapsed,
+                        )
+
+                        time.sleep(period)
+                        continue
+
+                else:
+                    realign_since_ns = None
 
             target_yaw = planner.desired_heading(
                 rx, ry, mx, my, nx, ny,
@@ -3059,9 +3858,21 @@ class ArucoLidarApproachServer(Node):
             # centrado y el robot mirando hacia el marcador. Asi la base
             # no empieza a avanzar oblicua y el LiDAR no tiene que reparar
             # una mala orientacion desde el ultimo tramo.
+            # La ventana de gracia protege la entrega de
+            # ALIGN_PERPENDICULAR: durante align_handoff_grace_sec el
+            # centrado de camara NO puede reevaluar yaw_settled. Sin
+            # ella, el encare recien conseguido se deshace en el primer
+            # ciclo con un giro en seco, que es justo lo que la etapa
+            # venia a quitar del tramo final.
+            handoff_grace = (
+                align_handoff_until_ns is not None and
+                now_ns < align_handoff_until_ns
+            )
+
             if (
                 detection is not None and
-                remaining > self.pf('yaw_free_until')
+                remaining > self.pf('yaw_free_until') and
+                not handoff_grace
             ):
 
                 camera_yaw_error = normalize_angle(target_yaw - ryaw)
@@ -3585,6 +4396,22 @@ class ArucoLidarApproachServer(Node):
             last_forward_speed = vx
 
             self.publish_cmd(vx, vy, wz)
+
+            if detection is None and loss_reason is None:
+                loss_reason = (
+                    f'sin deteccion desde hace {detection_age:.2f} s; '
+                    'navegando con la pose fijada en odom'
+                    if detection_age != float('inf') else 'nunca detectado'
+                )
+
+            self.log_stage_diagnostics(
+                'APPROACH',
+                'ENDGAME' if endgame_speed else 'CRUCERO',
+                detection, reliable, detection_age, blind_travel,
+                yaw_error, lateral, along,
+                vx, vy, wz,
+                final_distance, loss_reason, transition_reason,
+            )
 
             self.send_feedback(
                 goal_handle, state,

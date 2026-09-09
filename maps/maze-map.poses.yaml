@@ -1,0 +1,21 @@
+# Posiciones alcanzables guardadas junto al mapa.
+#
+# Mapa:  maze-map.yaml / maze-map.pgm
+# Marco: map
+#
+# Generado por scripts/save_pose.py. Se puede editar a mano,
+# pero las coordenadas SOLO valen para ESTE mapa: si vuelves a
+# mapear, vuelve a guardar las posiciones.
+#
+# Uso desde una mision (home_service_mission):
+#     - type: navigate
+#       pose: start
+
+map: maze-map
+frame_id: map
+poses:
+  start:
+    x: -0.0
+    y: 0.0028
+    yaw_deg: 0.08
+    saved_at: '2026-09-09T11:50:40+00:00'
