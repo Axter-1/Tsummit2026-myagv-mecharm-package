@@ -723,6 +723,20 @@ def test_el_suelo_no_sobrepasa_cuando_los_semiejes_divergen():
     assert radio < math.hypot(0.03 * dx, 0.20 * dy)
 
 
+def test_el_estimador_rechaza_salto_de_posicion():
+    est = TargetEstimate(
+        max_position_jump=0.10,
+        gate_after=2,
+        relock_after=3,
+    )
+
+    assert est.update(1.00, 0.00, 1.0, 0.0)
+    assert est.update(1.01, 0.00, 1.0, 0.0)
+    assert not est.update(1.30, 0.00, 1.0, 0.0)
+    assert math.isclose(est.pose[0], 1.005)
+    assert est.pose[1] == 0.0
+
+
 def test_sin_semieje_no_hay_suelo():
     """Un minimo a cero desactiva la zona muerta en vez de dividir por cero."""
     assert deadband_floor(1.0, 0.0, 0.0, 0.035) == 0.0

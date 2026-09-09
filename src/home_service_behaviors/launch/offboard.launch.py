@@ -88,6 +88,10 @@ def generate_launch_description():
         # mueve el robot. Calibrar (2 min, ver HANDOFF_OFFBOARD.md); por
         # debajo de esto el mando se publica y las ruedas no giran.
         DeclareLaunchArgument('min_lateral_speed', default_value='0.035'),
+        # El lateral es el eje mas brusco del mecanum. Limitarlo a dos veces
+        # su suelo medido evita correcciones largas que saquen el ArUco del
+        # encuadre; se conserva como argumento para la calibracion en pista.
+        DeclareLaunchArgument('max_lateral_speed', default_value='0.07'),
         DeclareLaunchArgument('min_linear_speed', default_value='0.07'),
         DeclareLaunchArgument('max_linear_speed', default_value='0.09'),
         DeclareLaunchArgument('use_lidar_normal', default_value='false'),
@@ -226,6 +230,10 @@ def generate_launch_description():
             ),
             'min_lateral_speed': ParameterValue(
                 LaunchConfiguration('min_lateral_speed'),
+                value_type=float,
+            ),
+            'max_lateral_speed': ParameterValue(
+                LaunchConfiguration('max_lateral_speed'),
                 value_type=float,
             ),
             'min_linear_speed': ParameterValue(

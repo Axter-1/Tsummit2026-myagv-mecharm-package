@@ -98,6 +98,7 @@ class TargetEstimate:
         alpha_position=0.35,
         alpha_normal=0.25,
         max_normal_jump=None,
+        max_position_jump=None,
         gate_after=5,
         relock_after=12,
     ):
@@ -113,6 +114,7 @@ class TargetEstimate:
         # intermitentemente persiguiendolo. Corregir el signo no basta:
         # las dos soluciones apuntan hacia el robot.
         self.max_normal_jump = max_normal_jump
+        self.max_position_jump = max_position_jump
 
         # No se filtra desde la primera muestra: hasta tener unas
         # cuantas, la estimacion es tan provisional como lo que llega.
@@ -151,34 +153,41 @@ class TargetEstimate:
         nx /= norm
         ny /= norm
 
-        if (
+        position_jump = (
+            self.ready and
+            self.max_position_jump is not None and
+            self.samples >= self.gate_after and
+            math.hypot(float(x) - self.x, float(y) - self.y) >
+            self.max_position_jump
+        )
+        normal_jump = (
             self.ready and
             self.max_normal_jump is not None and
-            self.samples >= self.gate_after
-        ):
+            self.samples >= self.gate_after and
+            math.acos(clamp(self.nx * nx + self.ny * ny, -1.0, 1.0)) >
+            self.max_normal_jump
+        )
 
-            dot = clamp(self.nx * nx + self.ny * ny, -1.0, 1.0)
+        if position_jump or normal_jump:
 
-            if math.acos(dot) > self.max_normal_jump:
+            self.rejected += 1
+            self.consecutive_rejected += 1
 
-                self.rejected += 1
-                self.consecutive_rejected += 1
+            # Rechazar sin fin significaria que la equivocada es la
+            # estimacion, no las muestras. Reengancharse a la nueva
+            # es mejor que atrincherarse en la vieja.
+            if self.consecutive_rejected >= self.relock_after:
+                self.x, self.y = float(x), float(y)
+                self.nx, self.ny = nx, ny
+                self.samples = 1
+                self.consecutive_rejected = 0
 
-                # Rechazar sin fin significaria que la equivocada es la
-                # estimacion, no las muestras. Reengancharse a la nueva
-                # es mejor que atrincherarse en la vieja.
-                if self.consecutive_rejected >= self.relock_after:
-                    self.x, self.y = float(x), float(y)
-                    self.nx, self.ny = nx, ny
-                    self.samples = 1
-                    self.consecutive_rejected = 0
+                if stamp_ns is not None:
+                    self.last_update_ns = stamp_ns
 
-                    if stamp_ns is not None:
-                        self.last_update_ns = stamp_ns
+                return True
 
-                    return True
-
-                return False
+            return False
 
         self.consecutive_rejected = 0
 

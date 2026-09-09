@@ -803,6 +803,15 @@ class ArucoLidarApproachServer(Node):
             35.0
         )
 
+        # El marcador es fijo en odom. Un salto grande de su POSICION no
+        # es movimiento real: suele ser una solucion de pose ArUco mala o
+        # una TF con marca temporal inconsistente. No debe cambiar el
+        # carrot en un solo ciclo.
+        self.declare_parameter(
+            'max_position_jump',
+            0.12
+        )
+
         # Retardo del lazo: mando (portatil) -> actuacion. MEDIDO con
         # rosbag durante una aproximacion: escalon de /cmd_vel_aruco a
         # /odom = 0.223 s SIN la red de vuelta; con Tailscale portatil->
@@ -1251,11 +1260,6 @@ class ArucoLidarApproachServer(Node):
         if self.get_detection(target_id) is None:
             return None
 
-        normal = self.get_marker_normal(target_id)
-
-        if normal is None:
-            return None
-
         odom_frame = self.get_parameter('odom_frame').value
 
         try:
@@ -1274,6 +1278,25 @@ class ArucoLidarApproachServer(Node):
 
         mx = float(transform.transform.translation.x)
         my = float(transform.transform.translation.y)
+
+        normal = None
+        if self.get_parameter('use_marker_normal').value:
+            normal = self.get_marker_normal(target_id)
+
+        if normal is None:
+            # Sin normal fiable, conservar la posicion y aproximar por la
+            # linea de vision actual. La normal saliente apunta marcador ->
+            # robot; asi se avanza hacia el ArUco sin inventar un rumbo a
+            # partir de una pose plana ambigua.
+            robot_pose = self.get_robot_pose()
+            if robot_pose is None:
+                return None
+            dx = robot_pose[0] - mx
+            dy = robot_pose[1] - my
+            distance = math.hypot(dx, dy)
+            if distance < 1e-6:
+                return None
+            return mx, my, dx / distance, dy / distance
 
         # get_marker_normal devuelve ROBOT -> superficie; el
         # planificador trabaja con la SALIENTE del marcador.
@@ -2389,6 +2412,7 @@ class ArucoLidarApproachServer(Node):
             max_normal_jump=math.radians(
                 self.pf('max_normal_jump_deg')
             ),
+            max_position_jump=self.pf('max_position_jump'),
         )
 
         use_lidar = bool(
