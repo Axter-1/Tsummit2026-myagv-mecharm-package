@@ -511,12 +511,12 @@ grasp_stack() {
         arm
     fi
     if is_running '[o]bject_grasp_server'; then
-        if grasp_server_table_matches "${table_mm}"; then
-            printf 'object_grasp_server ya iniciado (tabla=%s mm); reutilizando.\n' \
-                "${table_mm}"
+        if grasp_server_table_matches "${table_mm}" "${stop_distance}"; then
+            printf 'object_grasp_server ya iniciado (tabla=%s mm, parada=%s m); reutilizando.\n' \
+                "${table_mm}" "${stop_distance}"
             return
         fi
-        printf 'object_grasp_server usa otra altura; reiniciando.\n'
+        printf 'object_grasp_server usa otra calibracion o parada; reiniciando.\n'
         stop grasp
     fi
     start_grasp_server "${enable_arm}" "${enable_approach}" \
@@ -552,23 +552,17 @@ require_prepared_grasp() {
 
 grasp_server_table_matches() {
     local table_mm="$1"
-    in_container "ros2 param get /object_grasp_server table_height_mm 2>/dev/null \
-        | grep -Eq 'Integer value: ${table_mm}$'"
-}
-
-grasp_server_stop_matches() {
-    local stop_distance="$1"
-    in_container "ros2 param get /object_grasp_server approach_stop_distance \
-        2>/dev/null | awk -v expected='${stop_distance}' \
-        '\$NF == expected || (\$NF + 0) == (expected + 0)'"
+    local stop_distance="${2:?falta stop_distance}"
+    in_container "python3 /workspace/scripts/check_grasp_server_config.py \
+        --table-height '${table_mm}' \
+        --approach-stop-distance '${stop_distance}'"
 }
 
 grasp_stack_ready() {
     local enable_arm="$1" enable_approach="$2" table_mm="$3"
     local stop_distance="$4"
     is_running '[o]bject_grasp_server' \
-        && grasp_server_table_matches "${table_mm}" \
-        && grasp_server_stop_matches "${stop_distance}" \
+        && grasp_server_table_matches "${table_mm}" "${stop_distance}" \
         || return 1
 
     if [ "${enable_arm}" = "true" ]; then
@@ -852,9 +846,11 @@ reto4() {
 status() {
     ensure_container
     say "Nodos"
-    in_container 'ros2 node list' || true
+    in_container 'timeout 5 ros2 node list' \
+        || printf '  AVISO: el grafo DDS no respondio en 5 s.\n'
     say "Acciones"
-    in_container 'ros2 action list' || true
+    in_container 'timeout 5 ros2 action list' \
+        || printf '  AVISO: el grafo DDS no respondio en 5 s.\n'
     say "Procesos clave"
     for p in myagv_odometry_node ydlidar_ros2_driver_node slam_toolbox \
              rviz2 aruco_detector_node mecharm_driver_node \
@@ -865,6 +861,20 @@ status() {
             printf '  [off] %s\n' "${p}"
         fi
     done
+}
+
+param() {
+    require_container_running
+    require_distributed_aruco
+    local node_name="${1:?uso: param </nodo> <parametro>}"
+    local parameter_name="${2:?uso: param </nodo> <parametro>}"
+    [ "$#" -eq 2 ] || die "uso: param </nodo> <parametro>"
+    [[ "${node_name}" =~ ^/[A-Za-z0-9_/]+$ ]] \
+        || die "nombre de nodo invalido: ${node_name}"
+    [[ "${parameter_name}" =~ ^[A-Za-z0-9_]+$ ]] \
+        || die "nombre de parametro invalido: ${parameter_name}"
+    in_container "timeout 5 ros2 param get '${node_name}' '${parameter_name}'" \
+        || die "no se pudo leer ${parameter_name} de ${node_name} con el DDS actual"
 }
 
 logs() {
@@ -996,6 +1006,7 @@ case "${1:-help}" in
     viz)          shift; VIZ="${1:-${VIZ:-rviz}}" open_viz ;;
     teleop)       routine teleop ;;
     status)       status ;;
+    param)        shift; param "$@" ;;
     logs)         shift; logs "$@" ;;
     stop)         shift; stop "$@" ;;
 
@@ -1016,7 +1027,8 @@ T-SUMMIT Challenge — consola unica
     approach <id> [stop_m] aproxima la BASE al marcador <id> (exige ALLOW_MOTION=1,
                             DISTRIBUTED=1 y LAPTOP_IP=<ip>)
                             stop_m = distancia LiDAR-pared, por defecto 0.20 m;
-                                    la seguridad usa despeje del footprint
+                                     la seguridad usa despeje del footprint
+    param </nodo> <nombre>     consulta un parametro con el DDS distribuido actual
 
   TOMA DE PIEZA  (retos 1 y 2)
     grasp-dry [pieza]       ENSAYO: identifica y calcula, no mueve nada
