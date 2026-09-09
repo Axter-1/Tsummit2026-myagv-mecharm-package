@@ -3,6 +3,15 @@
 # ============================================================
 
 int32 target_id
+
+# Distancia a la que parar, medida del MORRO DEL CHASIS a la pared
+# (o al plano del marcador). NO del LiDAR: el sensor esta ~8 cm por
+# detras del morro, y pedir la parada en su marco obligaba a llevar
+# esa constante en la cabeza en cada calculo y en cada log.
+#
+# Es el marco util: es lo que decide si se choca y lo que ve el brazo.
+# El servidor lo convierte una vez al marco del sensor y el control
+# interno no cambia.
 float64 stop_distance
 
 # <= 0.0 = sin límite de tiempo
@@ -28,9 +37,14 @@ string status
 
 string message
 
+# Rango CRUDO del LiDAR al plano. Se conserva en el marco del sensor a
+# proposito: es la medida sin interpretar, util para diagnosticar. Para
+# la distancia comparable con stop_distance, usa final_chassis_clearance.
 float64 final_distance
 
-# Despeje entre el mismo eco LiDAR y el borde del footprint del chasis.
+# Despeje entre el mismo eco LiDAR y el borde del footprint del chasis:
+# o sea MORRO-PARED, el mismo marco en el que se pide stop_distance.
+# Es el campo que hay que comparar con lo pedido.
 # < 0.0 = no disponible.
 float64 final_chassis_clearance
 

@@ -2618,6 +2618,35 @@ class ArucoLidarApproachServer(Node):
             (offset_x, offset_y), (1.0, 0.0), self.chassis_footprint
         )
 
+    def lidar_stop_from_chassis(self, chassis_distance):
+        """Convierte la parada PEDIDA (morro-pared) al marco del LiDAR.
+
+        `stop_distance` del goal es morro-pared: es lo que importa para
+        chocar y para el alcance del brazo, y es lo que un humano tiene
+        en la cabeza cuando dice "parate a 16 cm". El control interno,
+        en cambio, trabaja contra el rango que mide el sensor, asi que
+        la conversion se hace UNA VEZ aqui, en la entrada del goal, y el
+        resto del bucle no se entera.
+
+        Respaldo si aun no hay TF: lidar_to_front_bumper_m, que es
+        exactamente esta misma distancia medida con cinta. Si tampoco,
+        se pasa el valor tal cual y se avisa -- es preferible una
+        aproximacion 8 cm corta que una 8 cm larga.
+        """
+        exit_distance = self.frontal_exit_distance()
+
+        if exit_distance is None:
+
+            exit_distance = self.pf('lidar_to_front_bumper_m')
+
+            self.get_logger().warn(
+                'Sin TF del chasis todavia: convierto la parada pedida '
+                f'con lidar_to_front_bumper_m={exit_distance:.3f} m en '
+                'vez de con el footprint.'
+            )
+
+        return chassis_distance + exit_distance
+
     def chassis_from_lidar(self, lidar_distance):
         """Convierte un rango LiDAR-pared a morro-pared. None si no se puede."""
         if lidar_distance is None or lidar_distance < 0.0:
@@ -2853,13 +2882,25 @@ class ArucoLidarApproachServer(Node):
             goal_handle.request.target_id
         )
 
-        self._active_goal_context.update(
-            target_id=target_id,
-            stop_distance=float(goal_handle.request.stop_distance),
+        # LA PARADA SE PIDE EN MORRO-PARED
+        #
+        # Es el marco util: lo que decide si se choca y lo que ve el
+        # brazo. El bucle de control razona contra el rango del LiDAR,
+        # asi que se convierte aqui y `stop_distance` sigue siendo, de
+        # esta linea en adelante, exactamente lo que era antes. Ni una
+        # formula del control cambia.
+        chassis_stop_distance = float(
+            goal_handle.request.stop_distance
         )
 
-        stop_distance = float(
-            goal_handle.request.stop_distance
+        stop_distance = self.lidar_stop_from_chassis(
+            chassis_stop_distance
+        )
+
+        self._active_goal_context.update(
+            target_id=target_id,
+            stop_distance=stop_distance,
+            chassis_stop_distance=chassis_stop_distance,
         )
 
         timeout_sec = float(

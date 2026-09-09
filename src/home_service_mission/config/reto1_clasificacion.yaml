@@ -80,7 +80,7 @@ mission:
       id: 0
       # Distancia camara -> marcador al terminar. Ajustala al alcance
       # util del brazo (MechArm 270: radio 270 mm).
-      stop_distance: 0.18
+      stop_distance: 0.100
       timeout_sec: 30.0
       retries: 1
 
@@ -111,7 +111,7 @@ mission:
     - type: aruco
       name: aproximar_aruco_2
       id: 2
-      stop_distance: 0.18
+      stop_distance: 0.100
       timeout_sec: 30.0
       retries: 1
 
@@ -139,7 +139,7 @@ mission:
     - type: aruco
       name: aproximar_aruco_1
       id: 1
-      stop_distance: 0.18
+      stop_distance: 0.100
       timeout_sec: 30.0
       retries: 1
 
@@ -169,7 +169,7 @@ mission:
     - type: aruco
       name: aproximar_aruco_3
       id: 3
-      stop_distance: 0.18
+      stop_distance: 0.100
       timeout_sec: 30.0
       retries: 1
 

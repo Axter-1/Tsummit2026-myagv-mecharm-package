@@ -44,7 +44,7 @@ mission:
 
       id: 3
 
-      stop_distance: 0.12
+      stop_distance: 0.040   # POR DEBAJO del suelo de seguridad (0.085): revisar
 
       # 0.0 = sin timeout.
       timeout_sec: 0.0

@@ -366,7 +366,8 @@ class ObjectGraspServer(Node):
         # con lo que mide la parada del LiDAR. No coincide: si
         # coincidiera, acercarse mas nunca podria empeorar el alcance.
         # Falta medir ese offset y meterlo explicito.
-        self.declare_parameter("approach_stop_distance", 0.30)
+        # MORRO-pared (antes 0.30 en LiDAR-pared).
+        self.declare_parameter("approach_stop_distance", 0.22)
 
         # DESFASE ENTRE LO QUE MIDE LA PARADA Y LO QUE ALCANZA EL BRAZO
         #
@@ -394,7 +395,13 @@ class ObjectGraspServer(Node):
         # OJO: deja de valer si cambia la geometria pieza/marcador. Si
         # se recoloca el ArUco respecto a la pieza, hay que volver a
         # medir la X en la consola.
-        self.declare_parameter("arm_x_offset_mm", 142.0)
+        # Distancia del punto de parada al origen del frame del brazo.
+        #
+        # 62.0 = 142.0 - 80.2. Bajo con el cambio de marco de la parada:
+        # `parada` paso de LiDAR-pared a MORRO-pared, o sea 80 mm menos,
+        # y X = parada*1000 - arm_x_offset_mm tiene que dar lo mismo que
+        # antes o el brazo se desplaza 80 mm y cierra al aire.
+        self.declare_parameter("arm_x_offset_mm", 62.0)
         self.declare_parameter("approach_timeout_sec", 45.0)
         # Cuanto se espera a ver un ArUco en modo "auto".
         self.declare_parameter("detect_timeout_sec", 15.0)
@@ -759,13 +766,28 @@ class ObjectGraspServer(Node):
         """Autoriza PICK solo con evidencia nueva, no por el codigo ABORTED."""
         status = str(getattr(approach_res, "status", "")).strip()
         try:
-            measured = float(getattr(approach_res, "final_distance", 0.0))
+            # MORRO-pared, el mismo marco que self.stop_distance. Leer
+            # final_distance aqui (rango crudo del LiDAR) metia un sesgo
+            # fijo de 8 cm en la comparacion de abajo: una parada
+            # perfecta se habria declarado 8 cm larga y la verificacion
+            # habria rechazado agarres buenos.
+            measured = float(
+                getattr(approach_res, "final_chassis_clearance", -1.0)
+            )
         except (TypeError, ValueError):
-            measured = 0.0
+            measured = -1.0
         tolerance = float(
             self.get_parameter("verification_stop_tolerance_m").value
         )
+        # Parar la base va SIEMPRE primero: cualquier retorno de aqui en
+        # adelante deja el goal cerrado, y salir sin haber parado seria
+        # dejar el robot rodando por inercia contra la plataforma.
         self._stop_base()
+        if measured < 0.0:
+            return False, (
+                "la aproximacion no reporto despeje de chasis; sin esa "
+                "medida no se puede autorizar el agarre."
+            )
         if not grasp_recovery.is_recoverable_approach_status(status):
             return False, (
                 f"resultado={status or '<empty>'} no es recuperable; "
@@ -775,7 +797,8 @@ class ObjectGraspServer(Node):
             measured, self.stop_distance, tolerance
         ):
             return False, (
-                f"LiDAR final={measured:.3f} m fuera de la parada calibrada "
+                f"morro-pared final={measured:.3f} m fuera de la parada "
+                f"calibrada "
                 f"{self.stop_distance:.3f}+/-{tolerance:.3f} m"
             )
         try:
@@ -977,7 +1000,9 @@ class ObjectGraspServer(Node):
             f"result_message={result_message or '<empty>'}",
         ]
         if final_distance is not None:
-            details.append(f"final_distance={float(final_distance):.3f} m")
+            details.append(
+                f"final_distance={float(final_distance):.3f} m LiDAR-pared"
+            )
 
         # Cada ActionServer publica exactamente un status topic. Dos
         # publicadores son un protocolo ambiguo: rclpy puede aceptar la
@@ -1143,9 +1168,17 @@ class ObjectGraspServer(Node):
             # es dar por bueno un dato que sabemos que varia diez veces
             # mas que el margen de la pieza.
             #
-            # final_distance lo mide el LiDAR contra el plano, que es
-            # la misma regla que decide la llegada.
-            medida = float(getattr(approach_res, "final_distance", 0.0))
+            # MARCO: MORRO-PARED, igual que approach_stop_distance.
+            #
+            # Antes se leia final_distance, que es el rango CRUDO del
+            # LiDAR y esta ~8 cm por detras del morro. Comparar eso con
+            # una parada pedida en morro-pared metia un sesgo fijo de 8
+            # cm en la correccion de X del brazo. final_chassis_clearance
+            # es el mismo eco medido contra el footprint, o sea ya en
+            # morro-pared.
+            medida = float(
+                getattr(approach_res, "final_chassis_clearance", -1.0)
+            )
 
             if medida > 0.0:
                 self.measured_stop_distance = medida

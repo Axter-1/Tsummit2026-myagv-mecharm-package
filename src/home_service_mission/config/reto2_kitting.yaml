@@ -56,7 +56,7 @@ mission:
     - type: aruco
       name: aproximar_aruco_0
       id: 0
-      stop_distance: 0.18
+      stop_distance: 0.100
       # Timeout de deteccion exigido por el reto.
       timeout_sec: 10.0
       retries: 0
@@ -93,7 +93,7 @@ mission:
     - type: aruco
       name: aproximar_aruco_2
       id: 2
-      stop_distance: 0.18
+      stop_distance: 0.100
       timeout_sec: 10.0
       retries: 0
       on_failure: skip
@@ -125,7 +125,7 @@ mission:
     - type: aruco
       name: aproximar_aruco_1
       id: 1
-      stop_distance: 0.18
+      stop_distance: 0.100
       timeout_sec: 10.0
       retries: 0
       on_failure: skip
@@ -161,7 +161,7 @@ mission:
     - type: aruco
       name: aproximar_aruco_3
       id: 3
-      stop_distance: 0.18
+      stop_distance: 0.100
       timeout_sec: 10.0
       retries: 0
       on_failure: skip

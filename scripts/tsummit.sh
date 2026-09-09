@@ -621,10 +621,12 @@ prepare() {
     local stop_distance="${GRASP_STOP_DISTANCE}"
     if [ -z "${stop_distance}" ]; then
         case "${piece}" in
-            # La rueda comparte el offset fisico del chasis: 0.20 m de
-            # LiDAR-pared conserva aproximadamente 7 cm de despeje.
-            rueda) stop_distance="0.20" ;;
-            *) stop_distance="0.20" ;;
+            # MORRO-pared desde el cambio de marco de stop_distance.
+            # 0.12 = los 0.20 de LiDAR-pared de antes menos los 0.080
+            # que el sensor esta por detras del morro. El suelo de
+            # seguridad son 0.085, asi que quedan 3.5 cm de margen.
+            rueda) stop_distance="0.12" ;;
+            *) stop_distance="0.12" ;;
         esac
     fi
     if grasp_stack_ready true true "${table_mm}" "${stop_distance}"; then
