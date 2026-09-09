@@ -186,7 +186,7 @@ def generate_launch_description():
         DeclareLaunchArgument('final_max_linear_speed', default_value='0.07'),
         DeclareLaunchArgument('final_max_lateral_speed', default_value='0.035'),
         DeclareLaunchArgument('final_max_angular_speed', default_value='0.37'),
-        DeclareLaunchArgument('final_distance_tolerance', default_value='0.020'),
+        DeclareLaunchArgument('final_distance_tolerance', default_value='0.045'),
         DeclareLaunchArgument(
             'final_linear_velocity_tolerance', default_value='0.015'
         ),
@@ -303,6 +303,20 @@ def generate_launch_description():
             description='Histeresis del retroceso de recuperacion: se '
                         'suelta habiendo vuelto esta fraccion de la '
                         'tolerancia DENTRO de la banda, no en el borde.',
+        ),
+        DeclareLaunchArgument(
+            'backoff_enabled', default_value='false',
+            description='Retroceso cuando el robot se pasa de la banda. '
+                        'APAGADO: fallaba en pista y ahora importa que '
+                        'llegue, no que llegue fino. Enciendelo junto '
+                        'con un final_distance_tolerance mas estrecho.',
+        ),
+        DeclareLaunchArgument(
+            'align_recovery_enabled', default_value='false',
+            description='Girar a recuperar el ArUco si se pierde durante '
+                        'la alineacion. APAGADO: perderlo es normal y '
+                        'buscarlo cuesta tiempo. Sin esto se entrega a '
+                        'APPROACH, que navega contra la pose en odom.',
         ),
         DeclareLaunchArgument(
             'max_backoff_travel', default_value='0.06',
@@ -561,6 +575,12 @@ def generate_launch_description():
             ),
             'max_backoff_travel': ParameterValue(
                 LaunchConfiguration('max_backoff_travel'), value_type=float
+            ),
+            'backoff_enabled': ParameterValue(
+                LaunchConfiguration('backoff_enabled'), value_type=bool
+            ),
+            'align_recovery_enabled': ParameterValue(
+                LaunchConfiguration('align_recovery_enabled'), value_type=bool
             ),
         }],
         condition=IfCondition(LaunchConfiguration('start_aruco_approach')),

@@ -711,6 +711,20 @@ aruco_loss() {
     in_container "python3 /workspace/scripts/measure_aruco_loss.py '${marker_id}' '${seconds}'"
 }
 
+marker_scale() {
+    ensure_container
+    [ "$#" -gt 0 ] || die "uso: marker-scale --id <id_aruco> [--cinta metros]"
+
+    # Ejecuta con el mismo CYCLONEDDS_URI de la pila; una llamada docker exec
+    # directa cae en loopback y no ve los nodos del portatil.
+    local arg quoted_args=""
+    for arg in "$@"; do
+        printf -v arg '%q' "${arg}"
+        quoted_args+=" ${arg}"
+    done
+    in_container "python3 /workspace/scripts/check_marker_scale.py${quoted_args}"
+}
+
 grasp_catalog() {
     # Vuelca el catalogo tal y como lo interpreta el nodo (conversion a
     # valores 0..100 de pinza incluida). Util para revisar de un vistazo
@@ -1008,6 +1022,7 @@ case "${1:-help}" in
     grasp)              shift; grasp "$@" ;;
     grasp-dry|ensayo) shift; grasp_dry "${1:-auto}" ;;
     aruco-loss)      shift; aruco_loss "$@" ;;
+    marker-scale|escala-marcador) shift; marker_scale "$@" ;;
     grasp-catalog|catalogo) grasp_catalog ;;
 
     reto1)        reto1 ;;
@@ -1054,6 +1069,9 @@ T-SUMMIT Challenge — consola unica
                              cadena completa con accion y altura explicitas;
                              exige haber ejecutado prepare grasp antes
     aruco-loss <id> [seg]   mide flujo y ausencia de un ArUco sin mover
+    marker-scale --id <id> [--cinta metros]
+                             compara escala ArUco y LiDAR con el DDS actual;
+                             exige base, LiDAR y detector activos
     grasp-catalog           vuelca el catalogo como lo lee el nodo
       pieza = auto | engranaje | poste | rueda
       auto  -> deduce la pieza del ArUco que este viendo

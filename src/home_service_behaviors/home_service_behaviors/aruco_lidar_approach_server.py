@@ -370,9 +370,18 @@ class ArucoLidarApproachServer(Node):
         # pero no debe decidir la llegada: con 45 mm el robot podia aceptar
         # 0.239 m al pedir 0.200 m. El criterio final es mas estricto y el
         # LiDAR debe seguir mandando hasta entrar en esta banda.
+        #
+        # 0.045: sin retroceso de recuperacion, la banda tiene que ser
+        # mas ancha que el sobrepaso que deja la frenada. Medido en
+        # pista: 9 mm en una corrida y 26 mm en otra. Con 0.020 el robot
+        # se quedaba fuera y salia por STALLED sin poder corregir.
+        #
+        # Es un retroceso deliberado en precision a cambio de que la
+        # aproximacion TERMINE. Para volver a lo fino: bajar esto y
+        # encender backoff_enabled A LA VEZ, no por separado.
         self.declare_parameter(
             'final_distance_tolerance',
-            0.020
+            0.045
         )
 
         # Sesgo empirico de frenada final: el perfil apunta a
@@ -571,6 +580,16 @@ class ArucoLidarApproachServer(Node):
         # objetivo es inalcanzable) y es mejor abortar con diagnostico
         # que alejarse indefinidamente del marcador.
         self.declare_parameter('max_backoff_travel', 0.06)
+
+        # APAGADO. En pista el retroceso fallaba sin dar un motivo util,
+        # y lo que hace falta ahora es que el robot LLEGUE, no que llegue
+        # fino. Sin retroceso el sobrepaso se absorbe ensanchando
+        # final_distance_tolerance, que es lo que hay.
+        #
+        # El codigo y sus pruebas se quedan: el problema que resolvia es
+        # real (la banda de llegada tiene dos lados y el perfil solo sabe
+        # uno) y volvera en cuanto se quiera precision.
+        self.declare_parameter('backoff_enabled', False)
 
         self.declare_parameter(
             'final_camera_lateral_kp',
@@ -950,6 +969,17 @@ class ArucoLidarApproachServer(Node):
         self.declare_parameter('align_recovery_angular_speed', 0.40)
         self.declare_parameter('align_recovery_timeout_sec', 6.0)
         self.declare_parameter('align_max_attempts', 3)
+
+        # APAGADA. Perder el ArUco a media aproximacion es NORMAL -- se
+        # sale del encuadre por geometria mucho antes de llegar -- y
+        # ponerse a girar para recuperarlo cuesta tiempo y desalinea lo
+        # ya conseguido.
+        #
+        # Con esto en false, al perder la vision durante la alineacion
+        # NO se gira a buscar ni se vuelve a SEARCHING: se cierra la
+        # etapa y se entrega a APPROACH, que navega contra la pose
+        # fijada en odom y no necesita ver el marcador.
+        self.declare_parameter('align_recovery_enabled', False)
 
         # ---- Vuelta de APPROACH a ALIGN_PERPENDICULAR ----
 
@@ -3451,7 +3481,27 @@ class ArucoLidarApproachServer(Node):
                     blind_travel <= self.pf('align_max_blind_travel')
                 )
 
-                if detection is None and not pose_usable:
+                perdido = detection is None and not pose_usable
+
+                recuperar = bool(
+                    self.get_parameter('align_recovery_enabled').value
+                )
+
+                # Perder el ArUco aqui es NORMAL: se sale del encuadre
+                # por geometria bastante antes de llegar. Sin
+                # recuperacion no se gira a buscarlo ni se vuelve a
+                # SEARCHING -- eso cuesta tiempo y desalinea lo ya
+                # conseguido. Se cierra la etapa por la MISMA salida que
+                # el resto de los finales (`terminar`, mas abajo), que
+                # ya fija el rumbo de referencia y abre la ventana de
+                # gracia. APPROACH navega contra la pose fijada en odom
+                # y no necesita ver el marcador.
+                fin_por_perdida = (
+                    'marcador perdido y recuperacion desactivada'
+                    if perdido and not recuperar else None
+                )
+
+                if perdido and recuperar:
 
                     if align_quality < self.pf('align_min_quality'):
                         loss_reason = (
@@ -3666,7 +3716,10 @@ class ArucoLidarApproachServer(Node):
                 # -------------------------------------------------
                 terminar = None
 
-                if align_cmd.along < self.pf('align_min_distance'):
+                if fin_por_perdida is not None:
+                    terminar = fin_por_perdida
+
+                elif align_cmd.along < self.pf('align_min_distance'):
                     terminar = (
                         f'demasiado cerca ({align_cmd.along:.3f} m < '
                         f'{self.pf("align_min_distance"):.2f}); '
@@ -4481,7 +4534,11 @@ class ArucoLidarApproachServer(Node):
             # traslacion, que la placa si acepta. El giro no, por eso la
             # guarda de wz.
             # -------------------------------------------------
-            if front is not None and endgame_speed:
+            if (
+                front is not None and
+                endgame_speed and
+                self.get_parameter('backoff_enabled').value
+            ):
 
                 retroceder, backoff_active = planner.endgame_backoff(
                     front,

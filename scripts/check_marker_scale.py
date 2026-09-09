@@ -171,13 +171,13 @@ def main():
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument(
-        "--morro", type=float, default=None,
-        help="salida del rayo morro-sensor; por defecto se deduce del "
-             "footprint via lidar_to_front_bumper_m (0.080)",
+        "--front-x", type=float, default=0.145,
+        help="x del morro en el chasis (chassis_footprint). 0.145 medido "
+             "con measure_front_offset.py",
     )
     args = parser.parse_args()
 
-    salida = args.morro if args.morro is not None else 0.080
+    front_x = args.front_x
 
     rclpy.init()
     node = ScaleCheck(args)
@@ -228,17 +228,27 @@ def main():
     z = statistics.median(zetas)
     supuesto = statistics.median(tamanos)
 
-    lidar_chasis = laser_x + rango - salida
-    camara_chasis = camera_x + z - salida
+    # morro -> plano = (donde esta el sensor + lo que mide) - donde esta
+    # el morro. Todo en el chasis, sin restas cruzadas: la primera
+    # version restaba la SALIDA DEL RAYO (front_x - laser_x) despues de
+    # haber sumado laser_x, o sea que contaba laser_x dos veces y
+    # alargaba las dos cifras 65 mm. La discrepancia entre ellas salia
+    # bien porque el error se cancelaba en la resta, pero el veredicto
+    # contra la cinta era falso.
+    plano_x_lidar = laser_x + rango
+    plano_x_camara = camera_x + z
+
+    lidar_chasis = plano_x_lidar - front_x
+    camara_chasis = plano_x_camara - front_x
     diferencia = camara_chasis - lidar_chasis
 
-    z_real = lidar_chasis + salida - camera_x
+    z_real = plano_x_lidar - camera_x
     tamano_implicado = supuesto * z_real / z if z > 1e-6 else float("nan")
 
     print()
     print(f"  TF: {args.laser_frame} x={laser_x:+.4f}   "
           f"{args.camera_frame} x={camera_x:+.4f}")
-    print(f"  Salida del rayo (morro-sensor) = {salida:.4f} m")
+    print(f"  Morro (chassis_footprint) x = {front_x:+.4f} m")
     print()
     print(f"  LiDAR  ({len(rangos):2d} barridos)  rango = {rango:.4f} m"
           f"   -> morro-plano = {lidar_chasis:.4f} m")
@@ -271,10 +281,11 @@ def main():
 
     if d_lidar < d_camara and d_lidar < 0.015:
         print("  VEREDICTO: manda el LiDAR. La camara esta mal escalada.")
-        print(f"      Mide el cuadrado NEGRO del ArUco con calibre. Si da")
-        print(f"      ~{tamano_implicado*100:.1f} cm, pon marker_length:="
-              f"{tamano_implicado:.4f}")
-        print("      Si da 8.0 cm, entonces el error esta en camera_x o en")
+        print("      Mide el cuadrado NEGRO del ArUco con calibre -- el")
+        print("      borde negro exterior SI cuenta, la zona blanca NO.")
+        print(f"      Si da ~{tamano_implicado*100:.1f} cm, pon "
+              f"marker_length:={tamano_implicado:.4f}")
+        print("      Si da 8.0 cm clavados, el error esta en camera_x o en")
         print("      la calibracion intrinseca de la CSI, no en el tamano.")
     elif d_camara < d_lidar and d_camara < 0.015:
         print("  VEREDICTO: manda la camara. El LiDAR NO esta midiendo el")
