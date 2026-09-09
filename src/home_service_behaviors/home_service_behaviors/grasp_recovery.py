@@ -2,6 +2,7 @@
 """Reglas puras para recuperar una aproximacion antes del agarre."""
 
 import math
+import re
 
 
 def is_recoverable_approach_status(status):
@@ -40,3 +41,14 @@ def chassis_clearance_is_valid(measured, minimum):
         and math.isfinite(measured)
         and measured >= minimum
     )
+
+
+def chassis_clearance_from_message(message):
+    """Respaldo para clientes con una interfaz de accion anterior.
+
+    El servidor incluye el despeje de su mismo haz LiDAR en SAFE_STOP. Se
+    usa solo cuando ``final_chassis_clearance`` no llego por una definicion
+    de accion desactualizada; el cliente aun exige su scan frontal fresco.
+    """
+    match = re.search(r'despeje chasis=([0-9]+(?:\.[0-9]+)?) m', message)
+    return float(match.group(1)) if match else None

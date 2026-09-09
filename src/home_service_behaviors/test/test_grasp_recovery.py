@@ -22,3 +22,9 @@ def test_chassis_clearance_must_be_finite_and_safe():
     assert grasp_recovery.chassis_clearance_is_valid(0.070, 0.070)
     assert not grasp_recovery.chassis_clearance_is_valid(0.062, 0.070)
     assert not grasp_recovery.chassis_clearance_is_valid(float('nan'), 0.070)
+
+
+def test_clearance_can_be_read_from_safe_stop_diagnostic():
+    message = 'Parada segura: despeje chasis=0.078 m, LiDAR-pared=0.201 m'
+    assert grasp_recovery.chassis_clearance_from_message(message) == 0.078
+    assert grasp_recovery.chassis_clearance_from_message('sin despeje') is None

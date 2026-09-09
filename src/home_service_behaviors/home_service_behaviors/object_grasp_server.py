@@ -784,6 +784,20 @@ class ObjectGraspServer(Node):
             )
         except (TypeError, ValueError):
             chassis_clearance = -1.0
+        message = str(getattr(approach_res, "message", ""))
+        if chassis_clearance < 0.0 and status == "SAFE_STOP":
+            # Un cliente construido con la interfaz anterior descarta el
+            # campo nuevo. SAFE_STOP trae el mismo valor en su diagnostico,
+            # y abajo se sigue contrastando la distancia con un scan fresco.
+            chassis_clearance = grasp_recovery.chassis_clearance_from_message(
+                message
+            )
+            if chassis_clearance is not None:
+                self.get_logger().warning(
+                    "SAFE_STOP sin final_chassis_clearance en la interfaz; "
+                    "uso el despeje diagnosticado por el servidor. "
+                    "Recompila home_service_interfaces en ambas maquinas."
+                )
         minimum_clearance = float(
             self.get_parameter("verification_min_chassis_clearance_m").value
         )
@@ -807,7 +821,6 @@ class ObjectGraspServer(Node):
                 f"scan frontal={front!r} no confirma LiDAR final={measured:.3f} "
                 f"dentro de {agreement:.3f} m"
             )
-        message = str(getattr(approach_res, "message", ""))
         if "aligned=True" not in message:
             return False, (
                 "la aproximacion detenida no confirmo orientacion alineada"
@@ -1091,6 +1104,7 @@ class ObjectGraspServer(Node):
                 status = str(getattr(approach_res, "status", "")).strip()
                 if (
                     not grasp_recovery.is_recoverable_approach_status(status)
+                    or status == "SAFE_STOP"
                     or
                     attempt >= self.max_approach_attempts
                 ):
