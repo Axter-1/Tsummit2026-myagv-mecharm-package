@@ -329,6 +329,7 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': use_sim_time,
             'detections_topic': '/aruco/detections',
+            'scan_topic': LaunchConfiguration('scan_topic'),
             'enable_arm': LaunchConfiguration('grasp_enable_arm'),
             'enable_approach': LaunchConfiguration('grasp_enable_approach'),
             'table_height_mm': ParameterValue(

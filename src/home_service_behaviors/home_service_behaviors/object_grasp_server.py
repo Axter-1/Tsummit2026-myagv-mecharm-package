@@ -50,6 +50,7 @@ objetivo fuera de max_reach_mm antes de mandar nada al brazo.
 import math
 import os
 import threading
+import time
 import traceback
 
 import yaml
@@ -65,10 +66,18 @@ from ament_index_python.packages import get_package_share_directory
 
 from home_service_interfaces.action import ArucoApproach, MoveArm, PickPlace
 from home_service_interfaces.msg import ArucoDetectionArray
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
+
+from home_service_behaviors import grasp_recovery
 
 
 def clamp(value, low, high):
     return max(low, min(high, value))
+
+
+def normalize_angle(angle):
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 _GOAL_STATUS_NAMES = {
@@ -400,6 +409,23 @@ class ObjectGraspServer(Node):
         # aplica. Si la calibracion de una pieza no esta anidada por
         # altura, este valor se ignora para esa pieza.
         self.declare_parameter("table_height_mm", 100)
+        # Verificacion independiente del resultado de la accion de
+        # aproximacion. El LiDAR esta girado 180 grados respecto a la base:
+        # +pi en laser_frame es el frente fisico (medido por la TF actual).
+        self.declare_parameter("scan_topic", "/scan_filtered")
+        self.declare_parameter("verification_front_angle_deg", 180.0)
+        self.declare_parameter("verification_sector_half_angle_deg", 6.0)
+        self.declare_parameter("verification_scan_timeout_sec", 0.8)
+        self.declare_parameter("verification_stop_tolerance_m", 0.025)
+        self.declare_parameter("verification_scan_agreement_m", 0.030)
+        self.declare_parameter("max_approach_attempts", 2)
+        # La recuperacion solo retrocede si el sector trasero produce ecos
+        # validos. Con el enmascarado actual [-50,+50] ese sector es ciego y
+        # por tanto esta ruta se niega a moverse, que es la conducta segura.
+        self.declare_parameter("recovery_reverse_speed", 0.05)
+        self.declare_parameter("recovery_reverse_distance_m", 0.15)
+        self.declare_parameter("recovery_rear_clearance_m", 0.25)
+        self.declare_parameter("recovery_rear_angle_deg", 0.0)
 
         self.detections_topic = str(self.get_parameter("detections_topic").value)
         self.table_height_mm = int(self.get_parameter("table_height_mm").value)
@@ -420,12 +446,17 @@ class ObjectGraspServer(Node):
         )
         self.enable_arm = bool(self.get_parameter("enable_arm").value)
         self.enable_approach = bool(self.get_parameter("enable_approach").value)
+        self.max_approach_attempts = max(
+            1, int(self.get_parameter("max_approach_attempts").value)
+        )
 
         self._load_catalog(str(self.get_parameter("catalog_file").value))
 
         # Ultimas detecciones vistas, para el modo "auto".
         self._lock = threading.Lock()
         self._last_detections = []
+        self._latest_scan = None
+        self._latest_scan_receipt = 0.0
 
         self.create_subscription(
             ArucoDetectionArray,
@@ -433,6 +464,16 @@ class ObjectGraspServer(Node):
             self._on_detections,
             qos_profile_sensor_data,
             callback_group=self.cb,
+        )
+        self.create_subscription(
+            LaserScan,
+            str(self.get_parameter("scan_topic").value),
+            self._on_scan,
+            qos_profile_sensor_data,
+            callback_group=self.cb,
+        )
+        self.base_cmd_pub = self.create_publisher(
+            Twist, "/cmd_vel_aruco", 10
         )
 
         self.approach_client = ActionClient(
@@ -676,6 +717,129 @@ class ObjectGraspServer(Node):
         with self._lock:
             self._last_detections = list(msg.detections)
 
+    def _on_scan(self, msg):
+        with self._lock:
+            self._latest_scan = msg
+            self._latest_scan_receipt = time.monotonic()
+
+    def _stop_base(self):
+        self.base_cmd_pub.publish(Twist())
+
+    def _scan_range(self, center_deg):
+        """Minimo del sector, solo si el scan recibido es reciente."""
+        with self._lock:
+            scan = self._latest_scan
+            receipt = self._latest_scan_receipt
+        if (
+            scan is None
+            or time.monotonic() - receipt
+            >
+            float(self.get_parameter("verification_scan_timeout_sec").value)
+        ):
+            return None
+        half = math.radians(float(
+            self.get_parameter("verification_sector_half_angle_deg").value
+        ))
+        center = math.radians(center_deg)
+        values = []
+        for index, distance in enumerate(scan.ranges):
+            angle = scan.angle_min + index * scan.angle_increment
+            if abs(normalize_angle(angle - center)) > half:
+                continue
+            if (
+                math.isfinite(distance)
+                and
+                scan.range_min <= distance <= scan.range_max
+            ):
+                values.append(float(distance))
+        return min(values) if values else None
+
+    def _verify_aborted_approach(self, approach_res):
+        """Autoriza PICK solo con evidencia nueva, no por el codigo ABORTED."""
+        status = str(getattr(approach_res, "status", "")).strip()
+        try:
+            measured = float(getattr(approach_res, "final_distance", 0.0))
+        except (TypeError, ValueError):
+            measured = 0.0
+        tolerance = float(
+            self.get_parameter("verification_stop_tolerance_m").value
+        )
+        self._stop_base()
+        if not grasp_recovery.is_recoverable_approach_status(status):
+            return False, (
+                f"resultado={status or '<empty>'} no es recuperable; "
+                "BLOCKED implica despeje de chasis insuficiente."
+            )
+        if not grasp_recovery.stop_distance_is_valid(
+            measured, self.stop_distance, tolerance
+        ):
+            return False, (
+                f"LiDAR final={measured:.3f} m fuera de la parada calibrada "
+                f"{self.stop_distance:.3f}+/-{tolerance:.3f} m"
+            )
+        front = self._scan_range(float(
+            self.get_parameter("verification_front_angle_deg").value
+        ))
+        agreement = float(
+            self.get_parameter("verification_scan_agreement_m").value
+        )
+        if not grasp_recovery.scan_agrees_with_result(
+            front, measured, agreement
+        ):
+            return False, (
+                f"scan frontal={front!r} no confirma LiDAR final={measured:.3f} "
+                f"dentro de {agreement:.3f} m"
+            )
+        message = str(getattr(approach_res, "message", ""))
+        if "aligned=True" not in message:
+            return False, (
+                "la aproximacion abortada no confirmo orientacion alineada"
+            )
+        return True, (
+            f"verificado independientemente: scan frontal={front:.3f} m, "
+            f"parada calibrada={self.stop_distance:.3f} m"
+        )
+
+    def _recover_reverse(self, goal_handle):
+        """Retroceso corto, solo si el LiDAR ve el espacio trasero."""
+        rear = self._scan_range(float(
+            self.get_parameter("recovery_rear_angle_deg").value
+        ))
+        clearance = float(
+            self.get_parameter("recovery_rear_clearance_m").value
+        )
+        if rear is None or rear < clearance:
+            self._stop_base()
+            return False, (
+                f"sin espacio trasero verificable (scan={rear!r}, "
+                f"minimo={clearance:.3f} m)"
+            )
+        speed = float(self.get_parameter("recovery_reverse_speed").value)
+        distance = float(
+            self.get_parameter("recovery_reverse_distance_m").value
+        )
+        if speed <= 0.0 or distance <= 0.0:
+            return False, "parametros de retroceso invalidos"
+        deadline = time.monotonic() + distance / speed
+        while time.monotonic() < deadline:
+            if goal_handle.is_cancel_requested:
+                self._stop_base()
+                return False, "retroceso cancelado por el usuario"
+            rear = self._scan_range(float(
+                self.get_parameter("recovery_rear_angle_deg").value
+            ))
+            if rear is None or rear < clearance:
+                self._stop_base()
+                return False, (
+                    "retroceso detenido: desaparecio el espacio trasero seguro"
+                )
+            command = Twist()
+            command.linear.x = -speed
+            self.base_cmd_pub.publish(command)
+            time.sleep(0.05)
+        self._stop_base()
+        return True, f"retroceso seguro de {distance:.3f} m completado"
+
     def _visible_known_marker(self):
         """El ArUco visible mas cercano que este en el catalogo."""
         with self._lock:
@@ -876,19 +1040,68 @@ class ObjectGraspServer(Node):
 
         # --- 3. Aproximacion de la base ------------------------------
         if self.enable_approach and marker_id is not None:
-            self._feedback(goal_handle, "APPROACH")
-            approach = ArucoApproach.Goal()
-            approach.target_id = int(marker_id)
-            approach.stop_distance = self.stop_distance
-            approach.timeout_sec = self.approach_timeout
-            ok, msg, approach_res = self._send_and_wait(
-                self.approach_client, approach,
-                "aruco_lidar_approach", self.approach_timeout + 15.0,
-            )
-            self.get_logger().info(msg)
-            if not ok:
+            approach_res = None
+            accepted_after_abort = False
+            last_failure = ""
+            for attempt in range(1, self.max_approach_attempts + 1):
+                self._feedback(goal_handle, "APPROACH")
+                approach = ArucoApproach.Goal()
+                approach.target_id = int(marker_id)
+                approach.stop_distance = self.stop_distance
+                approach.timeout_sec = self.approach_timeout
+                ok, msg, approach_res = self._send_and_wait(
+                    self.approach_client, approach,
+                    "aruco_lidar_approach", self.approach_timeout + 15.0,
+                )
+                self.get_logger().info(msg)
+                if ok:
+                    break
+
+                self._feedback(goal_handle, "VERIFY_POSE")
+                verified, verify_msg = self._verify_aborted_approach(
+                    approach_res
+                )
+                self.get_logger().warning(
+                    f"Aproximacion abortada "
+                    f"({attempt}/{self.max_approach_attempts}): "
+                    f"{verify_msg}"
+                )
+                if verified:
+                    accepted_after_abort = True
+                    break
+
+                last_failure = f"{msg}; verificacion={verify_msg}"
+                status = str(getattr(approach_res, "status", "")).strip()
+                if (
+                    not grasp_recovery.is_recoverable_approach_status(status)
+                    or
+                    attempt >= self.max_approach_attempts
+                ):
+                    goal_handle.abort()
+                    return self._result(
+                        False, "APPROACH_UNSAFE",
+                        f"stage=VERIFY_POSE; {last_failure}",
+                    )
+
+                self._feedback(goal_handle, "RECOVERING")
+                recovered, recovery_msg = self._recover_reverse(goal_handle)
+                self.get_logger().warning(
+                    f"Recuperacion "
+                    f"({attempt}/{self.max_approach_attempts - 1}): "
+                    f"{recovery_msg}"
+                )
+                if not recovered:
+                    goal_handle.abort()
+                    return self._result(
+                        False, "RECOVERY_UNSAFE",
+                        f"stage=RECOVERING; {last_failure}; {recovery_msg}",
+                    )
+
+            if not ok and not accepted_after_abort:
                 goal_handle.abort()
-                return self._result(False, "GRASP_FAILED", f"stage=APPROACH; {msg}")
+                return self._result(
+                    False, "APPROACH_UNSAFE", f"stage=APPROACH; {last_failure}"
+                )
 
             # DONDE PARO DE VERDAD, no donde se le pidio.
             #
@@ -908,7 +1121,8 @@ class ObjectGraspServer(Node):
                 self.get_logger().info(
                     f"Aproximacion medida: {medida:.3f} m "
                     f"(nominal {self.stop_distance:.3f}, "
-                    f"diferencia {(medida - self.stop_distance)*1000:+.0f} mm)"
+                    f"diferencia {(medida - self.stop_distance)*1000:+.0f} mm, "
+                    f"aceptada={('por verificacion' if accepted_after_abort else 'por accion')})"
                 )
             else:
                 self.measured_stop_distance = None

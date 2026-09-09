@@ -59,6 +59,7 @@ def generate_launch_description():
             "detections_topic",
             default_value="/aruco/detections",
         ),
+        DeclareLaunchArgument("scan_topic", default_value="/scan_filtered"),
         DeclareLaunchArgument(
             "table_height_mm",
             default_value="100",
@@ -83,6 +84,7 @@ def generate_launch_description():
                 LaunchConfiguration("approach_timeout_sec"), value_type=float
             ),
             "detections_topic": LaunchConfiguration("detections_topic"),
+            "scan_topic": LaunchConfiguration("scan_topic"),
             "table_height_mm": ParameterValue(
                 LaunchConfiguration("table_height_mm"), value_type=int
             ),
