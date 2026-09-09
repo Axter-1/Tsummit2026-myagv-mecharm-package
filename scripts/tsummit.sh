@@ -234,6 +234,33 @@ sys.exit(0 if value > 200 else 1)
 PY
 }
 
+# Lee una posicion con nombre de <mapa>.poses.yaml (scripts/save_pose.py).
+# Imprime "x y yaw_deg" y devuelve 0 si existe; si no, devuelve 1 sin
+# imprimir nada. Es lo que permite que reto4() sustituya los defaults
+# GOAL_X/GOAL_Y/INITIAL_* -- que son una estimacion de diseno y pueden
+# caer sobre una pared -- por coordenadas leidas de verdad en pista.
+pose_from_map() {
+    local map_path="$1" key="$2"
+    local host_path="${map_path/#\/workspace/${ROOT}}"
+    local poses_path="${host_path%.yaml}.poses.yaml"
+    [ -f "${poses_path}" ] || return 1
+    python3 - "${poses_path}" "${key}" <<'PY' 2>/dev/null
+import sys
+import yaml
+
+path, key = sys.argv[1], sys.argv[2]
+
+with open(path, 'r', encoding='utf-8') as handle:
+    data = yaml.safe_load(handle) or {}
+
+pose = (data.get('poses') or {}).get(key)
+if not isinstance(pose, dict) or 'x' not in pose or 'y' not in pose:
+    sys.exit(1)
+
+print(f"{pose['x']} {pose['y']} {pose.get('yaw_deg', 0.0)}")
+PY
+}
+
 # =====================================================================
 #  Compilacion
 # ---------------------------------------------------------------------
@@ -830,7 +857,53 @@ reto4() {
     routine base
     sleep 3
 
-    local goal_x="${GOAL_X:-3.7}" goal_y="${GOAL_Y:--2.2}"
+    # Prioridad para FINISH y para la pose inicial: variable de entorno
+    # explicita > posicion con nombre en <mapa>.poses.yaml (grabada en
+    # pista con 'tsummit.sh save-pose') > estimacion de diseno (3.7,-2.2
+    # / 0,0,0). Antes solo existia el ultimo escalon, que es justo lo
+    # que "no siempre es valido": una estimacion que puede caer sobre
+    # una pared. Para grabar 'finish' y 'start' de verdad contra el
+    # mapa que se vaya a usar:
+    #   MAP=/workspace/maps/<mapa>.yaml SLAM=false ./scripts/run_maze.sh manual
+    #   ./scripts/tsummit.sh initial-pose <x> <y> [yaw]   (o "2D Pose Estimate" en RViz)
+    #   lleva el robot a START (teleop, o "Nav2 Goal" en RViz)
+    #   ./scripts/tsummit.sh save-pose start
+    #   lleva el robot a FINISH
+    #   ./scripts/tsummit.sh save-pose finish
+    local goal_x="${GOAL_X:-}" goal_y="${GOAL_Y:-}" goal_yaw="${GOAL_YAW:-}"
+    local initial_x="${INITIAL_X:-}" initial_y="${INITIAL_Y:-}" \
+        initial_yaw="${INITIAL_YAW:-}"
+
+    if [ -n "${MAP:-}" ] && { [ -z "${goal_x}" ] || [ -z "${goal_y}" ]; }; then
+        local pf
+        if pf="$(pose_from_map "${MAP}" finish)"; then
+            read -r fx fy fyaw <<<"${pf}"
+            printf 'FINISH leido de %s (posicion "finish"): (%s, %s) yaw=%s deg\n' \
+                "${MAP%.yaml}.poses.yaml" "${fx}" "${fy}" "${fyaw}"
+            goal_x="${goal_x:-${fx}}"
+            goal_y="${goal_y:-${fy}}"
+            goal_yaw="${goal_yaw:-${fyaw}}"
+        fi
+    fi
+    if [ -n "${MAP:-}" ] && {
+        [ -z "${initial_x}" ] || [ -z "${initial_y}" ] || [ -z "${initial_yaw}" ]
+    }; then
+        local ps
+        if ps="$(pose_from_map "${MAP}" start)"; then
+            read -r sx sy syaw <<<"${ps}"
+            printf 'START leido de %s (posicion "start"): (%s, %s) yaw=%s deg\n' \
+                "${MAP%.yaml}.poses.yaml" "${sx}" "${sy}" "${syaw}"
+            initial_x="${initial_x:-${sx}}"
+            initial_y="${initial_y:-${sy}}"
+            initial_yaw="${initial_yaw:-${syaw}}"
+        fi
+    fi
+    goal_x="${goal_x:-3.7}"
+    goal_y="${goal_y:--2.2}"
+    goal_yaw="${goal_yaw:-0.0}"
+    initial_x="${initial_x:-0}"
+    initial_y="${initial_y:-0}"
+    initial_yaw="${initial_yaw:-0}"
     local auto_start="true"
 
     # DETACH=1: 'run_maze.sh run' por defecto se queda pegado al ros2
@@ -840,9 +913,10 @@ reto4() {
     if [ -n "${MAP:-}" ]; then
         printf 'Localizacion: AMCL contra mapa guardado (%s)\n' "${MAP}"
 
-        # Comprobado en pista: goal_x/goal_y es una estimacion de
-        # diseno y puede caer literalmente sobre una pared del mapa
-        # real. Mandar ese goal igualmente encadena recuperaciones
+        # Comprobado en pista: goal_x/goal_y puede caer literalmente
+        # sobre una pared del mapa real (estimacion de diseno, o una
+        # posicion grabada que ya no vale porque el mapa cambio).
+        # Mandar ese goal igualmente encadena recuperaciones
         # (backup/wait) que solo empeoran las cosas: si las ruedas
         # patinan (robot sujeto o atascado), la odometria se desvia y
         # AMCL puede acabar "fuera del mapa". Se comprueba ANTES de
@@ -859,11 +933,12 @@ reto4() {
                 "${goal_x}" "${goal_y}"
             printf '       Arranca en modo MANUAL: no se envia ningun goal solo.\n'
             printf '       Marca tu la meta en RViz con "Nav2 Goal" (panel Navigation 2),\n'
-            printf '       o corrige GOAL_X/GOAL_Y y repite.\n'
+            printf '       o graba la posicion correcta: tsummit.sh save-pose finish\n'
         fi
 
         DETACH=1 SLAM=false MAP="${MAP}" AUTO_START="${auto_start}" \
-            GOAL_X="${goal_x}" GOAL_Y="${goal_y}" "${MAZE}" run
+            GOAL_X="${goal_x}" GOAL_Y="${goal_y}" GOAL_YAW="${goal_yaw}" \
+            "${MAZE}" run
     else
         printf 'Localizacion: SLAM en vivo (por defecto).\n'
         printf 'Para navegar sobre un mapa ya guardado:\n'
@@ -871,7 +946,8 @@ reto4() {
         printf 'AVISO: con SLAM en vivo el mapa arranca vacio; no se puede comprobar\n'
         printf '       de antemano si FINISH cae libre. Si Nav2 lo rechaza, marca la\n'
         printf '       meta a mano en RViz con "Nav2 Goal".\n'
-        DETACH=1 GOAL_X="${goal_x}" GOAL_Y="${goal_y}" "${MAZE}" run
+        DETACH=1 GOAL_X="${goal_x}" GOAL_Y="${goal_y}" GOAL_YAW="${goal_yaw}" \
+            "${MAZE}" run
     fi
 
     if [ -n "${MAP:-}" ]; then
@@ -880,17 +956,18 @@ reto4() {
         # pose") y Nav2 rechaza cualquier objetivo: no hay frame "map".
         # (0,0,0) es el START tal cual quedo grabado al mapear (ver
         # comentario de maze.launch.py); si el robot NO esta ahi ahora,
-        # sobreescribe con INITIAL_X/INITIAL_Y/INITIAL_YAW, o corrigelo
+        # sobreescribe con INITIAL_X/INITIAL_Y/INITIAL_YAW, graba la
+        # posicion real con 'tsummit.sh save-pose start', o corrigelo
         # luego en RViz con "2D Pose Estimate".
         sleep 5
         say "Pose inicial para AMCL"
         printf 'Asumiendo robot en START = (%s, %s, %s deg). Si no es asi:\n' \
-            "${INITIAL_X:-0}" "${INITIAL_Y:-0}" "${INITIAL_YAW:-0}"
+            "${initial_x}" "${initial_y}" "${initial_yaw}"
         printf '  INITIAL_X=<x> INITIAL_Y=<y> INITIAL_YAW=<deg> ALLOW_MOTION=1 tsummit.sh reto4\n'
         if [ "${VIZ:-rviz}" = "rviz" ]; then
             printf '  (o corrigela en RViz con la herramienta "2D Pose Estimate")\n'
         fi
-        routine initial-pose "${INITIAL_X:-0}" "${INITIAL_Y:-0}" "${INITIAL_YAW:-0}"
+        routine initial-pose "${initial_x}" "${initial_y}" "${initial_yaw}"
     fi
 
     sleep 2
@@ -1063,6 +1140,7 @@ case "${1:-help}" in
     save-map)     shift; save_map "$@" ;;
     save-pose|guardar-pose) shift; save_pose "$@" ;;
     list-poses|poses)       list_poses ;;
+    initial-pose) shift; ensure_container; routine initial-pose "$@" ;;
 
     arm|brazo)    arm ;;
     calibrate-grasp|calibrar-agarre) shift; calibrate_grasp "$@" ;;
@@ -1106,6 +1184,15 @@ T-SUMMIT Challenge — consola unica
     save-map <nombre>       guarda /workspace/maps/<nombre>.{yaml,pgm}
     save-pose <nombre>      guarda la pose ACTUAL en <mapa>.poses.yaml (junto al mapa)
     list-poses              lista las posiciones guardadas del mapa mas reciente
+    initial-pose <x> <y> [yaw_deg]   inicializa AMCL sin mover el robot
+
+    Grabar 'start'/'finish' contra un mapa ya guardado, sin remapear:
+      MAP=/workspace/maps/<mapa>.yaml SLAM=false ./scripts/run_maze.sh manual
+      tsummit.sh initial-pose <x> <y> [yaw]   (o "2D Pose Estimate" en RViz)
+      lleva el robot a la posicion (teleop, o "Nav2 Goal" en RViz)
+      tsummit.sh save-pose start   /  tsummit.sh save-pose finish
+    reto4 lee 'finish'/'start' de <mapa>.poses.yaml si existen (si no,
+    caen a GOAL_X/GOAL_Y/INITIAL_* o a la estimacion de diseno).
 
   APROXIMACION A UN ARUCO
     prepare grasp [pieza] [--table-height mm]
