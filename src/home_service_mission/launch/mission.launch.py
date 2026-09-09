@@ -9,7 +9,11 @@ from launch.substitutions import (
     PathJoinSubstitution,
 )
 
+from typing import List
+
 from launch_ros.actions import Node
+
+from launch_ros.parameter_descriptions import ParameterValue
 
 from launch_ros.substitutions import (
     FindPackageShare,
@@ -43,7 +47,23 @@ def generate_launch_description():
     use_sim_time_arg = (
         DeclareLaunchArgument(
             'use_sim_time',
-            default_value='true'
+            default_value='false'
+        )
+    )
+
+    # Sobrescritura de las variables de la mision, en pares
+    # nombre=valor. Permite que un mismo YAML de reto sirva sin saber
+    # todavia que pieza fisica hay en cada ArUco:
+    #
+    #   mission_vars:="['pieza_verde=poste','pieza_azul=rueda']"
+    mission_vars_arg = (
+        DeclareLaunchArgument(
+            'mission_vars',
+            default_value='[]',
+            description=(
+                'Pares nombre=valor que sobrescriben la seccion '
+                'vars de la mision'
+            )
         )
     )
 
@@ -69,6 +89,12 @@ def generate_launch_description():
                     LaunchConfiguration(
                         'use_sim_time'
                     ),
+
+                'mission_vars':
+                    ParameterValue(
+                        LaunchConfiguration('mission_vars'),
+                        value_type=List[str],
+                    ),
             }
         ]
     )
@@ -76,5 +102,6 @@ def generate_launch_description():
     return LaunchDescription([
         mission_file_arg,
         use_sim_time_arg,
+        mission_vars_arg,
         mission_manager,
     ])

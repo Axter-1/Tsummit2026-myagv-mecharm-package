@@ -2,6 +2,7 @@
 
 import math
 import os
+import re
 import time
 
 import yaml
@@ -19,6 +20,21 @@ from home_service_interfaces.action import (
     MoveArm,
     PickPlace,
 )
+
+
+def _parse_scalar(text):
+    """Convierte "100" a int y "0.5" a float; el resto se queda en texto.
+
+    Las sobrescrituras llegan por la linea de comandos, o sea siempre
+    como cadena, pero altura_mesa_mm tiene que ser un entero.
+    """
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except (TypeError, ValueError):
+            continue
+
+    return text
 
 
 class MissionManager(Node):
@@ -39,6 +55,16 @@ class MissionManager(Node):
         mission_file = self.get_parameter(
             'mission_file'
         ).value
+
+        # Sobrescritura de variables desde la linea de comandos, en
+        # pares "nombre=valor". Es lo que permite que una misma mision
+        # sirva sin saber todavia que pieza es cual:
+        #
+        #   mission_vars:='["pieza_verde=poste"]'
+        self.declare_parameter(
+            'mission_vars',
+            []
+        )
 
         if not mission_file:
             raise RuntimeError(
@@ -161,6 +187,48 @@ class MissionManager(Node):
                 'Mission contains no steps.'
             )
 
+        # ---------------------------------------------------------
+        # Variables de la mision
+        #
+        # Los retos del T-SUMMIT estan definidos por UBICACION (los
+        # ArUco 0..3 marcan sitios, no piezas), pero que pieza fisica
+        # hay en cada sitio no se sabe hasta la pista. En vez de tener
+        # una mision por combinacion, la mision declara variables y se
+        # resuelven aqui, con lo que un mismo YAML sirve para cualquier
+        # asignacion de piezas.
+        # ---------------------------------------------------------
+        self.vars = dict(self.mission.get('vars', {}) or {})
+
+        for override in (
+            self.get_parameter('mission_vars').value or []
+        ):
+            if '=' not in str(override):
+                raise RuntimeError(
+                    f'mission_vars: "{override}" no tiene forma '
+                    'nombre=valor.'
+                )
+            nombre, valor = str(override).split('=', 1)
+            nombre = nombre.strip()
+            if nombre not in self.vars:
+                raise RuntimeError(
+                    f'mission_vars: "{nombre}" no esta declarada en la '
+                    f'seccion vars de la mision. Declaradas: '
+                    f'{sorted(self.vars) or "ninguna"}'
+                )
+            self.vars[nombre] = _parse_scalar(valor.strip())
+
+        self.steps = [
+            self._resolve_vars(step, f'paso {i + 1}')
+            for i, step in enumerate(self.steps)
+        ]
+
+        if self.vars:
+            self.get_logger().info(
+                'Variables de la mision: ' + ', '.join(
+                    f'{k}={v!r}' for k, v in sorted(self.vars.items())
+                )
+            )
+
         # Tipos de paso presentes en la mision. Solo se espera por los
         # servidores de accion que la mision realmente usa.
         self.step_types = {
@@ -230,6 +298,54 @@ class MissionManager(Node):
             f'Stop on failure: '
             f'{self.stop_on_failure}'
         )
+
+    # =============================================================
+    # Variables de la mision
+    # =============================================================
+
+    _VAR = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}')
+
+    def _resolve_vars(self, value, donde):
+        """Sustituye ${nombre} en cadenas, listas y diccionarios.
+
+        Si la cadena es EXACTAMENTE una variable se devuelve su valor
+        con su tipo original, no como texto: asi `altura: "${altura_mm}"`
+        sigue siendo un entero y no rompe el int() del paso.
+
+        Una variable sin declarar es un error duro y no una cadena
+        vacia: fallar al cargar es mucho mejor que enviar al brazo a la
+        pieza "".
+        """
+        if isinstance(value, str):
+
+            exacto = self._VAR.fullmatch(value.strip())
+
+            if exacto:
+                return self._var(exacto.group(1), donde)
+
+            return self._VAR.sub(
+                lambda m: str(self._var(m.group(1), donde)), value
+            )
+
+        if isinstance(value, list):
+            return [self._resolve_vars(v, donde) for v in value]
+
+        if isinstance(value, dict):
+            return {
+                k: self._resolve_vars(v, donde)
+                for k, v in value.items()
+            }
+
+        return value
+
+    def _var(self, nombre, donde):
+        if nombre not in self.vars:
+            raise RuntimeError(
+                f'{donde}: la variable "${{{nombre}}}" no esta '
+                f'declarada en la seccion vars de la mision. '
+                f'Declaradas: {sorted(self.vars) or "ninguna"}'
+            )
+        return self.vars[nombre]
 
     # =============================================================
     # Posiciones guardadas junto al mapa

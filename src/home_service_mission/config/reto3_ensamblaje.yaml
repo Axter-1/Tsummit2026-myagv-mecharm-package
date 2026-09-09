@@ -1,8 +1,15 @@
 # =====================================================================
-#  RETO 1 — ZONA DE CLASIFICACION  (KOSTAL)
+#  RETO 3 — ZONA DE ENSAMBLAJE  (MICHELIN)
 #  Numeracion segun "Indicaciones tecnicas T-SUMMIT Challenge"
 # ---------------------------------------------------------------------
-#  Secuencia OBLIGATORIA:  START -> Verde 0 -> Verde 2 -> Azul 1 -> Azul 3 -> FINISH
+#  Del reglamento: "Tomaran las piezas del ArUco 0 al 2, en ese orden".
+#  Las tres se apilan concentricamente sobre el poste de la base de
+#  montaje. El reglamento NO asigna un ArUco a la base.
+#
+#  IDA Y VUELTA POR PIEZA: el MechArm lleva una sola pieza a la vez,
+#  asi que son tres viajes estacion -> montaje, no una recogida
+#  masiva. Si en pista se ve que puede cargar varias, se reordena
+#  aqui sin tocar codigo.
 #
 #  LOS ArUco MARCAN UBICACIONES, NO PIEZAS
 #  =======================================
@@ -18,7 +25,7 @@
 #  Por eso van como variables y no como literales. Se sobrescriben sin
 #  tocar el fichero:
 #
-#      ./scripts/tsummit.sh reto1 --pieza-verde poste --pieza-azul rueda
+#      ./scripts/tsummit.sh reto3 --pieza-verde poste --pieza-azul rueda
 #
 #  POSICIONES
 #  ==========
@@ -29,12 +36,10 @@
 #
 #  Posiciones necesarias (con estos nombres exactos):
 #      start        el origen, area de START
-#      carga_0      frente al ArUco 0 (recogida verde)
-#      posicion_2   waypoint de paso hacia la zona de entrega
-#      entrega_2    frente al ArUco 2 (entrega verde)
-#      posicion_1   waypoint de paso hacia la zona de carga
-#      carga_1      frente al ArUco 1 (recogida azul)
-#      entrega_3    frente al ArUco 3 (entrega azul)
+#      estacion_0   frente al ArUco 0 (primera pieza)
+#      estacion_1   frente al ArUco 1 (segunda pieza)
+#      estacion_2   frente al ArUco 2 (tercera pieza)
+#      montaje      frente a la base de montaje, con el poste
 #      finish       area de FINISH
 #
 #  Los `navigate` solo tienen que dejar al robot CERCA y mirando al
@@ -56,7 +61,7 @@
 
 mission:
 
-  name: reto1_clasificacion
+  name: reto3_ensamblaje
 
   # Mapa al que se atan las posiciones. Explicito a proposito: vacio
   # cogeria el <mapa>.poses.yaml mas reciente, y cargar en silencio las
@@ -64,10 +69,10 @@ mission:
   map: "maze-map"
 
   vars:
-    # Pieza VERDE: se recoge en el ArUco 0 y se entrega en el 2.
-    pieza_verde: "rueda"
-    # Pieza AZUL: se recoge en el ArUco 1 y se entrega en el 3.
-    pieza_azul: "estrella"
+    # Las tres piezas apilables, en el orden ArUco 0, 1, 2.
+    pieza_0: "rueda"
+    pieza_1: "engranaje"
+    pieza_2: "estrella"
 
   repeat: 1
 
@@ -83,83 +88,97 @@ mission:
       speed_percent: 30.0
       retries: 1
 
-    # ================= PIEZA VERDE: ArUco 0 -> ArUco 2 ================
+    # ============ PIEZA 1: ArUco 0 -> base de montaje ===========
 
     - type: navigate
-      name: ir_a_carga_verde
-      pose: carga_0
+      name: ir_a_estacion_0
+      pose: estacion_0
       frame_id: map
       retries: 2
 
     - type: grasp
-      name: tomar_pieza_verde
+      name: tomar_pieza_0
       action: pick
-      object: "${pieza_verde}"
+      object: "${pieza_0}"
       retreat_pose: carry
       speed_percent: 25.0
       gripper_speed_percent: 40.0
       retries: 1
 
     - type: navigate
-      name: cruzar_a_entrega
-      pose: posicion_2
-      frame_id: map
-      retries: 2
-
-    - type: navigate
-      name: ir_a_entrega_verde
-      pose: entrega_2
+      name: ir_a_montaje_0
+      pose: montaje
       frame_id: map
       retries: 2
 
     - type: grasp
-      name: soltar_pieza_verde
+      name: apilar_pieza_0
       action: place
-      object: "${pieza_verde}"
+      object: "${pieza_0}"
       retreat_pose: home
       speed_percent: 25.0
       gripper_speed_percent: 40.0
       retries: 1
 
-    # ================= PIEZA AZUL: ArUco 1 -> ArUco 3 =================
+    # ============ PIEZA 2: ArUco 1 -> base de montaje ===========
 
     - type: navigate
-      name: volver_a_zona_de_carga
-      pose: posicion_1
-      frame_id: map
-      retries: 2
-
-    - type: navigate
-      name: ir_a_carga_azul
-      pose: carga_1
+      name: ir_a_estacion_1
+      pose: estacion_1
       frame_id: map
       retries: 2
 
     - type: grasp
-      name: tomar_pieza_azul
+      name: tomar_pieza_1
       action: pick
-      object: "${pieza_azul}"
+      object: "${pieza_1}"
       retreat_pose: carry
       speed_percent: 25.0
       gripper_speed_percent: 40.0
       retries: 1
 
     - type: navigate
-      name: cruzar_a_entrega_azul
-      pose: posicion_2
-      frame_id: map
-      retries: 2
-
-    - type: navigate
-      name: ir_a_entrega_azul
-      pose: entrega_3
+      name: ir_a_montaje_1
+      pose: montaje
       frame_id: map
       retries: 2
 
     - type: grasp
-      name: soltar_pieza_azul
+      name: apilar_pieza_1
       action: place
-      object: "${pieza_azul}"
+      object: "${pieza_1}"
+      retreat_pose: home
+      speed_percent: 25.0
+      gripper_speed_percent: 40.0
+      retries: 1
+
+    # ============ PIEZA 3: ArUco 2 -> base de montaje ===========
+
+    - type: navigate
+      name: ir_a_estacion_2
+      pose: estacion_2
+      frame_id: map
+      retries: 2
+
+    - type: grasp
+      name: tomar_pieza_2
+      action: pick
+      object: "${pieza_2}"
+      retreat_pose: carry
+      speed_percent: 25.0
+      gripper_speed_percent: 40.0
+      retries: 1
+
+    - type: navigate
+      name: ir_a_montaje_2
+      pose: montaje
+      frame_id: map
+      retries: 2
+
+    - type: grasp
+      name: apilar_pieza_2
+      action: place
+      object: "${pieza_2}"
       retreat_pose: home
       speed_percent: 25.0
       gripper_speed_percent: 40.0

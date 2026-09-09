@@ -81,8 +81,11 @@ class _Harness:
 
 for _name in (
     "_resolve_poses_file", "_default_maps_dir", "_load_poses", "resolve_pose",
+    "_resolve_vars", "_var",
 ):
     setattr(_Harness, _name, getattr(MissionManager, _name))
+
+_Harness._VAR = MissionManager._VAR
 
 
 POSES = {
@@ -229,3 +232,105 @@ def test_una_posicion_ausente_se_detecta_antes_de_mover_el_robot(workspace):
     })
 
     assert faltan == ["no_existe"]
+
+
+# ---------------------------------------------------------------------
+# Variables de la mision
+# ---------------------------------------------------------------------
+
+def _con_vars(vars_):
+    harness = _Harness({})
+    harness.vars = dict(vars_)
+    return harness
+
+
+def test_sustituye_la_pieza_en_un_paso():
+    """Los ArUco marcan UBICACIONES; que pieza hay en cada una no se
+    sabe hasta la pista, asi que va como variable."""
+    harness = _con_vars({"pieza_verde": "poste"})
+
+    paso = harness._resolve_vars(
+        {"type": "grasp", "action": "pick", "object": "${pieza_verde}"},
+        "paso 1",
+    )
+
+    assert paso["object"] == "poste"
+    assert paso["action"] == "pick"
+
+
+def test_una_variable_sola_conserva_su_tipo():
+    """`altura: "${altura_mm}"` tiene que seguir siendo un entero.
+
+    Devolverlo como texto reventaria el int() del paso.
+    """
+    harness = _con_vars({"altura_mm": 100})
+
+    assert harness._resolve_vars("${altura_mm}", "x") == 100
+    assert isinstance(harness._resolve_vars("${altura_mm}", "x"), int)
+
+
+def test_variable_dentro_de_un_texto_se_interpola():
+    harness = _con_vars({"pieza_azul": "estrella"})
+
+    assert harness._resolve_vars(
+        "tomar_${pieza_azul}_del_aruco_1", "x"
+    ) == "tomar_estrella_del_aruco_1"
+
+
+def test_una_variable_sin_declarar_es_un_error_duro():
+    """Fallar al cargar es mucho mejor que mandar el brazo a la pieza ''."""
+    harness = _con_vars({"pieza_verde": "rueda"})
+
+    with pytest.raises(RuntimeError) as exc:
+        harness._resolve_vars({"object": "${pieza_azul}"}, "paso 7")
+
+    assert "pieza_azul" in str(exc.value)
+    assert "paso 7" in str(exc.value)
+
+
+def test_la_sustitucion_baja_por_listas_y_diccionarios():
+    harness = _con_vars({"a": "uno", "b": 2})
+
+    resuelto = harness._resolve_vars(
+        {"lista": ["${a}", {"anidado": "${b}"}], "intacto": 5.5},
+        "x",
+    )
+
+    assert resuelto == {"lista": ["uno", {"anidado": 2}], "intacto": 5.5}
+
+
+def test_los_retos_reales_declaran_las_variables_que_usan():
+    """Ningun YAML de reto puede referirse a una variable inexistente.
+
+    Es la comprobacion que evita descubrirlo con el robot en la pista.
+    """
+    import glob
+
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ficheros = sorted(glob.glob(os.path.join(raiz, "config", "reto*.yaml")))
+
+    assert ficheros, "no se encontro ningun YAML de reto"
+
+    for ruta in ficheros:
+        with open(ruta, "r", encoding="utf-8") as handle:
+            mission = yaml.safe_load(handle)["mission"]
+
+        harness = _Harness({})
+        harness.vars = dict(mission.get("vars", {}) or {})
+
+        for i, paso in enumerate(mission["steps"]):
+            harness._resolve_vars(paso, f"{os.path.basename(ruta)} paso {i}")
+
+
+def test_los_retos_reales_solo_usan_tipos_de_paso_conocidos():
+    import glob
+
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    conocidos = {"navigate", "aruco", "arm_pose", "pick", "place", "grasp"}
+
+    for ruta in sorted(glob.glob(os.path.join(raiz, "config", "*.yaml"))):
+        with open(ruta, "r", encoding="utf-8") as handle:
+            mission = yaml.safe_load(handle)["mission"]
+
+        for paso in mission["steps"]:
+            assert paso["type"] in conocidos, (ruta, paso["type"])

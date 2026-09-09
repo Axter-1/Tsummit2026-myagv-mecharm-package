@@ -743,22 +743,54 @@ grasp_catalog() {
 #  Retos
 # =====================================================================
 
-reto1() {
+# Ejecuta un reto entero: navegacion + busqueda + alineacion +
+# aproximacion + pick/place, con el mission_manager de orquestador.
+#
+# NO levanta infraestructura. Exige que `prepare grasp` ya la haya
+# dejado en marcha y falla diciendo como hacerlo: reiniciar nodos desde
+# aqui es lo que dejaba el brazo a medio camino entre dos servidores.
+run_reto() {
+    local numero="$1" nombre="$2" fichero="$3"; shift 3
+
+    local table_mm="${PREPARE_GRASP_DEFAULT_TABLE_MM}"
+    local vars=()
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --table-height|--height)
+                table_mm="${2:?falta valor para --table-height}"; shift 2 ;;
+            --pieza-*|--piece-*)
+                # --pieza-verde poste  ->  pieza_verde=poste
+                local clave="${1#--}"
+                clave="${clave/piece-/pieza-}"
+                vars+=("${clave//-/_}=${2:?falta valor para $1}")
+                shift 2 ;;
+            *) die "opcion desconocida para reto${numero}: $1" ;;
+        esac
+    done
+
     confirm_motion
-    say "Reto 1 — Clasificacion"
-    require_prepared_grasp auto "${PREPARE_GRASP_DEFAULT_TABLE_MM}"
-    printf 'Pila lista. Lanza la toma con:\n'
-    printf '%s\n' '  ALLOW_MOTION=1 DISTRIBUTED=1 LAPTOP_IP=<ip> \' \
-        '  ./scripts/tsummit.sh grasp <engranaje|poste|rueda|auto>'
+    say "Reto ${numero} - ${nombre}"
+    require_prepared_grasp auto "${table_mm}"
+
+    local lista="" v
+    for v in "${vars[@]:-}"; do
+        [ -n "${v}" ] || continue
+        printf '  variable: %s\n' "${v}"
+        lista="${lista:+${lista},}'${v}'"
+    done
+
+    in_container_interactive "ros2 launch home_service_mission mission.launch.py \
+        mission_file:=/workspace/src/home_service_mission/config/${fichero} \
+        use_sim_time:=false \
+        mission_vars:=\"[${lista}]\""
 }
 
-reto2() {
-    confirm_motion
-    say "Reto 2 — Kitting"
-    require_prepared_grasp auto "${PREPARE_GRASP_DEFAULT_TABLE_MM}"
-    printf 'Pila lista (misma que reto 1; la secuencia de kitting la\n'
-    printf 'orquesta home_service_mission/mission_manager).\n'
-}
+reto1() { run_reto 1 "Clasificacion" reto1_clasificacion.yaml "$@"; }
+
+reto2() { run_reto 2 "Kitting" reto2_kitting.yaml "$@"; }
+
+reto3() { run_reto 3 "Ensamblaje" reto3_ensamblaje.yaml "$@"; }
 
 reto4() {
     # OJO: esto NO es "base + nav2 generico". Eso es lo que habia antes
@@ -1025,8 +1057,9 @@ case "${1:-help}" in
     marker-scale|escala-marcador) shift; marker_scale "$@" ;;
     grasp-catalog|catalogo) grasp_catalog ;;
 
-    reto1)        reto1 ;;
-    reto2)        reto2 ;;
+    reto1)        shift; reto1 "$@" ;;
+    reto2)        shift; reto2 "$@" ;;
+    reto3)        shift; reto3 "$@" ;;
     reto4)        reto4 ;;
 
     rviz)         routine rviz ;;
@@ -1077,9 +1110,13 @@ T-SUMMIT Challenge — consola unica
       auto  -> deduce la pieza del ArUco que este viendo
 
   RETOS
-    reto1                   Clasificacion   (ALLOW_MOTION=1)
-    reto2                   Kitting         (ALLOW_MOTION=1)
+    reto1 [opciones]        Clasificacion: mision completa (ALLOW_MOTION=1)
+    reto2 [opciones]        Kitting: mision completa       (ALLOW_MOTION=1)
+    reto3 [opciones]        Ensamblaje: mision completa    (ALLOW_MOTION=1)
     reto4                   Laberinto: SLAM en vivo + auto-navega (ALLOW_MOTION=1)
+      opciones de reto1/2/3:  --table-height <mm>
+                              --pieza-verde <p>  --pieza-azul <p>   (reto 1 y 2)
+                              --pieza-0 <p> --pieza-1 <p> --pieza-2 <p>  (reto 3)
                             MAP=<archivo.yaml> -> AMCL sobre mapa guardado en vez de SLAM
                             VIZ=rviz|foxglove|none -> que visualizacion abre (o ninguna)
 

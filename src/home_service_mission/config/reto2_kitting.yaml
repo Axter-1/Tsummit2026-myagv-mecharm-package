@@ -1,37 +1,83 @@
 # =====================================================================
-#  RETO 2 — ZONA DE KITTING  (caso de industria: DENSO)
+#  RETO 2 — ZONA DE KITTING  (DENSO)
+#  Numeracion segun "Indicaciones tecnicas T-SUMMIT Challenge"
 # ---------------------------------------------------------------------
-#  Misma secuencia obligatoria que el Reto 1:
-#     START -> Verde ArUco 0 -> ArUco 2 -> Azul ArUco 1 -> ArUco 3 -> FINISH
+#  Secuencia OBLIGATORIA:  START -> Verde 0 -> Verde 2 -> Azul 1 -> Azul 3 -> FINISH
 #
-#  LA DIFERENCIA ES LA "LOGICA DE FALLO" (keep-it-simple)
-#  ======================================================
-#  Cita de las indicaciones tecnicas:
+#  Identica a la del reto 1 segun el reglamento. Lo que cambia es
+#  el cuadrante y la LOGICA DE FALLO: aqui el reglamento pide que si
+#  una pieza no se detecta NO se congele, se anote y se siga. Por eso
+#  esta mision usa stop_on_failure: false, al reves que la del reto 1.
 #
-#     "la vision artificial busca la pieza, pero si no la encuentra,
-#      no debe congelarse. Implementacion de un Timeout de Deteccion
-#      de 10 segundos. Si falla, debe escribir en el log
-#      'Pieza Omitida' y continuar con la siguiente coordenada."
+#  LOS ArUco MARCAN UBICACIONES, NO PIEZAS
+#  =======================================
+#  Es lo unico que el reglamento fija, y hay que tenerlo claro porque
+#  grasp_catalog.yaml tiene ADEMAS un `aruco_to_object` provisional
+#  (1->engranaje, 2->poste, 3->rueda) que es otra cosa. Con
+#  `object: auto`, en la entrega (ArUco 2) el robot creeria que hay un
+#  poste. Por eso los pasos nombran la pieza explicitamente, via
+#  variable.
 #
-#  Como se implementa aqui:
-#     timeout_sec: 10.0      -> el paso ArUco se rinde a los 10 s
-#     on_failure: skip       -> no aborta la mision, pasa al siguiente
-#     skip_message: "Pieza Omitida"  -> texto exacto en el log
+#  QUE PIEZA HAY EN CADA SITIO NO SE SABE HASTA LA PISTA
+#  ====================================================
+#  Por eso van como variables y no como literales. Se sobrescriben sin
+#  tocar el fichero:
 #
-#  stop_on_failure sigue en true para que un fallo NO previsto (por
-#  ejemplo el brazo desconectado) si detenga la mision; son los pasos
-#  individuales los que declaran que se pueden omitir.
+#      ./scripts/tsummit.sh reto2 --pieza-verde poste --pieza-azul rueda
 #
-#  La preparacion (poses del brazo y coordenadas) es identica a la del
-#  Reto 1: ver reto1_clasificacion.yaml.
+#  POSICIONES
+#  ==========
+#  Salen de <mapa>.poses.yaml, que escribe `tsummit.sh save-pose`
+#  durante el mapeo. Aqui no hay ni una coordenada. Si falta alguna, la
+#  mision NO arranca -- avisa antes de mover el robot, no a mitad de
+#  rutina con una pieza en la pinza.
+#
+#  Posiciones necesarias (con estos nombres exactos):
+#      start        el origen, area de START
+#      carga_0      frente al ArUco 0 (recogida verde)
+#      posicion_2   waypoint de paso hacia la zona de entrega
+#      entrega_2    frente al ArUco 2 (entrega verde)
+#      posicion_1   waypoint de paso hacia la zona de carga
+#      carga_1      frente al ArUco 1 (recogida azul)
+#      entrega_3    frente al ArUco 3 (entrega azul)
+#      finish       area de FINISH
+#
+#  Los `navigate` solo tienen que dejar al robot CERCA y mirando al
+#  marcador: el encare fino lo hace la aproximacion ArUco, que va DENTRO
+#  del paso `grasp`. Por eso no hay pasos `aruco` sueltos: meterlos
+#  haria la aproximacion dos veces.
+#
+#  ANTES DE CORRER ESTO
+#  ====================
+#  1) Mapa y posiciones guardadas.
+#  2) Calibracion de pick Y de place para cada pieza, a la altura de
+#     plataforma que se use:
+#         ./scripts/tsummit.sh calibrate-grasp <pieza> 100 --action pick
+#         ./scripts/tsummit.sh calibrate-grasp <pieza> 100 --action place
+#     Sin la de place el paso de entrega aborta con INVALID_GOAL: el
+#     servidor NO deduce el soltado a partir del agarre.
+#  3) La pila preparada, con la MISMA altura de plataforma.
 # =====================================================================
 
 mission:
 
   name: reto2_kitting
 
+  # Mapa al que se atan las posiciones. Explicito a proposito: vacio
+  # cogeria el <mapa>.poses.yaml mas reciente, y cargar en silencio las
+  # posiciones de otro mapa manda al robot a coordenadas que no existen.
+  map: "maze-map"
+
+  vars:
+    pieza_verde: "rueda"
+    pieza_azul: "estrella"
+
   repeat: 1
-  stop_on_failure: true
+
+  # LOGICA DE FALLO del reto 2: si una pieza no aparece, NO se
+  # congela. Se anota en el log y se sigue con la siguiente
+  # coordenada. Por eso, y solo aqui, stop_on_failure va en false.
+  stop_on_failure: false
 
   steps:
 
@@ -41,146 +87,89 @@ mission:
       speed_percent: 30.0
       retries: 1
 
-    # =================================================================
-    # PIEZA VERDE:  ArUco 0  ->  ArUco 2
-    # =================================================================
+    # ================= PIEZA VERDE: ArUco 0 -> ArUco 2 ================
 
     - type: navigate
       name: ir_a_carga_verde
-      x: 0.80          # TODO: medir en pista
-      y: 0.00          # TODO
-      yaw_deg: 0.0     # TODO
+      pose: carga_0
       frame_id: map
       retries: 2
 
-    - type: aruco
-      name: aproximar_aruco_0
-      id: 0
-      stop_distance: 0.100
-      # Timeout de deteccion exigido por el reto.
-      timeout_sec: 10.0
-      retries: 0
-      on_failure: skip
-      skip_message: "Pieza Omitida"
-
-    - type: arm_pose
-      name: observar_pieza_verde
-      pose: observe
-      speed_percent: 30.0
-      retries: 1
-      on_failure: skip
-      skip_message: "Pieza Omitida"
-
-    - type: pick
+    - type: grasp
       name: tomar_pieza_verde
-      target_pose: pick_table
-      approach_height: 70.0
+      action: pick
+      object: "${pieza_verde}"
       retreat_pose: carry
       speed_percent: 25.0
       gripper_speed_percent: 40.0
-      retries: 0
-      on_failure: skip
-      skip_message: "Pieza Omitida"
+      retries: 1
+
+    - type: navigate
+      name: cruzar_a_entrega
+      pose: posicion_2
+      frame_id: map
+      retries: 2
 
     - type: navigate
       name: ir_a_entrega_verde
-      x: 1.60          # TODO
-      y: 0.00          # TODO
-      yaw_deg: 0.0     # TODO
+      pose: entrega_2
       frame_id: map
       retries: 2
 
-    - type: aruco
-      name: aproximar_aruco_2
-      id: 2
-      stop_distance: 0.100
-      timeout_sec: 10.0
-      retries: 0
-      on_failure: skip
-      skip_message: "Pieza Omitida"
-
-    - type: place
+    - type: grasp
       name: soltar_pieza_verde
-      target_pose: place_table
-      approach_height: 70.0
+      action: place
+      object: "${pieza_verde}"
       retreat_pose: home
       speed_percent: 25.0
       gripper_speed_percent: 40.0
-      retries: 0
-      on_failure: skip
-      skip_message: "Pieza Omitida"
+      retries: 1
 
-    # =================================================================
-    # PIEZA AZUL:  ArUco 1  ->  ArUco 3
-    # =================================================================
+    # ================= PIEZA AZUL: ArUco 1 -> ArUco 3 =================
 
     - type: navigate
-      name: volver_a_carga_azul
-      x: 0.80          # TODO
-      y: 0.50          # TODO
-      yaw_deg: 0.0     # TODO
+      name: volver_a_zona_de_carga
+      pose: posicion_1
       frame_id: map
       retries: 2
 
-    - type: aruco
-      name: aproximar_aruco_1
-      id: 1
-      stop_distance: 0.100
-      timeout_sec: 10.0
-      retries: 0
-      on_failure: skip
-      skip_message: "Pieza Omitida"
+    - type: navigate
+      name: ir_a_carga_azul
+      pose: carga_1
+      frame_id: map
+      retries: 2
 
-    - type: arm_pose
-      name: observar_pieza_azul
-      pose: observe
-      speed_percent: 30.0
-      retries: 1
-      on_failure: skip
-      skip_message: "Pieza Omitida"
-
-    - type: pick
+    - type: grasp
       name: tomar_pieza_azul
-      target_pose: pick_table
-      approach_height: 70.0
+      action: pick
+      object: "${pieza_azul}"
       retreat_pose: carry
       speed_percent: 25.0
       gripper_speed_percent: 40.0
-      retries: 0
-      on_failure: skip
-      skip_message: "Pieza Omitida"
+      retries: 1
 
     - type: navigate
-      name: ir_a_entrega_azul
-      x: 1.60          # TODO
-      y: 0.50          # TODO
-      yaw_deg: 0.0     # TODO
+      name: cruzar_a_entrega_azul
+      pose: posicion_2
       frame_id: map
       retries: 2
 
-    - type: aruco
-      name: aproximar_aruco_3
-      id: 3
-      stop_distance: 0.100
-      timeout_sec: 10.0
-      retries: 0
-      on_failure: skip
-      skip_message: "Pieza Omitida"
+    - type: navigate
+      name: ir_a_entrega_azul
+      pose: entrega_3
+      frame_id: map
+      retries: 2
 
-    - type: place
+    - type: grasp
       name: soltar_pieza_azul
-      target_pose: place_table
-      approach_height: 70.0
+      action: place
+      object: "${pieza_azul}"
       retreat_pose: home
       speed_percent: 25.0
       gripper_speed_percent: 40.0
-      retries: 0
-      on_failure: skip
-      skip_message: "Pieza Omitida"
+      retries: 1
 
-    # =================================================================
-    # FINISH
-    # =================================================================
+    # ============================ FINISH ==============================
 
     - type: arm_pose
       name: plegar_brazo_final
@@ -190,8 +179,6 @@ mission:
 
     - type: navigate
       name: estacionar_en_finish
-      x: 0.00          # TODO
-      y: 0.00          # TODO
-      yaw_deg: 0.0     # TODO
+      pose: finish
       frame_id: map
       retries: 2
