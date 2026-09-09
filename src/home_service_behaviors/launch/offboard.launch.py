@@ -144,12 +144,13 @@ def generate_launch_description():
         # El detector y el servidor de aproximacion corren en esta maquina.
         DeclareLaunchArgument(
             'lidar_to_front_bumper_m',
-            default_value='0.081',
-            description='Bumper -> centro de giro del LiDAR. Medido dos '
-                        'veces (cinta+scan, y cinta al borde + radio del '
-                        'X2). Alias legado para la geometria del '
-                        'pasillo; la seguridad usa TF laser->base_link y '
-                        'footprint.',
+            default_value='0.080',
+            description='Bumper -> centro de giro del LiDAR. Medido de '
+                        'punta a punta con measure_front_offset.py '
+                        '(rango 0.3803 - cinta 0.300), y corroborado '
+                        'por otros dos caminos dentro de 1.5 mm. Alias '
+                        'legado para la geometria del pasillo; la '
+                        'seguridad usa TF laser->base_link y footprint.',
         ),
         DeclareLaunchArgument(
             'blind_endgame_distance',
@@ -210,8 +211,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('align_yaw_hysteresis', default_value='1.6'),
         DeclareLaunchArgument(
-            'align_lateral_tolerance', default_value='0.05',
-            description='Tolerancia de centrado sobre el eje normal, m.',
+            'align_lateral_tolerance', default_value='0.035',
+            description='Tolerancia de centrado sobre el eje normal, m. '
+                        'DEBE ser <= lateral_tolerance (0.04), que es lo '
+                        'que exige la llegada: si es mas ancha, la '
+                        'alineacion entrega poses que la llegada no '
+                        'acepta y se acaba en SAFE_STOP.',
         ),
         DeclareLaunchArgument(
             'align_lateral_hysteresis', default_value='1.6'

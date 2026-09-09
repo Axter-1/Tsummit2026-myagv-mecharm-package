@@ -404,16 +404,23 @@ class ArucoLidarApproachServer(Node):
         # no resta este valor: calcula el borde de salida del rayo contra
         # chassis_footprint usando la TF completa del sensor.
         #
-        # 0.081 = bumper -> CENTRO DE GIRO del LiDAR, que es el origen de
+        # 0.080 = bumper -> CENTRO DE GIRO del LiDAR, que es el origen de
         # laser_frame y desde donde el sensor mide sus rangos.
         #
-        # Confirmado por dos caminos independientes que coinciden en 1 mm:
+        # TRES caminos independientes dentro de 1.5 mm:
         #
-        #   a) Cinta + scan. Bumper a 0.430 m del plano del ArUco 2, eco
-        #      frontal crudo a 0.511 desde el sensor -> 0.081.
-        #   b) Cinta al BORDE del LiDAR: 0.052 del bumper al primer punto
-        #      de la circunferencia. Sumando el radio del YDLIDAR X2
-        #      (~0.0298, carcasa de 59.5 mm) -> 0.082.
+        #   a) Cinta + scan contra el ArUco 2. Bumper a 0.430 m del
+        #      plano, eco frontal crudo a 0.511 -> 0.0810.
+        #   b) Cinta al BORDE del LiDAR: 0.052 del bumper al primer
+        #      punto de la circunferencia, mas el radio del YDLIDAR X2
+        #      (0.0298, carcasa de 59.5 mm) -> 0.0818.
+        #   c) scripts/measure_front_offset.py contra pared plana:
+        #      rango del sector frontal 0.3803, cinta bumper-pared
+        #      0.300 -> 0.0803.
+        #
+        # El (c) es el bueno porque no supone nada: mide de punta a
+        # punta la unica cantidad que el servidor usa. Los otros dos lo
+        # corroboran.
         #
         # El 0.09 anterior era un valor heredado sin medir.
         #
@@ -423,7 +430,7 @@ class ArucoLidarApproachServer(Node):
         # Ver el bloque de chassis_footprint.
         self.declare_parameter(
             'lidar_to_front_bumper_m',
-            0.081
+            0.080
         )
 
         # Cuanto mas lejos que el plano esperado se acepta un eco del
@@ -824,7 +831,19 @@ class ArucoLidarApproachServer(Node):
         self.declare_parameter('align_yaw_hysteresis', 1.6)
 
         # Tolerancia de CENTRADO sobre el eje normal, en metros.
-        self.declare_parameter('align_lateral_tolerance', 0.05)
+        #
+        # TIENE QUE SER <= lateral_tolerance (0.04), que es lo que exige
+        # la LLEGADA en tramo ciego. Con 0.05 la etapa se declaraba
+        # alineada con 5 cm de desvio y entregaba a APPROACH una pose
+        # que el criterio de llegada no podia aceptar nunca: el robot
+        # seguia empujando hacia delante buscando un centrado que ya no
+        # iba a mejorar, hasta chocar con el suelo de despeje y salir
+        # por SAFE_STOP con centred=False. Visto en pista:
+        # despeje=0.081, LiDAR=0.163, aligned=True, centred=False.
+        #
+        # Suelo alcanzable: min_lateral_speed * (latencia + periodo) =
+        # 0.035 * 0.32 = 0.011 m, asi que 0.035 sigue siendo holgado.
+        self.declare_parameter('align_lateral_tolerance', 0.035)
         self.declare_parameter('align_lateral_hysteresis', 1.6)
 
         # Si la etapa regula tambien la separacion al plano o la deja
@@ -1016,31 +1035,38 @@ class ArucoLidarApproachServer(Node):
         # real del LiDAR con sus vertices, incluyendo x/y/yaw del montaje
         # del sensor.
         #
-        # MORRO: 0.147, NO 0.188
+        # MORRO: 0.145, NO 0.188
         # ======================
         # El 0.188 heredado de la configuracion de Nav2 ponia el morro
-        # 4.2 cm mas adelante de donde esta. Cadena de medidas que lo
-        # corrige, sin ninguna suposicion sobre donde cae base_footprint
-        # dentro del chasis:
+        # 4.3 cm mas adelante de donde esta.
         #
-        #   TF leida en el robot        base_footprint -> laser_frame
-        #                               x = 0.065  (z = 0.080, yaw = pi)
-        #   Cinta al borde del LiDAR    morro -> primer punto de la
-        #                               circunferencia = 0.052
-        #   Radio del YDLIDAR X2        0.0298 (carcasa de 59.5 mm)
+        # Medido de punta a punta con scripts/measure_front_offset.py,
+        # que lee el sector frontal con la MISMA logica que este
+        # servidor y le resta una cinta. Robot de frente a pared plana:
         #
-        #   morro = 0.065 + 0.052 + 0.0298 = 0.147
+        #   TF base_footprint -> laser_frame   x = 0.065 (yaw = pi)
+        #   rango del sector frontal (+-6 deg) 0.3803, 20 barridos,
+        #                                      dispersion 0.0000
+        #   cinta morro -> pared               0.300
         #
-        # Corrobora el 0.081 de morro->centro del LiDAR que ya salia de
-        # reconciliar cinta y scan (ver lidar_to_front_bumper_m): dos
-        # caminos independientes, 1 mm de diferencia.
+        #   salida del rayo = 0.3803 - 0.300 = 0.080
+        #   morro           = 0.065 + 0.080  = 0.145
         #
-        # TRASERA: -0.183
-        # Largo total medido con cinta = 0.330 -> 0.147 - 0.330.
+        # No supone nada: ni donde cae base_footprint dentro del chasis,
+        # ni el radio de la carcasa del LiDAR. Ver lidar_to_front_bumper_m
+        # para los otros dos caminos que dan lo mismo dentro de 1.5 mm.
+        #
+        # TRASERA: -0.185
+        # Largo total medido con cinta = 0.330 -> 0.145 - 0.330.
         # O sea que base_footprint NO esta en el centro geometrico del
-        # chasis, sino 1.8 cm por delante. Medir media eslora (0.165) y
+        # chasis, sino 2 cm por delante. Medir media eslora (0.165) y
         # asumir simetria daba 0.100 de morro->LiDAR, que contradice las
-        # dos medidas directas.
+        # tres medidas directas.
+        #
+        # OJO AL PUNTO DE REFERENCIA: el morro es el punto MAS SALIENTE
+        # del robot -- lo que tocaria la pared primero --, no donde
+        # empieza la carroceria. Si algo sobresale (parachoques, ruedas,
+        # la base del brazo), manda eso.
         #
         # POR QUE IMPORTA -- ERA LA CAUSA DE LAS PARADAS CORTAS
         # =====================================================
@@ -1063,8 +1089,8 @@ class ArucoLidarApproachServer(Node):
         # (0.015). Sumar los dos era contar el margen dos veces.
         self.declare_parameter(
             'chassis_footprint',
-            [0.147, 0.130, 0.147, -0.130,
-             -0.183, -0.130, -0.183, 0.130]
+            [0.145, 0.130, 0.145, -0.130,
+             -0.185, -0.130, -0.185, 0.130]
         )
 
         # =========================================================
@@ -2497,6 +2523,30 @@ class ArucoLidarApproachServer(Node):
                 )
 
         # -------------------------------------------------
+        # La alineacion no puede entregar fuera de la banda de llegada
+        #
+        # ALIGN_PERPENDICULAR termina cuando el desvio lateral entra en
+        # align_lateral_tolerance. La LLEGADA, en tramo ciego, exige
+        # lateral_tolerance. Si la primera es mas ancha, hay una franja
+        # donde la etapa se da por buena y la llegada no se acepta
+        # jamas: el robot empuja hacia delante persiguiendo un centrado
+        # que ya no va a mejorar, hasta agotar el despeje del chasis.
+        # Sale por SAFE_STOP con aligned=True y centred=False.
+        # -------------------------------------------------
+        if self.pf('align_lateral_tolerance') > self.pf('lateral_tolerance'):
+
+            self.get_logger().error(
+                'align_lateral_tolerance='
+                f'{self.pf("align_lateral_tolerance"):.3f} es MAS ANCHA '
+                'que lateral_tolerance='
+                f'{self.pf("lateral_tolerance"):.3f}: la alineacion '
+                'entregara poses que la llegada no puede aceptar y la '
+                'aproximacion acabara en SAFE_STOP con centred=False. '
+                'Bajala a '
+                f'{self.pf("lateral_tolerance"):.3f} o menos.'
+            )
+
+        # -------------------------------------------------
         # El pasillo tiene que caber en la tolerancia de rumbo
         #
         # Dentro del pasillo se va RECTO al objetivo, y cerca del final
@@ -2531,6 +2581,83 @@ class ArucoLidarApproachServer(Node):
                 f'fuera de la normal, y ese error se paga como un giro '
                 f'en seco al final que saca el marcador del encuadre. '
                 f'Bajalo a {maximo:.3f} o menos.'
+            )
+
+    def check_stop_distance_reachable(self, stop_distance):
+        """Avisa si la parada pedida choca con el suelo de despeje.
+
+        La llegada se pide en distancia LiDAR-pared, pero quien corta es
+        el DESPEJE DEL CHASIS, que es otra magnitud: hay un poligono y
+        un sensor descentrado entre las dos. El rango minimo que la
+        seguridad tolera de frente es
+
+            salida_del_rayo + despeje_operativo
+
+        y por debajo de eso NINGUNA aproximacion puede terminar: la
+        parada segura salta antes. Con el footprint mal medido, esto era
+        exactamente lo que pasaba a 0.20 m sin que nada lo dijera.
+
+        Se comprueban DOS cosas, porque fallan por separado:
+
+          1. La parada pedida. Si esta por debajo del suelo, el goal es
+             imposible tal cual.
+          2. El objetivo del PERFIL DE FRENADO, que no es la parada
+             pedida sino stop_distance - final_braking_bias. Ese sesgo
+             existe para compensar la inercia, pero si apunta por debajo
+             del suelo el robot conduce hacia un punto ilegal y solo
+             puede llegar de pasada, mientras cruza la banda. Es fragil
+             por construccion y no se ve en ningun sitio.
+        """
+        laser_to_chassis = self.get_laser_to_chassis()
+
+        if laser_to_chassis is None:
+            # Sin TF todavia no se puede juzgar. No es un fallo: el
+            # bucle ya aborta con TF_ERROR si sigue faltando.
+            return
+
+        offset_x, offset_y, laser_yaw = laser_to_chassis
+
+        # Haz frontal del robot: +x del chasis, con el yaw del montaje
+        # ya aplicado por get_laser_to_chassis.
+        exit_distance = planner.ray_polygon_exit_distance(
+            (offset_x, offset_y), (1.0, 0.0), self.chassis_footprint
+        )
+
+        if exit_distance is None:
+            return
+
+        configured = self.pf('min_chassis_clearance')
+        clearance = (
+            configured if configured >= 0.0
+            else self.pf('min_front_clearance')
+        )
+        operational = clearance + self.pf('chassis_clearance_stop_margin')
+
+        min_range = exit_distance + operational
+
+        if stop_distance < min_range:
+            self.get_logger().error(
+                f'stop_distance={stop_distance:.3f} m es INALCANZABLE: '
+                f'el morro sale a {exit_distance:.3f} m del sensor y la '
+                f'parada segura exige {operational:.3f} m de despeje, '
+                f'asi que el rango frontal minimo es {min_range:.3f} m. '
+                'Este goal terminara en SAFE_STOP haga lo que haga el '
+                'control. Sube stop_distance, o revisa '
+                'chassis_footprint y min_front_clearance.'
+            )
+            return
+
+        brake_target_range = stop_distance - self.pf('final_braking_bias')
+
+        if brake_target_range < min_range:
+            self.get_logger().warn(
+                f'El perfil de frenado apunta a {brake_target_range:.3f} m '
+                f'(stop_distance {stop_distance:.3f} - '
+                f'final_braking_bias {self.pf("final_braking_bias"):.3f}), '
+                f'por debajo del rango minimo seguro {min_range:.3f} m. '
+                'La llegada solo puede declararse DE PASO por la banda; '
+                'si el robot no se asienta a tiempo, saltara la parada '
+                'segura. Baja final_braking_bias o sube stop_distance.'
             )
 
     def check_detection_freshness(self):
@@ -2769,6 +2896,7 @@ class ArucoLidarApproachServer(Node):
         yaw_tolerance = self.pf('heading_tolerance')
 
         self.check_tolerances(period)
+        self.check_stop_distance_reachable(stop_distance)
 
         self.get_logger().info(
             f'Starting target ID {target_id} '
@@ -4246,13 +4374,30 @@ class ArucoLidarApproachServer(Node):
                 emergency = self.pf('emergency_chassis_clearance')
                 hard_block = front_chassis_clearance < emergency
                 result.status = 'BLOCKED' if hard_block else 'SAFE_STOP'
+                # El mensaje lleva TODO lo que hace falta para saber por
+                # que se paro sin repetir la prueba de pista. Sin
+                # `centred` desglosado, una parada por desvio lateral y
+                # una por obstaculo real se leen igual; y sin
+                # `pedido` no se sabe si el robot se paso de largo o si
+                # ni siquiera llego.
+                centred_detail = (
+                    f'camara={center_error:+.3f} '
+                    f'(tol {self.pf("final_camera_center_tolerance"):.3f})'
+                    if detection is not None and not angular_frozen else
+                    f'lateral_odom={lateral:+.3f} m '
+                    f'(tol {self.pf("lateral_tolerance"):.3f}, sin imagen)'
+                )
+
                 result.message = (
                     f'{"Obstaculo" if hard_block else "Parada segura"}: '
                     f'despeje chasis={front_chassis_clearance:.3f} m '
                     f'(operativo {operational_clearance:.3f} m, '
                     f'minimo fisico {clearance:.3f} m), '
                     f'LiDAR-pared={front:.3f} m, '
-                    f'aligned={aligned}, centred={centred}'
+                    f'pedido={stop_distance:.3f} m, '
+                    f'aligned={aligned} '
+                    f'(yaw={math.degrees(yaw_error):+.1f} deg), '
+                    f'centred={centred} [{centred_detail}]'
                 )
                 result.final_distance = front if front is not None else -1.0
                 result.final_chassis_clearance = front_chassis_clearance
