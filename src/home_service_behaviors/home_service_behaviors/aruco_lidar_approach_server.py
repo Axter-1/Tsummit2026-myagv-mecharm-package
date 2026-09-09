@@ -475,27 +475,28 @@ class ArucoLidarApproachServer(Node):
         # es un obstaculo de verdad y tiene que seguir contando, porque
         # es lo unico que dispara la parada de seguridad.
         #
-        # DESACTIVADA POR DEFECTO (0.0), y no por precaucion vaga.
+        # DESACTIVADA POR DEFECTO (0.0), pero el motivo YA NO ES EL DE
+        # ANTES.
         #
         # La expectativa sale de la geometria de la CAMARA, y la camara
-        # esta mal escalada ahora mismo. Medido con cinta: bumper a
-        # 0.43 m del plano del ArUco 2. Reconciliando con el LiDAR crudo
-        # (0.511 desde el sensor) sale base_link->marcador = 0.576,
-        # mientras la camara reporta 0.449. Se queda corta 0.127 m.
+        # estuvo mal escalada mucho tiempo: marker_length decia 0.08
+        # porque es lo que pone la hoja del organizador, y el marcador
+        # impreso mide 0.075 con calibre. Un 6% de escala es un 6% de
+        # error de distancia, porque la pose de un ArUco escala LINEAL
+        # con el tamano supuesto. Con esa expectativa mala la banda
+        # rechazaba el eco bueno: tiraba la medida correcta por fiarse
+        # de la equivocada.
         #
-        # Como la distancia estimada de un ArUco escala con
-        # marker_length, esa proporcion dice que el marcador REAL mide
-        # unos 10.3 cm, no los 0.08 configurados.
+        # Corregido marker_length a 0.075, camara y LiDAR coinciden
+        # dentro de 1 mm (verificado con check_marker_scale.py a 30 cm:
+        # 0.2965 contra 0.2962). O sea que el bloqueo se ha levantado y
+        # esto ya se PUEDE encender.
         #
-        # Con esa expectativa mala la banda calcula un limite de 0.464 y
-        # RECHAZA el eco bueno de 0.511: tira la medida correcta por
-        # fiarse de la equivocada. Encenderla antes de recalibrar
-        # empeora las cosas.
-        #
-        # Orden correcto: medir el marcador con calibre, corregir
-        # marker_length y SOLO entonces poner esto a un valor pequeno. Hasta
-        # ahi, si el sector
-        # midiera el fondo, el aborto por STALLED lo dice en 2 s.
+        # Sigue en 0.0 porque encenderlo es un cambio de comportamiento
+        # que nadie ha probado en pista todavia, no porque haga dano.
+        # Antes de tocarlo: comprobar que el marcador de la competicion
+        # tambien mide 0.075 -- si el organizador trae los suyos, pueden
+        # ser 0.08 de verdad.
         self.declare_parameter(
             'lidar_front_depth_band',
             0.0

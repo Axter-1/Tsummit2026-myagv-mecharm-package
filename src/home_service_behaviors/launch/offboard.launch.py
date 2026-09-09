@@ -47,7 +47,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'camera_info_topic', default_value='/camera/camera_info'
         ),
-        DeclareLaunchArgument('marker_length', default_value='0.08'),
+        DeclareLaunchArgument('marker_length', default_value='0.075'),
         DeclareLaunchArgument(
             'scan_topic',
             default_value='/scan_filtered',

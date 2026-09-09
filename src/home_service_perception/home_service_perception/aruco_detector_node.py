@@ -53,11 +53,26 @@ class ArucoDetector(Node):
             '/aruco/image_annotated'
         )
 
-        # Tamano real del lado impreso del marcador, en metros.
-        # En esta competencia los ArUco se imprimen a 8 cm.
+        # Tamano real del lado impreso del marcador, en metros: el
+        # cuadrado NEGRO, borde exterior incluido, zona blanca no.
+        #
+        # 0.075 MEDIDO CON CALIBRE, no los 0.08 que dice la hoja del
+        # organizador (Contexto/ArUcos_6x6_250_ID0-9_8cm_Carta.pdf). La
+        # impresora no saco el 1:1, y un 6% de escala se traduce
+        # directamente en un 6% de error de distancia: la pose de un
+        # ArUco escala LINEAL con el tamano que se le supone.
+        #
+        # Confirmado contra el LiDAR con scripts/check_marker_scale.py:
+        # a 30 cm de morro a pared, con 0.08 la camara leia 15 mm de mas
+        # y el tamano despejado daba 7.49 cm. Con 0.075 las dos medidas
+        # coinciden dentro de 1 mm.
+        #
+        # OJO EN PISTA: si el organizador pone SUS marcadores, pueden
+        # medir 8.0 de verdad. Volver a medir con calibre antes de
+        # competir y ajustar, o la distancia se ira un 6%.
         self.declare_parameter(
             'marker_length',
-            0.08
+            0.075
         )
 
         # Alias obsoleto: si es > 0 tiene prioridad sobre marker_length.

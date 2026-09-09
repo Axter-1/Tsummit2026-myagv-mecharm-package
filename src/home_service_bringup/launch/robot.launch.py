@@ -58,7 +58,7 @@ def generate_launch_description():
         # frame con cv2.imencode solo añade carga CPU. El modo distribuido
         # lo activa explicitamente desde run_robot_routine.sh.
         DeclareLaunchArgument("camera_publish_compressed", default_value="false"),
-        DeclareLaunchArgument("marker_length", default_value="0.08"),
+        DeclareLaunchArgument("marker_length", default_value="0.075"),
         # Montaje de la camara respecto a base_link, en metros y radianes.
         # SIN MEDIR: son estimaciones. Un error aqui desplaza el marcador
         # en odom y la aproximacion se para donde no es.

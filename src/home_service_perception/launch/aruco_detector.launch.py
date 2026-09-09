@@ -13,7 +13,7 @@ def generate_launch_description():
         'use_compressed', default_value='true'
     )
     marker_length_arg = DeclareLaunchArgument(
-        'marker_length', default_value='0.08'
+        'marker_length', default_value='0.075'
     )
 
     aruco_detector = Node(

@@ -93,7 +93,7 @@ def generate_launch_description():
         ),
 
         # --- Hardware ---
-        DeclareLaunchArgument('marker_length', default_value='0.08'),
+        DeclareLaunchArgument('marker_length', default_value='0.075'),
         DeclareLaunchArgument('camera_source', default_value='nvargus'),
         DeclareLaunchArgument('arm_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument(
