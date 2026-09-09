@@ -199,6 +199,21 @@ def test_frenado_no_corta_el_avance_por_la_tolerancia_visual():
     assert v >= 0.07
 
 
+def test_distancia_equivalente_saturada_no_usa_margen_fisico():
+    """El perfil compensado sigue avanzando aunque su equivalente sea corto.
+
+    Con 0.09 m/s y 0.25 m/s2, la distancia equivalente saturada es 0.0162
+    m. No es que falten 16 mm fisicos: codifica "mantener 0.09 m/s". Si se
+    compara contra el margen fisico de 22 mm, el controlador se inmoviliza
+    aun viendo un objetivo a metros de distancia.
+    """
+    equivalent = (0.09 * 0.09) / (2.0 * 0.25)
+    assert profile_speed(
+        equivalent, 0.09, 0.25, v_min=0.07,
+        tolerance=0.0, stop_margin=0.0,
+    ) == 0.09
+
+
 def test_distancia_final_usa_grupo_cercano_y_no_un_haz_aislado():
     """Un haz aislado no debe cambiar la distancia al corregir lateral."""
     distancia = robust_nearest(

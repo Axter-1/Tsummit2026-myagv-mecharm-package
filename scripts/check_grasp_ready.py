@@ -26,7 +26,7 @@ TOPICS = (
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--timeout", type=float, default=0.2)
+    parser.add_argument("--timeout", type=float, default=0.5)
     args = parser.parse_args()
 
     rclpy.init()
@@ -38,21 +38,32 @@ def main() -> int:
     )
     missing = []
     try:
+        ready_clients = []
         for name, action_type in clients:
             client = ActionClient(node, action_type, name)
             if client.wait_for_server(timeout_sec=args.timeout):
-                status_topic = f"{name}/_action/status"
-                server_count = len(node.get_publishers_info_by_topic(status_topic))
-                if server_count == 1:
-                    print(f"  OK    {name}")
-                else:
-                    print(
-                        f"  FALTA {name}: {server_count} servidores detectados "
-                        "(se requiere exactamente uno)"
-                    )
-                    missing.append(name)
+                ready_clients.append((name, client))
             else:
                 print(f"  FALTA {name}")
+                missing.append(name)
+
+        # wait_for_server() puede completar antes de que el grafo DDS haya
+        # recibido el endpoint /_action/status. Procesar eventos un ciclo
+        # corto evita declarar un falso "0 servidores" en modo distribuido.
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.05)
+
+        for name, _client in ready_clients:
+            status_topic = f"{name}/_action/status"
+            server_count = len(node.get_publishers_info_by_topic(status_topic))
+            if server_count == 1:
+                print(f"  OK    {name}")
+            else:
+                print(
+                    f"  FALTA {name}: {server_count} servidores detectados "
+                    "(se requiere exactamente uno)"
+                )
                 missing.append(name)
 
         deadline = time.monotonic() + args.timeout

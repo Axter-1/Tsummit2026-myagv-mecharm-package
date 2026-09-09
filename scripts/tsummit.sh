@@ -530,7 +530,7 @@ require_prepared_grasp() {
             "${piece}" "${table_mm}" >&2
         exit 1
     fi
-    if ! in_container 'python3 /workspace/scripts/check_grasp_ready.py --timeout 0.2 >/dev/null'; then
+    if ! in_container 'python3 /workspace/scripts/check_grasp_ready.py --timeout 0.5'; then
         die "La infraestructura requerida no esta disponible. Repite la preparacion del portatil y de la Jetson."
     fi
 }

@@ -3126,6 +3126,17 @@ class ArucoLidarApproachServer(Node):
                     v_max=limits['max_linear'],
                 )
 
+                # `bt` no es la distancia fisica al marcador: es la
+                # distancia equivalente de la velocidad compensada. Si se
+                # compara de nuevo con la tolerancia o stop_margin fisicos,
+                # el valor saturado (v_max^2 / 2a) puede quedar por debajo
+                # de ambos incluso a varios metros. Eso ordenaba vx=vy=0
+                # con LiDAR=3.076 m y objetivo=0.090 m. La compensacion ya
+                # contiene el margen de parada; para este perfil solo se
+                # detiene cuando bt <= 0.
+                limits['distance_tolerance'] = 0.0
+                limits['stop_margin'] = 0.0
+
                 # Cerca del objetivo el CAMINO manda -- su ultimo tramo
                 # acaba en stop_distance del marcador POR GEOMETRIA de
                 # camara, asi que `remaining` (del carrot) llega a cero
