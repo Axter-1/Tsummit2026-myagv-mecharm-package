@@ -808,6 +808,25 @@ reto4() {
     confirm_motion
     say "Reto 4 — Laberinto"
     ensure_container
+
+    # El laberinto no usa ni el brazo ni la aproximacion por ArUco, y
+    # dejarlos vivos hace dos daños concretos:
+    #
+    #   1. twist_mux da prioridad 100 a /cmd_vel_aruco contra 50 a la
+    #      navegacion. Un servidor de aproximacion publicando -- aunque
+    #      sean ceros -- BLOQUEA a Nav2 durante su timeout de 0.5 s.
+    #   2. En la Nano cada nodo de mas le quita nucleo a slam_toolbox,
+    #      que es justo lo que produce scans corruptos y paredes dobles.
+    if is_running '[o]bject_grasp_server'; then
+        printf 'Parando el servidor de agarre: el laberinto no lo usa.\n'
+        stop grasp
+    fi
+    if is_running '[a]ruco_lidar_approach_server'; then
+        printf 'Parando la aproximacion ArUco: su /cmd_vel_aruco tiene\n'
+        printf 'prioridad sobre la navegacion en twist_mux.\n'
+        stop approach
+    fi
+
     routine base
     sleep 3
 

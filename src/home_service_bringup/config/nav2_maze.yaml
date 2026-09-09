@@ -154,8 +154,35 @@ controller_server:
       # --- Limites de velocidad (mecanum) ---
       min_vel_x: -0.10
       max_vel_x: 0.18
-      min_vel_y: -0.14
-      max_vel_y: 0.14
+      # LA PLACA SE QUEDA A CERO CON LOS TRES EJES NO NULOS
+      #
+      # Medido en el robot, ventanas de 2 s sobre /odom (la tabla
+      # completa esta en approach_planner.holonomic_command):
+      #
+      #     avance + giro      0.302 m / 0.273 rad
+      #     lateral + giro     0.217 m / 0.277 rad
+      #     avance + lateral   0.271 m
+      #     LOS TRES           0.000 m / 0.000 rad   <-- ni un mm
+      #
+      # No es saturacion: a cualquier magnitud da cero. Y DWB muestrea
+      # los tres ejes a la vez, asi que ordenaba combinaciones que la
+      # base NO EJECUTA. El robot hacia un subconjunto del plan mientras
+      # el controlador creia estar describiendo la curva completa: de
+      # ahi que acabara donde no tocaba, contra paredes que el LiDAR
+      # veia perfectamente.
+      #
+      # La aproximacion por ArUco resuelve esto multiplexando (ciclo de
+      # giro puro o de traslacion pura). Nav2 no tiene nada equivalente
+      # y entre el y la base solo hay un twist_mux, que selecciona pero
+      # no modifica. Asi que aqui se renuncia al eje lateral y el
+      # laberinto se navega como un diferencial: vx + wz, dos ejes, que
+      # la base si ejecuta.
+      #
+      # Se pierde la correccion lateral sin rotar. A cambio, el robot
+      # hace lo que se le manda, que en un pasillo de 60 cm importa
+      # bastante mas.
+      min_vel_y: 0.0
+      max_vel_y: 0.0
       min_vel_theta: -0.40
       max_vel_theta: 0.40
       min_speed_xy: 0.0
@@ -173,7 +200,9 @@ controller_server:
       # vy_samples > 0 habilita el desplazamiento lateral: es lo que
       # permite corregir dentro del pasillo sin rotar.
       vx_samples: 12
-      vy_samples: 12
+      # 1 unica muestra y el rango de vy clavado a cero: nunca sale una
+      # trayectoria con los tres ejes activos.
+      vy_samples: 1
       vtheta_samples: 10
 
       # 1.4 s a 0.18 m/s mira ~25 cm adelante: suficiente en un
@@ -190,9 +219,34 @@ controller_server:
 
       # --- Criticos ---
       # SIN PathAlign ni GoalAlign: son los que fuerzan a girar el morro.
-      critics: ["Oscillation", "BaseObstacle", "PathDist", "GoalDist", "RotateToGoal"]
-      BaseObstacle.scale: 0.05
-      BaseObstacle.sum_scores: false
+      # ObstacleFootprint, NO BaseObstacle
+      #
+      # BaseObstacleCritic puntua con el coste de UNA celda: la del
+      # centro del robot. El cuerpo puede solaparse con la pared
+      # mientras el centro este en celda no letal, y la unica
+      # proteccion que quedaba era la inflacion: 0.16 contra un radio
+      # inscrito de 0.130, o sea 3 cm para absorber deriva de AMCL,
+      # ruido del X2 y latencia.
+      #
+      # Y con BaseObstacle.scale 0.05 contra PathDist 34.0, ese coste
+      # pesaba 1 parte entre 680: seguir el camino ganaba siempre.
+      #
+      # ObstacleFootprintCritic comprueba el POLIGONO completo y
+      # descarta la trayectoria si colisiona, en vez de puntuarla bajo.
+      # Es la diferencia entre "esta trayectoria es peor" y "esta
+      # trayectoria es imposible".
+      #
+      # CUESTA CPU: comprueba el poligono en cada pose de cada
+      # trayectoria. Con sim_time 1.4 y granularidad 0.03 son ~47 poses
+      # por trayectoria y 120 trayectorias (12 x 1 x 10). En la Nano eso
+      # se nota. short_circuit_trajectory_evaluation ya esta en true, que
+      # es lo que lo hace viable. SI el controlador no llega a su
+      # frecuencia, baja vx_samples a 8 y vtheta_samples a 8 antes de
+      # tocar nada mas: se ve en
+      #   ros2 topic hz /local_plan
+      critics: ["Oscillation", "ObstacleFootprint", "PathDist", "GoalDist", "RotateToGoal"]
+      ObstacleFootprint.scale: 0.5
+      ObstacleFootprint.sum_scores: false
       PathDist.scale: 34.0
       GoalDist.scale: 20.0
       # Peso bajo: solo actua en el tramo final y con tolerancia 3.14
@@ -223,9 +277,20 @@ local_costmap:
       resolution: 0.05
       transform_tolerance: 0.3
 
-      # Poligono real del myAGV (base_footprint), con ~1.5 cm de margen.
-      # Radio inscrito resultante: 0.130 m.
-      footprint: "[[0.188, 0.130], [0.188, -0.130], [-0.174, -0.130], [-0.174, 0.130]]"
+      # Poligono del myAGV (base_footprint) con ~1.5 cm de margen.
+      #
+      # MEDIDO, no heredado. El 0.188 anterior ponia el morro 4.3 cm por
+      # delante de donde esta. Cadena: TF base_footprint -> laser_frame
+      # da x=0.065; measure_front_offset.py contra pared plana da 0.080
+      # de salida del rayo -> morro en 0.145. Con el margen, 0.160.
+      # Trasera: 0.145 - 0.330 de largo = -0.185, con margen -0.200.
+      #
+      # Importa mas que antes: ObstacleFootprint comprueba ESTE poligono
+      # pose a pose, asi que un footprint mal medido ya no solo infla de
+      # mas, decide colisiones.
+      #
+      # Radio inscrito: 0.130 m (la semianchura, SIN verificar).
+      footprint: "[[0.160, 0.130], [0.160, -0.130], [-0.200, -0.130], [-0.200, 0.130]]"
       footprint_padding: 0.0
 
       plugins: ["obstacle_layer", "inflation_layer"]
@@ -283,7 +348,7 @@ global_costmap:
       # no libre ni ocupado. El planificador lo cruza con allow_unknown.
       track_unknown_space: true
 
-      footprint: "[[0.188, 0.130], [0.188, -0.130], [-0.174, -0.130], [-0.174, 0.130]]"
+      footprint: "[[0.160, 0.130], [0.160, -0.130], [-0.200, -0.130], [-0.200, 0.130]]"
       footprint_padding: 0.0
 
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
