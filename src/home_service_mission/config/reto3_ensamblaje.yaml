@@ -98,6 +98,8 @@ mission:
 
     - type: grasp
       name: tomar_pieza_0
+      # ArUco de la ESTACION, no de la pieza.
+      aruco: 0
       action: pick
       object: "${pieza_0}"
       retreat_pose: carry
@@ -113,6 +115,10 @@ mission:
 
     - type: grasp
       name: apilar_pieza_0
+      # El reglamento NO asigna ArUco a la base de montaje. Si en
+      # pista lo hay, ponlo aqui: sin el, el servidor lo deduce del
+      # catalogo y puede irse al sitio equivocado.
+      # aruco: <id>
       action: place
       object: "${pieza_0}"
       retreat_pose: home
@@ -130,6 +136,8 @@ mission:
 
     - type: grasp
       name: tomar_pieza_1
+      # ArUco de la ESTACION, no de la pieza.
+      aruco: 1
       action: pick
       object: "${pieza_1}"
       retreat_pose: carry
@@ -145,6 +153,10 @@ mission:
 
     - type: grasp
       name: apilar_pieza_1
+      # El reglamento NO asigna ArUco a la base de montaje. Si en
+      # pista lo hay, ponlo aqui: sin el, el servidor lo deduce del
+      # catalogo y puede irse al sitio equivocado.
+      # aruco: <id>
       action: place
       object: "${pieza_1}"
       retreat_pose: home
@@ -162,6 +174,8 @@ mission:
 
     - type: grasp
       name: tomar_pieza_2
+      # ArUco de la ESTACION, no de la pieza.
+      aruco: 2
       action: pick
       object: "${pieza_2}"
       retreat_pose: carry
@@ -177,6 +191,10 @@ mission:
 
     - type: grasp
       name: apilar_pieza_2
+      # El reglamento NO asigna ArUco a la base de montaje. Si en
+      # pista lo hay, ponlo aqui: sin el, el servidor lo deduce del
+      # catalogo y puede irse al sitio equivocado.
+      # aruco: <id>
       action: place
       object: "${pieza_2}"
       retreat_pose: home

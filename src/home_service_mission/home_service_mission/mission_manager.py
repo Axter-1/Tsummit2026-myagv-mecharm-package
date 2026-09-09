@@ -66,6 +66,16 @@ class MissionManager(Node):
             []
         )
 
+        # Mapa (y por tanto juego de posiciones) sobre el que correr.
+        # Vacio = el que declare la mision. Permite tener un mapa por
+        # reto sin duplicar los YAML:
+        #
+        #   map_name:=pista_reto1
+        self.declare_parameter(
+            'map_name',
+            ''
+        )
+
         if not mission_file:
             raise RuntimeError(
                 'Parameter "mission_file" is empty.'
@@ -247,6 +257,23 @@ class MissionManager(Node):
         # falta una posicion es mejor enterarse antes de mover el robot
         # que a mitad de rutina con una pieza en la pinza.
         # ---------------------------------------------------------
+        # El parametro manda sobre lo que diga el YAML: es lo que deja
+        # correr la misma mision con el mapa de cada reto sin duplicar
+        # ficheros. Se resuelve AQUI y no dentro de
+        # _resolve_poses_file para que ese siga siendo geometria pura
+        # sobre self.mission, sin leer parametros del nodo.
+        forzado = str(
+            self.get_parameter('map_name').value or ''
+        ).strip()
+
+        if forzado:
+            self.mission = dict(self.mission)
+            self.mission['map'] = forzado
+            self.mission.pop('poses_file', None)
+            self.get_logger().info(
+                f'Mapa forzado por parametro: "{forzado}"'
+            )
+
         self.poses_file = self._resolve_poses_file(mission_file)
         self.poses = self._load_poses(self.poses_file)
 
@@ -1093,6 +1120,14 @@ class MissionManager(Node):
             step.get('object', step.get('piece', 'auto'))
         ).strip().lower()
 
+        # ArUco de la ESTACION. En los retos del T-SUMMIT los
+        # marcadores 0..3 marcan sitios (recogida verde, entrega verde,
+        # recogida azul, entrega azul), no piezas: sin esto el servidor
+        # lo deduce de `aruco_to_object` y se va al marcador equivocado.
+        goal.marker_id = int(
+            step.get('aruco', step.get('marker_id', -1))
+        )
+
         goal.approach_height = float(
             step.get('approach_height', 0.0)
         )
@@ -1129,7 +1164,8 @@ class MissionManager(Node):
         )
         self.get_logger().info(
             f'GRASP/{operation.upper()}: {name} '
-            f'(pieza "{goal.target_pose_name}")'
+            f'(pieza "{goal.target_pose_name}", '
+            f'ArUco {goal.marker_id if goal.marker_id >= 0 else "del catalogo"})'
         )
 
         ok, result = self._send_arm_goal(

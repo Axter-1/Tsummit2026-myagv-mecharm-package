@@ -21,6 +21,17 @@
 # "pick" | "place"
 string operation
 
+# ArUco de la UBICACION a la que aproximarse. -1 = deducirlo del
+# catalogo por la pieza, que es el comportamiento antiguo.
+#
+# POR QUE HIZO FALTA: en los retos del T-SUMMIT los ArUco 0..3 marcan
+# ESTACIONES (recogida verde, entrega verde, recogida azul, entrega
+# azul), no piezas. Deducir el marcador de la pieza via
+# `aruco_to_object` mandaba el robot a la estacion equivocada: con
+# operation=pick y la pieza "rueda" se iba al ArUco 3 aunque la
+# recogida estuviese en el 0.
+int32 marker_id -1
+
 string target_pose_name
 
 float64[] target_coords

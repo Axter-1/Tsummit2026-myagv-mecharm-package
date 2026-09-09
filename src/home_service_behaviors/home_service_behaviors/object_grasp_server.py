@@ -1033,6 +1033,13 @@ class ObjectGraspServer(Node):
         requested = (req.target_pose_name or "auto").strip().lower()
         marker_id = None
 
+        # ArUco pedido explicitamente por quien invoca. En los retos del
+        # T-SUMMIT los marcadores 0..3 son ESTACIONES, no piezas, asi
+        # que deducirlos del catalogo manda el robot al sitio
+        # equivocado: con la pieza "rueda" se iba al ArUco 3 aunque la
+        # recogida estuviese en el 0. -1 = deducir, como antes.
+        pedido_marker = int(getattr(req, "marker_id", -1))
+
         if requested in ("", "auto"):
             self._feedback(goal_handle, "APPROACH")
             self.get_logger().info(
@@ -1058,10 +1065,20 @@ class ObjectGraspServer(Node):
                     f"Disponibles: {sorted(self.specs)}"
                 )
             # ID del marcador asociado a esa pieza (el primero que haya).
+            # Solo como respaldo: si el goal trae marker_id, manda ese.
             for mid, name in sorted(self.aruco_to_object.items()):
                 if name == key:
                     marker_id = mid
                     break
+
+        if pedido_marker >= 0:
+            if marker_id is not None and marker_id != pedido_marker:
+                self.get_logger().info(
+                    f"ArUco {pedido_marker} pedido explicitamente; "
+                    f"ignoro el {marker_id} que deducia el catalogo "
+                    f"para '{key}'."
+                )
+            marker_id = pedido_marker
 
         spec = self.specs_by_operation[operation].get(key)
         if spec is None:

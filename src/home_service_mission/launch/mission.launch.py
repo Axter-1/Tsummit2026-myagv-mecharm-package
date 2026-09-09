@@ -67,6 +67,18 @@ def generate_launch_description():
         )
     )
 
+    # Mapa sobre el que correr, y con el las posiciones guardadas.
+    # Vacio = el que declare la mision.
+    map_name_arg = (
+        DeclareLaunchArgument(
+            'map_name',
+            default_value='',
+            description=(
+                'Nombre del mapa; usa <mapa>.poses.yaml de maps/'
+            )
+        )
+    )
+
     mission_manager = Node(
         package=(
             'home_service_mission'
@@ -95,6 +107,9 @@ def generate_launch_description():
                         LaunchConfiguration('mission_vars'),
                         value_type=List[str],
                     ),
+
+                'map_name':
+                    LaunchConfiguration('map_name'),
             }
         ]
     )
@@ -103,5 +118,6 @@ def generate_launch_description():
         mission_file_arg,
         use_sim_time_arg,
         mission_vars_arg,
+        map_name_arg,
         mission_manager,
     ])

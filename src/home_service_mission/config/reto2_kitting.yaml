@@ -97,6 +97,8 @@ mission:
 
     - type: grasp
       name: tomar_pieza_verde
+      # ArUco de la ESTACION, no de la pieza.
+      aruco: 0
       action: pick
       object: "${pieza_verde}"
       retreat_pose: carry
@@ -118,6 +120,8 @@ mission:
 
     - type: grasp
       name: soltar_pieza_verde
+      # ArUco de la ESTACION, no de la pieza.
+      aruco: 2
       action: place
       object: "${pieza_verde}"
       retreat_pose: home
@@ -141,6 +145,8 @@ mission:
 
     - type: grasp
       name: tomar_pieza_azul
+      # ArUco de la ESTACION, no de la pieza.
+      aruco: 1
       action: pick
       object: "${pieza_azul}"
       retreat_pose: carry
@@ -162,6 +168,8 @@ mission:
 
     - type: grasp
       name: soltar_pieza_azul
+      # ArUco de la ESTACION, no de la pieza.
+      aruco: 3
       action: place
       object: "${pieza_azul}"
       retreat_pose: home

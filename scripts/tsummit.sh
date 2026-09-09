@@ -753,12 +753,15 @@ run_reto() {
     local numero="$1" nombre="$2" fichero="$3"; shift 3
 
     local table_mm="${PREPARE_GRASP_DEFAULT_TABLE_MM}"
-    local vars=()
+    local mapa="" vars=()
 
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --table-height|--height)
                 table_mm="${2:?falta valor para --table-height}"; shift 2 ;;
+            # Mapa del reto. Cada zona se mapea aparte y sus posiciones
+            # viven en <mapa>.poses.yaml, junto al mapa.
+            --map|--mapa) mapa="${2:?falta valor para --map}"; shift 2 ;;
             --pieza-*|--piece-*)
                 # --pieza-verde poste  ->  pieza_verde=poste
                 local clave="${1#--}"
@@ -780,9 +783,12 @@ run_reto() {
         lista="${lista:+${lista},}'${v}'"
     done
 
+    [ -n "${mapa}" ] && printf '  mapa: %s\n' "${mapa}"
+
     in_container_interactive "ros2 launch home_service_mission mission.launch.py \
         mission_file:=/workspace/src/home_service_mission/config/${fichero} \
         use_sim_time:=false \
+        map_name:='${mapa}' \
         mission_vars:=\"[${lista}]\""
 }
 
@@ -1114,7 +1120,7 @@ T-SUMMIT Challenge — consola unica
     reto2 [opciones]        Kitting: mision completa       (ALLOW_MOTION=1)
     reto3 [opciones]        Ensamblaje: mision completa    (ALLOW_MOTION=1)
     reto4                   Laberinto: SLAM en vivo + auto-navega (ALLOW_MOTION=1)
-      opciones de reto1/2/3:  --table-height <mm>
+      opciones de reto1/2/3:  --map <nombre>  --table-height <mm>
                               --pieza-verde <p>  --pieza-azul <p>   (reto 1 y 2)
                               --pieza-0 <p> --pieza-1 <p> --pieza-2 <p>  (reto 3)
                             MAP=<archivo.yaml> -> AMCL sobre mapa guardado en vez de SLAM

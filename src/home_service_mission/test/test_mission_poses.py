@@ -334,3 +334,105 @@ def test_los_retos_reales_solo_usan_tipos_de_paso_conocidos():
 
         for paso in mission["steps"]:
             assert paso["type"] in conocidos, (ruta, paso["type"])
+
+
+# ---------------------------------------------------------------------
+# ArUco de estacion en los pasos de grasp
+# ---------------------------------------------------------------------
+
+def test_los_retos_1_y_2_aproximan_al_aruco_de_la_ESTACION():
+    """El fallo que esto fija: los ArUco 0..3 marcan SITIOS, no piezas.
+
+    Sin `aruco:` en el paso, object_grasp_server deduce el marcador de
+    `aruco_to_object` (1->engranaje, 2->poste, 3->rueda) y se va a la
+    estacion equivocada: con la pieza "rueda" iria al ArUco 3 aunque la
+    recogida este en el 0.
+
+    Secuencia obligatoria del reglamento:
+        Verde  ArUco 0 -> ArUco 2
+        Azul   ArUco 1 -> ArUco 3
+    """
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    esperado = [
+        ("tomar_pieza_verde", "pick", 0),
+        ("soltar_pieza_verde", "place", 2),
+        ("tomar_pieza_azul", "pick", 1),
+        ("soltar_pieza_azul", "place", 3),
+    ]
+
+    for nombre in ("reto1_clasificacion", "reto2_kitting"):
+
+        ruta = os.path.join(raiz, "config", f"{nombre}.yaml")
+        with open(ruta, "r", encoding="utf-8") as handle:
+            mission = yaml.safe_load(handle)["mission"]
+
+        grasps = [p for p in mission["steps"] if p["type"] == "grasp"]
+
+        assert [
+            (p["name"], p["action"], p["aruco"]) for p in grasps
+        ] == esperado, nombre
+
+
+def test_el_reto_3_recoge_del_aruco_0_al_2_en_ese_orden():
+    """Del reglamento, textual: "del ArUco 0 al 2, en ese orden"."""
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ruta = os.path.join(raiz, "config", "reto3_ensamblaje.yaml")
+
+    with open(ruta, "r", encoding="utf-8") as handle:
+        mission = yaml.safe_load(handle)["mission"]
+
+    picks = [
+        p for p in mission["steps"]
+        if p["type"] == "grasp" and p["action"] == "pick"
+    ]
+
+    assert [p["aruco"] for p in picks] == [0, 1, 2]
+
+    # La base de montaje no tiene ArUco asignado por el reglamento, asi
+    # que los place NO deben inventarse uno.
+    places = [
+        p for p in mission["steps"]
+        if p["type"] == "grasp" and p["action"] == "place"
+    ]
+
+    assert all("aruco" not in p for p in places)
+
+
+def test_ningun_paso_de_grasp_se_queda_sin_pieza():
+    import glob
+
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    for ruta in sorted(glob.glob(os.path.join(raiz, "config", "reto*.yaml"))):
+        with open(ruta, "r", encoding="utf-8") as handle:
+            mission = yaml.safe_load(handle)["mission"]
+
+        for paso in mission["steps"]:
+            if paso["type"] != "grasp":
+                continue
+            assert paso.get("object"), (ruta, paso.get("name"))
+            assert paso["action"] in ("pick", "place"), ruta
+
+
+def test_el_parametro_de_mapa_manda_sobre_el_yaml(workspace):
+    """Un mapa por reto sin duplicar los YAML.
+
+    Reproduce lo que hace __init__ con map_name: sustituye `map` y tira
+    cualquier poses_file explicito, que si no ganaria.
+    """
+    maps, mission_file, _ = workspace
+
+    harness = _Harness({
+        "map": "otro_mapa",
+        "poses_file": "/ruta/vieja.yaml",
+        "maps_dir": maps,
+    })
+
+    harness.mission = dict(harness.mission)
+    harness.mission["map"] = "pista_reto1"
+    harness.mission.pop("poses_file", None)
+
+    assert harness._resolve_poses_file(mission_file) == os.path.join(
+        maps, "pista_reto1.poses.yaml"
+    )
